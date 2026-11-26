@@ -30,11 +30,12 @@
 
 ## Overview
 
-Arena Desktop wraps the full `arena.ai` experience in a native Linux desktop app (`pywebview` + `WebKitGTK 4.1`) and pairs it with local developer tools:
+Arena Desktop wraps `arena.ai` and multi-provider AI tabs in a native Linux desktop app (`pywebview` + `WebKitGTK 4.1`) paired with local developer tools:
 
+- **Workspace-First Multi-Provider Tabs**: Organize tabs by project folder in the left **Workspaces** sidebar and open **Arena (`✦`)**, **Google AI mode (`G`)**, **DeepSeek (`◇`)**, **Claude (`◈`)**, **ChatGPT (`◎`)**, and **Google Antigravity (`▲`)** tabs side-by-side — with live model selection, shared `MEMORY.md` / `AGENTS.md`, and live cross-tab summaries.
 - **All Arena modes**: Battle, Side by Side, Direct, and native **Agent Mode** (plus a built-in Local Agent backend).
 - **All modalities**: Text, Code, Web Search, Image, Video, and Auto, following `arena.ai`'s rules and live model catalog (400+ models).
-- **Workspace Sync & Local Tools**: Grant models controlled access (`ls`, `read_file`, `read_files`, `search`, `write_file`, `edit_file`, `mkdir`, `delete`, `run_cmd`) to a chosen project folder under strict permission modes (`Plan`, `Ask`, `Accept edits`, `Auto`, `Bypass`), with automatic file checkpoints and one-click Undo.
+- **Workspace Sync & Local Tools across Providers**: Grant Arena, DeepSeek, Claude, ChatGPT, and Antigravity controlled access (`ls`, `read_file`, `read_files`, `search`, `write_file`, `edit_file`, `mkdir`, `delete`, `run_cmd`) to a chosen project folder under strict permission modes (`Plan`, `Ask`, `Accept edits`, `Auto`, `Bypass`), with automatic file checkpoints and one-click Undo.
 - **MCP Servers & Agent Gateway**: Connect local STDIO MCP servers (presets, JSON, or CLI commands), toggle official Arena account connectors, and expose selected local MCP tools or your Workspace folder to the native Arena Agent through a temporary, pairing-protected Cloudflare Quick Tunnel (`cloudflared`).
 - **Native Linux Desktop Integration**:
   - **Secret Service encryption** (`ARENA-SECRET-v1:` AES-256-GCM via GNOME Keyring / KDE KWallet `secret-tool`, falling back to `0600` files in headless setups).
@@ -61,7 +62,11 @@ Arena Desktop wraps the full `arena.ai` experience in a native Linux desktop app
 - **Local Security**: Per-instance local API token (`X-Arena-Token`), loopback-only host/origin enforcement, path-traversal protection, and constant-time pairing auth on the Agent Gateway.
 
 <p align="center">
-  <img src="docs/screenshots/agent-mode.png" alt="Agent Mode with Workspace Sync (demo data)" width="900" />
+  <img src="docs/screenshots/agent-mode.png" alt="Side-by-Side Dialogue with Workspace Files & Git Panel (demo data)" width="900" />
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/providers.png" alt="Multi-Provider Settings — DeepSeek, Claude, ChatGPT & Antigravity (demo data)" width="900" />
 </p>
 
 ---

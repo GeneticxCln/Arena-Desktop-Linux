@@ -902,7 +902,7 @@
     loading: false,
     sessionError: null,
     permissionMode: 'acceptEdits',
-    workspace: 'C:\\ArenaWorkspace\\foto-studio',
+    workspace: '/home/demo/projects/foto-studio',
     mode: 'direct',
     modality: 'text',
     chats: [],
@@ -1014,7 +1014,7 @@
       id: 'filesystem', name: 'filesystem', preset_id: 'filesystem', source: 'official', transport: 'stdio',
       enabled: true, running: false, status: 'stopped',
       description: "Demo entry of the official MCP Filesystem. The real process does not run in preview.",
-      command_display: 'npx -y @modelcontextprotocol/server-filesystem C:\\ArenaWorkspace\\foto-studio',
+      command_display: 'npx -y @modelcontextprotocol/server-filesystem /home/demo/projects/foto-studio',
       tools: [], tools_count: 0, error: null
     }];
     demoStore.arenaConnectors = [
@@ -1143,7 +1143,7 @@
     return {
       ok: true,
       demo: true,
-      config_path: 'C:\\Users\\Demo\\.arena-personal\\mcp.json',
+      config_path: '/home/demo/.arena-personal/mcp.json',
       config_error: null,
       servers: demoStore.connectors.map(demoConnectorSummary),
       presets: demoConnectorPresets(),
@@ -1433,7 +1433,7 @@
       return { enabled: Boolean(demoStore.settings?.gateway_enabled), auto: Boolean(demoStore.settings?.gateway_auto),
         chosen: null,
         available: [{ name: 'blender', enabled: true, transport: 'stdio' }, { name: 'roblox_studio', enabled: true, transport: 'stdio' }],
-        workspace: { available: true, folder: 'C:\\Users\\Demo\\Project', exposed: demoStore.settings?.gateway_workspace !== false },
+        workspace: { available: true, folder: '/home/demo/projects/foto-studio', exposed: demoStore.settings?.gateway_workspace !== false },
         session: s || { state: 'off', url: null, servers: [], calls: [], error: null }, demo: true };
     },
     async startGateway() {
@@ -1539,7 +1539,7 @@
     async setPermissionMode(mode) { demoStore.permissionMode = mode; await sleep(150); return { ok: true, mode }; },
     async getWorkspace() { await sleep(80); return { path: demoStore.workspace, workspace: demoStore.workspace, panel_root: demoStore.workspace }; },
     async setWorkspace(path) { demoStore.workspace = path; await sleep(160); return { ok: true, path }; },
-    async clearWorkspace() { demoStore.workspace = 'C:\\Users\\Demo\\ArenaProjects\\workspace'; await sleep(120); return { ok: true, workspace: demoStore.workspace, cleared: true }; },
+    async clearWorkspace() { demoStore.workspace = '/home/demo/projects/workspace'; await sleep(120); return { ok: true, workspace: demoStore.workspace, cleared: true }; },
     async saveWorkspace(chatId, lane) {
       await sleep(220);
       return { ok: true, path: `${demoStore.workspace}\\demo-save-${lane || 'a'}`, demo: true };
@@ -1579,7 +1579,7 @@
     },
     async getConnectors() { await sleep(110); return demoConnectorsPayload(); },
     async reloadConnectors() { await sleep(110); return demoConnectorsPayload(); },
-    async openConnectorConfig() { await sleep(110); return { ok: true, path: 'C:\\Users\\Demo\\.arena-personal\\mcp.json', demo: true }; },
+    async openConnectorConfig() { await sleep(110); return { ok: true, path: '/home/demo/.arena-personal/mcp.json', demo: true }; },
     async installConnectorPreset(presetId, values, connect = true) {
       await sleep(180);
       const preset = demoConnectorPresets().find((item) => item.id === presetId);
