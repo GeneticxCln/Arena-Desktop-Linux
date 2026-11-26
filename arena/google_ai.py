@@ -1248,11 +1248,9 @@ class GoogleEngine:
         try:
             import gi  # type: ignore
             gi.require_version("Gtk", "3.0")
-            from gi.repository import GLib, Gtk  # type: ignore
+            from gi.repository import GLib  # type: ignore
             from webview.platforms import gtk as gtk_backend  # type: ignore
         except Exception:
-            return []
-        if Gtk.main_level() <= 0:
             return []
         view = gtk_backend.BrowserView.instances.get(uid)
         cm = getattr(view, "cookie_manager", None) if view is not None else None

@@ -43,7 +43,7 @@ from arena.models import (sync_models, get_models_for_modality, get_router_model
                           get_auto_agent_model, model_input_support,
                           model_can_receive_attachment, ORG_COLOR_MAP)
 from arena.auth import detect_installed_browsers, parse_cookie_input
-from arena import google_http
+from arena import google_http, providers
 from arena.deep_links import parse_deep_link
 
 import base64
@@ -381,7 +381,7 @@ def _diag_trace(fn):
 
 _API_TOKEN = secrets.token_urlsafe(32)
 
-APP_VERSION = "7.2.0"
+APP_VERSION = "7.3.0"
 
 # One tick of every polling loop that waits on something outside the request
 # (a question the person has to answer, a permission, a preview URL). It is a
@@ -433,7 +433,7 @@ def _save_chat(chat_id: str, title: str, messages: list,
                pending_digest: str = None, parent_id: str = None,
                delegate_guide: bool = None, gateway_session: str = None,
                account_id: str = None, supervisor_of: str = None,
-               workspace_dir: str = None):
+               workspace_dir: str = None, external_url: str = None):
     with _chat_file_lock:
         if not _validate_chat_id(chat_id):
             return
@@ -474,6 +474,7 @@ def _save_chat(chat_id: str, title: str, messages: list,
             "agent_backend": agent_backend or existing.get("agent_backend"),
             "gateway_session": gateway_session if gateway_session is not None else existing.get("gateway_session"),
             "native": native if native is not None else existing.get("native"),
+            "external_url": external_url if external_url is not None else existing.get("external_url"),
             "messages": messages,
         }
         # Atomic replace: readers (chat list, parallel chats) never see a
@@ -896,7 +897,14 @@ def _summarize_tab_for_memory(data: dict) -> str:
         segments.append(f"Outcome: {outcome}")
     if not segments:
         return ""
-    mode_tag = "[Google]" if data.get("source") == "google" else "[Arena]"
+    _SRC_TAG = {
+        "google": "[Google]",
+        "deepseek": "[DeepSeek]",
+        "claude": "[Claude]",
+        "chatgpt": "[ChatGPT]",
+        "antigravity": "[Antigravity]",
+    }
+    mode_tag = _SRC_TAG.get(str(data.get("source") or "").lower(), "[Arena]")
     header = f'- {mode_tag} "{title}"' + (f" ({stamp})" if stamp else "")
     return header + " \u2014 " + " | ".join(segments)
 
@@ -2364,7 +2372,8 @@ def api_modality():
 def api_new_chat():
     global _conversation_history, _current_chat_id
     data = request.get_json(silent=True) or {}
-    track = "google" if str(data.get("track") or "").lower() == "google" else "arena"
+    raw_track = str(data.get("track") or "arena").strip().lower()
+    track = raw_track if raw_track in providers.ALL_TRACK_IDS else "arena"
     client = get_client()
     client.eval_id = None
     client.sources.clear()
@@ -10317,14 +10326,405 @@ def api_google_import():
                     "chats": _list_chats()})
 
 
+@app.route("/api/providers")
+def api_providers_list():
+    return jsonify({"ok": True, "providers": providers.list_providers()})
+
+
+@app.route("/api/providers/<provider_id>/sign-in", methods=["POST"])
+def api_provider_sign_in(provider_id):
+    prov = providers.get_provider(provider_id)
+    if prov is None:
+        return jsonify({"ok": False, "error": f"Unknown provider: {provider_id}"}), 404
+    result = prov.open_sign_in()
+    code = 200 if result.get("ok") else 400
+    return jsonify({**result, "provider": prov.to_public()}), code
+
+
+@app.route("/api/providers/<provider_id>/open", methods=["POST"])
+def api_provider_open(provider_id):
+    prov = providers.get_provider(provider_id)
+    if prov is None:
+        return jsonify({"ok": False, "error": f"Unknown provider: {provider_id}"}), 404
+    data = request.get_json(silent=True) or {}
+    ok = prov.hide() if data.get("hide") else prov.show()
+    return jsonify({"ok": bool(ok), "provider": prov.to_public()}), (200 if ok else 400)
+
+
+@app.route("/api/providers/<provider_id>/verify", methods=["POST"])
+def api_provider_verify(provider_id):
+    prov = providers.get_provider(provider_id)
+    if prov is None:
+        return jsonify({"ok": False, "error": f"Unknown provider: {provider_id}"}), 404
+    st = prov.verify()
+    return jsonify({"ok": True, "provider": prov.to_public(), **st})
+
+
+@app.route("/api/providers/<provider_id>/models")
+def api_provider_models(provider_id):
+    prov = providers.get_provider(provider_id)
+    if prov is None:
+        return jsonify({"ok": False, "error": f"Unknown provider: {provider_id}"}), 404
+    force = str(request.args.get("refresh") or request.args.get("force") or "").lower() in ("1", "true", "yes")
+    try:
+        data = prov.list_models(force=force)
+    except Exception as exc:
+        LOG.exception("provider %s list_models failed", provider_id)
+        return jsonify({"ok": False, "provider": provider_id, "models": [], "error": str(exc)}), 500
+    return jsonify(data)
+
+
+def _provider_track_stream(
+    prov,
+    chat_id: str,
+    message: str,
+    workspace_hint: str = "",
+    model_id: str = "",
+    tools_enabled: Optional[bool] = None,
+):
+    """Stream one turn through a pluggable provider (DeepSeek/Claude/ChatGPT/Antigravity).
+
+    When the tab belongs to a real workspace folder, web providers (DeepSeek,
+    Claude, ChatGPT) run inside Arena Desktop's local folder-tools loop
+    (``agent.LocalTools`` + ``PermissionBroker`` + MCP connectors) so every
+    provider can read, write, edit, search, and run commands in the shared
+    workspace under the user's chosen permission mode.
+    """
+    existing = _load_chat(chat_id) or {}
+    messages = list(existing.get("messages") or [])
+    first = not any(m.get("role") == "assistant" for m in messages)
+    messages.append({"role": "user", "text": message})
+    title = existing.get("title")
+    if not title or title in ("New chat", f"New {prov.name} tab"):
+        title = " ".join(str(message).split())[:52] or f"{prov.name} chat"
+    ws_path = (
+        _norm_workspace_path(workspace_hint)
+        if workspace_hint
+        else (_norm_workspace_path(existing.get("workspace")) or _norm_workspace_path(_chosen_ws()) or "")
+    )
+    ws_root = Path(ws_path) if (ws_path and Path(ws_path).is_dir()) else None
+    conv_url = str(existing.get("external_url") or "")
+    chosen_model = str(model_id or existing.get("model_a") or "").strip()
+    display_name = prov.name
+    if chosen_model and chosen_model.lower() not in ("default", "auto"):
+        display_name = f"{prov.name} · {chosen_model}"
+    mem_hash = existing.get("memory_hash")
+    memory_prefix = ""
+    if _memory_enabled():
+        block, new_hash = _memory_block(ws_path or _chosen_ws(), exclude_chat_id=chat_id)
+        if block and (first or new_hash != mem_hash):
+            memory_prefix = block
+            mem_hash = new_hash
+    use_local_tools = bool(
+        prov.kind == "webview"
+        and ws_root is not None
+        and (tools_enabled is not False)
+    )
+    guide_already_sent = bool(existing.get("tools_guide"))
+    _save_chat(chat_id, title=title, messages=messages, mode="direct",
+               modality="text", model_a=chosen_model or None,
+               source=prov.id, tools_guide=guide_already_sent or use_local_tools,
+               workspace_dir=ws_path or None, external_url=conv_url or None)
+
+    def generate():
+        yield _sse({"type": "meta", "dual": False, "mode": "direct", "modality": "text",
+                    "chat_id": chat_id, "provider": prov.id, "model_a": chosen_model or None,
+                    "names": {"a": display_name, "b": None}})
+        answer = ""
+        reasoning = ""
+        tools_log = []
+        external_url = conv_url
+        error_msg = ""
+        stop_evt = getattr(_tl, "stop_event", None)
+        perm_mode = _perm_mode()
+        local_tools = agent.LocalTools(ws_root) if use_local_tools and ws_root is not None else None
+        mcp_tools: dict = {}
+        mcp_guide = ""
+        conv_ctx = {"chat_id": chat_id, "tools": tools_log, "checkpoints": [], "todos": []}
+
+        if local_tools is not None:
+            yield _sse({"type": "agent", "root": str(ws_root), "mode": perm_mode, "dual": False})
+            try:
+                mcp_tools = CONNECTORS.ensure_started(timeout=15)
+            except Exception as exc:
+                mcp_tools = {}
+                yield _sse({"type": "notice", "text": f"MCP connectors unavailable: {exc}"})
+            mcp_guide = CONNECTORS.guide(mcp_tools) if mcp_tools else ""
+
+        turn_prompt = message
+        turn_memory = memory_prefix
+        if local_tools is not None and not guide_already_sent:
+            turn_prompt = (
+                agent.guide(
+                    ws_root,
+                    permissions.MODES[perm_mode],
+                    agent.MODE_NOTES[perm_mode],
+                    dual=False,
+                    extra_tools=mcp_guide,
+                )
+                + message
+            )
+
+        max_rounds = agent.MAX_ROUNDS if local_tools is not None else 1
+        try:
+            for rnd in range(1, max_rounds + 1):
+                if _stopped() or (stop_evt is not None and stop_evt.is_set()):
+                    break
+                round_text = ""
+                round_err = ""
+                for ev in prov.stream_turn(
+                    chat_id,
+                    turn_prompt,
+                    messages[:-1],
+                    memory_block=turn_memory if rnd == 1 else "",
+                    workspace=ws_path,
+                    conversation_url=external_url,
+                    model=chosen_model,
+                    permission_mode=perm_mode,
+                    stop_event=stop_evt,
+                ):
+                    etype = ev.get("type")
+                    if etype == "text":
+                        chunk = str(ev.get("text") or "")
+                        if chunk:
+                            round_text += chunk
+                            answer += chunk
+                            yield _sse({"type": "text", "text": chunk, "model": "a"})
+                    elif etype == "text_replace":
+                        full = str(ev.get("text") or "")
+                        if full.startswith(round_text):
+                            delta = full[len(round_text):]
+                            if delta:
+                                round_text = full
+                                answer += delta
+                                yield _sse({"type": "text", "text": delta, "model": "a"})
+                        else:
+                            # Replace only the current round's slice of answer
+                            prefix = answer[:-len(round_text)] if round_text else answer
+                            round_text = full
+                            answer = prefix + full
+                            yield _sse({"type": "text", "text": answer, "replace": True, "model": "a"})
+                    elif etype == "reasoning":
+                        chunk = str(ev.get("text") or "")
+                        if chunk:
+                            reasoning += chunk
+                            yield _sse({"type": "reasoning", "text": chunk, "model": "a"})
+                    elif etype == "agent":
+                        yield _sse({"type": "agent", "stage": str(ev.get("stage") or "")})
+                    elif etype == "tool":
+                        tools_log.append(ev)
+                        yield _sse({"type": "tool", "tool": ev.get("tool") or "tool",
+                                    "summary": ev.get("summary") or ""})
+                    elif etype == "meta_update":
+                        if ev.get("external_url"):
+                            external_url = str(ev["external_url"])
+                    elif etype == "error":
+                        round_err = str(ev.get("message") or f"{prov.name} failed.")
+                        error_msg = round_err
+                        yield _sse({
+                            "type": "error",
+                            "code": str(ev.get("code") or prov.id),
+                            "message": round_err,
+                            "provider": prov.id,
+                            "window": bool(ev.get("open_window")),
+                        })
+
+                if local_tools is None or round_err or _stopped():
+                    break
+                calls = agent.parse_tool_calls(round_text)
+                if not calls:
+                    break
+
+                perm_mode = _perm_mode()
+                outcomes = []
+                for call in calls:
+                    if _stopped() or (stop_evt is not None and stop_evt.is_set()):
+                        outcomes.append((call, "skipped: the user pressed Stop", ""))
+                        continue
+                    cname = call["name"]
+                    if cname == "set_todos":
+                        tparams = call.get("params") or {}
+                        raw_t = str(tparams.get("todos") or tparams.get("items") or tparams.get("content") or "")
+                        items = _parse_todos(raw_t)
+                        done_n = sum(1 for it in items if it["status"] == "done")
+                        info = {"tool": "set_todos", "model": "a", "name": "Checklist",
+                                "summary": f"Checklist: {done_n}/{len(items)} done",
+                                "inside": True, "path": raw_t[:400]}
+                        yield _sse(dict(info, type="tool_call"))
+                        ok = bool(items)
+                        status = "ok" if ok else "error"
+                        output = f"Checklist updated: {done_n}/{len(items)} done." if ok else "set_todos requires <todos>."
+                        if ok:
+                            conv_ctx["todos"] = items
+                            yield _sse({"type": "todos", "lane": "a", "model": "a",
+                                        "chat_id": chat_id, "items": items})
+                        outcomes.append((call, status, output))
+                        tools_log.append({"tool": "set_todos", "summary": info["summary"], "lane": "a",
+                                          "diff": None, "ok": ok, "status": status, "todos": items})
+                        yield _sse({"type": "tool_result", "model": "a", "tool": "set_todos",
+                                    "ok": ok, "status": status, "output": output})
+                        continue
+
+                    if cname == "read_files":
+                        rparams = call.get("params") or {}
+                        raw_paths = []
+                        for key in ("paths", "files"):
+                            chunk = str(rparams.get(key) or "")
+                            raw_paths += [ln.strip() for ln in chunk.replace(",", "\n").splitlines() if ln.strip()]
+                        paths = list(dict.fromkeys(raw_paths))[:8] or ["."]
+                        info = dict(local_tools.describe({"name": "read_file", "params": {"path": paths[0]}}), model="a")
+                        info["tool"] = "read_files"
+                        info["summary"] = f"Read {len(paths)} file(s)"
+                        yield _sse(dict(info, type="tool_call"))
+                        verdict = yield from _permit(perm_mode, "read_file", info)
+                        if verdict == "allow":
+                            parts_out = []
+                            all_ok = True
+                            for p_rel in paths:
+                                ok_i, out_i = local_tools.run({"name": "read_file", "params": {"path": p_rel}})
+                                if not ok_i:
+                                    all_ok = False
+                                parts_out.append(f"=== {p_rel} ===\n{out_i}")
+                            ok, status, output = all_ok, ("ok" if all_ok else "error"), "\n\n".join(parts_out)
+                        else:
+                            ok, output = False, ""
+                            status = ("blocked: plan mode is read-only" if perm_mode == "plan"
+                                      else "blocked by safety rules") if verdict == "blocked" else "denied by the user"
+                        outcomes.append((call, status, output))
+                        tools_log.append({"tool": "read_files", "summary": info["summary"], "lane": "a",
+                                          "diff": None, "ok": ok, "status": status})
+                        yield _sse({"type": "tool_result", "model": "a", "tool": "read_files",
+                                    "ok": ok, "status": status, "output": (output or "")[:4000]})
+                        continue
+
+                    mcp_entry = mcp_tools.get(cname)
+                    mcp_args = None
+                    mcp_error = None
+                    if mcp_entry:
+                        try:
+                            mcp_args = agent.coerce_mcp_arguments(call, mcp_entry.get("input_schema"))
+                            args_display = json.dumps(mcp_args, ensure_ascii=False)[:4000]
+                        except ValueError as exc:
+                            mcp_error = str(exc)
+                            args_display = str(call.get("params") or {})[:4000]
+                        info = {
+                            "tool": cname, "model": "a", "mcp": True,
+                            "server": mcp_entry["server"], "mcp_tool": mcp_entry["tool"],
+                            "summary": f"MCP {mcp_entry['server']}: {mcp_entry['tool']}",
+                            "rel": mcp_entry["server"], "path": args_display, "inside": False,
+                        }
+                    else:
+                        info = dict(local_tools.describe(call), model="a")
+                    yield _sse(dict(info, type="tool_call"))
+                    if mcp_entry:
+                        if mcp_error:
+                            ok, output, status = False, mcp_error, "error"
+                        else:
+                            annotations = mcp_entry.get("annotations") or {}
+                            perm_tool = "read_file" if annotations.get("readOnlyHint") is True else "run_cmd"
+                            verdict = yield from _permit(perm_mode, perm_tool, info)
+                            if verdict == "allow":
+                                try:
+                                    output = CONNECTORS.call(cname, mcp_args or {})
+                                    ok = not str(output).startswith(("MCP Error:", "Error: MCP tool"))
+                                except Exception as exc:
+                                    ok, output = False, f"{type(exc).__name__}: {exc}"
+                                status = "ok" if ok else "error"
+                            else:
+                                ok, output = False, ""
+                                status = ("blocked: plan mode is read-only" if perm_mode == "plan"
+                                          else "blocked by safety rules") if verdict == "blocked" else "denied by the user"
+                    elif cname not in permissions.KIND:
+                        ok, output = local_tools.run(call)
+                        status = "error"
+                    else:
+                        verdict = yield from _permit(perm_mode, cname, info)
+                        if verdict == "allow":
+                            if cname in ("write_file", "edit_file", "delete"):
+                                _checkpoint_capture(conv_ctx, "a", info)
+                            ok, output = local_tools.run(call)
+                            status = "ok" if ok else "error"
+                        else:
+                            ok, output = False, ""
+                            status = ("blocked: plan mode is read-only" if perm_mode == "plan"
+                                      else "blocked by safety rules") if verdict == "blocked" else "denied by the user"
+                    outcomes.append((call, status, output))
+                    tools_log.append({"tool": cname, "summary": info.get("summary"), "lane": "a",
+                                      "diff": info.get("diff"), "ok": ok, "status": status})
+                    yield _sse({"type": "tool_result", "model": "a", "tool": cname,
+                                "rel": info.get("rel"), "ok": ok, "status": status,
+                                "output": (output or "")[:4000]})
+
+                if _stopped() or rnd == max_rounds:
+                    if rnd == max_rounds and not _stopped():
+                        yield _sse({"type": "notice", "text": f"Stopped after {max_rounds} tool rounds. Send 'continue' to keep going."})
+                    break
+                turn_prompt = agent.format_results(outcomes, artifact_dir=ws_root / agent.ARTIFACTS_DIR)
+                if rnd == max_rounds - 1:
+                    turn_prompt += ("\n[Arena Desktop] You are near the tool-round limit for this reply. "
+                                    "Finish the current step now and answer with your final summary; do not start new tool work.")
+                answer += "\n\n"
+                yield _sse({"type": "round", "n": rnd + 1})
+        except Exception as exc:
+            LOG.exception("provider %s turn failed", prov.id)
+            error_msg = f"{prov.name} error: {exc}"
+            yield _sse({"type": "error", "code": prov.id, "message": error_msg,
+                        "provider": prov.id})
+        if answer or reasoning or tools_log or error_msg:
+            assistant = {"role": "assistant", "text": answer, "names": {"a": display_name, "b": None}}
+            if reasoning:
+                assistant["reasoning"] = reasoning
+            if tools_log:
+                assistant["tools"] = tools_log
+            if error_msg and not answer:
+                assistant["error"] = error_msg
+            messages.append(assistant)
+            try:
+                _save_chat(chat_id, title=title, messages=messages, mode="direct",
+                           modality="text", model_a=chosen_model or None,
+                           source=prov.id, tools_guide=guide_already_sent or use_local_tools,
+                           memory_hash=mem_hash, workspace_dir=ws_path or None,
+                           external_url=external_url or None)
+            except Exception:
+                LOG.exception("provider %s chat save failed", prov.id)
+        yield _sse({"type": "done", "text_a": answer, "text_b": "", "dual": False,
+                    "chat_id": chat_id, "provider": prov.id,
+                    "history_chars": _history_chars(messages)})
+
+    return Response(
+        stream_with_context(_sse_wrap(generate(), chat_id=chat_id)),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 def _api_chat_impl():
     global _current_chat_id, _conversation_history, _ui_mode, _ui_modality
     data = request.get_json(silent=True) or {}
     # Work out the track once per request; helpers below read it.
-    _set_track("google" if data.get("track") == "google" else "arena")
+    req_track = str(data.get("track") or "arena").strip().lower()
+    _set_track("google" if req_track == "google" else "arena")
     message = (data.get("message") or "").strip()
     if not message:
         return jsonify({"error": "Empty message"}), 400
+    extra_prov = providers.get_provider(req_track)
+    if extra_prov is not None:
+        pid_chat = data.get("chat_id") or str(uuid.uuid4())
+        if not _validate_chat_id(pid_chat):
+            return jsonify({"error": "Invalid chat ID", "code": "bad_request"}), 400
+        probe = _load_chat(pid_chat) or {}
+        if probe and probe.get("source") and probe.get("source") != extra_prov.id:
+            return jsonify({"error": f"This chat belongs to another provider. Start a new {extra_prov.name} tab.",
+                            "code": "wrong_track"}), 400
+        if _chat_generating(pid_chat):
+            return jsonify({"error": "This chat is still working on the previous message.",
+                            "code": "busy"}), 409
+        req_model = str(data.get("model_id") or data.get("model_a") or data.get("model") or "").strip()
+        req_tools = data.get("tools")
+        return _provider_track_stream(extra_prov, pid_chat, message,
+                                      workspace_hint=str(data.get("workspace") or ""),
+                                      model_id=req_model,
+                                      tools_enabled=None if req_tools is None else bool(req_tools))
     client = get_client()
     if data.get("track") == "google":
         google_id = data.get("chat_id") or str(uuid.uuid4())
@@ -12094,6 +12494,11 @@ def shutdown_runtime() -> dict:
         report["connectors_shutdown"] = True
     except Exception:
         LOG.exception("shutdown: connectors shutdown failed")
+    try:
+        providers.shutdown_all()
+        report["providers_shutdown"] = True
+    except Exception:
+        LOG.exception("shutdown: providers shutdown failed")
     try:
         with _preview_lock:
             srv = _preview.get("server")

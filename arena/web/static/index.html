@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <meta name="description" content="Arena Desktop — an unofficial local desktop client for arena.ai. A desktop interface over a local Flask + pywebview backend.">
   <title>Arena Desktop</title>
-  <link rel="stylesheet" href="/static/style.css?v=7.2.0" onerror="this.onerror=null;this.href='static/style.css?v=7.2.0'">
+  <link rel="stylesheet" href="/static/style.css?v=7.3.0" onerror="this.onerror=null;this.href='static/style.css?v=7.3.0'">
 </head>
 <body>
   <a class="skip-link" href="#prompt">Skip to the message box</a>
@@ -153,6 +153,34 @@
                 <span class="ws-new-tab-copy">
                   <strong>Google AI mode</strong>
                   <span>Google AI search + optional Supervisor</span>
+                </span>
+              </button>
+              <button class="ws-new-tab-option" type="button" role="menuitem" data-new-tab-track="deepseek">
+                <span class="ws-mode-badge is-deepseek" aria-hidden="true">◇</span>
+                <span class="ws-new-tab-copy">
+                  <strong>DeepSeek</strong>
+                  <span>chat.deepseek.com signed-in window</span>
+                </span>
+              </button>
+              <button class="ws-new-tab-option" type="button" role="menuitem" data-new-tab-track="claude">
+                <span class="ws-mode-badge is-claude" aria-hidden="true">◈</span>
+                <span class="ws-new-tab-copy">
+                  <strong>Claude</strong>
+                  <span>claude.ai signed-in window</span>
+                </span>
+              </button>
+              <button class="ws-new-tab-option" type="button" role="menuitem" data-new-tab-track="chatgpt">
+                <span class="ws-mode-badge is-chatgpt" aria-hidden="true">◎</span>
+                <span class="ws-new-tab-copy">
+                  <strong>ChatGPT</strong>
+                  <span>chatgpt.com signed-in window</span>
+                </span>
+              </button>
+              <button class="ws-new-tab-option" type="button" role="menuitem" data-new-tab-track="antigravity">
+                <span class="ws-mode-badge is-antigravity" aria-hidden="true">▲</span>
+                <span class="ws-new-tab-copy">
+                  <strong>Antigravity</strong>
+                  <span>Local Google Antigravity runtime</span>
                 </span>
               </button>
             </div>
@@ -408,6 +436,6 @@
       }, 12000);
     })();
   </script>
-  <script src="/static/app.js?v=7.2.0" defer onerror="this.onerror=null;this.src='static/app.js?v=7.2.0'"></script>
+  <script src="/static/app.js?v=7.3.0" defer onerror="this.onerror=null;this.src='static/app.js?v=7.3.0'"></script>
 </body>
 </html>

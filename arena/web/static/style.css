@@ -4995,6 +4995,115 @@ body[data-track="google"] .ws-tab.is-active {
   background: rgba(66, 133, 244, 0.22);
   color: #8ab4f8;
 }
+.ws-mode-badge.is-deepseek {
+  background: rgba(56, 189, 248, 0.2);
+  color: #7dd3fc;
+}
+.ws-mode-badge.is-claude {
+  background: rgba(245, 158, 11, 0.22);
+  color: #fcd34d;
+}
+.ws-mode-badge.is-chatgpt {
+  background: rgba(16, 185, 129, 0.22);
+  color: #6ee7b7;
+}
+.ws-mode-badge.is-antigravity {
+  background: rgba(236, 72, 153, 0.22);
+  color: #f9a8d4;
+}
+
+/* Hide Arena-only mode/integration pickers on web-provider and Antigravity tabs (keep .model-chips visible for provider model selection!). */
+body[data-track="deepseek"] .modality-chip,
+body[data-track="deepseek"] .mode-chip,
+body[data-track="deepseek"] .model-strip,
+body[data-track="deepseek"] .agent-integration-chip,
+body[data-track="claude"] .modality-chip,
+body[data-track="claude"] .mode-chip,
+body[data-track="claude"] .model-strip,
+body[data-track="claude"] .agent-integration-chip,
+body[data-track="chatgpt"] .modality-chip,
+body[data-track="chatgpt"] .mode-chip,
+body[data-track="chatgpt"] .model-strip,
+body[data-track="chatgpt"] .agent-integration-chip,
+body[data-track="antigravity"] .modality-chip,
+body[data-track="antigravity"] .mode-chip,
+body[data-track="antigravity"] .model-strip,
+body[data-track="antigravity"] .agent-integration-chip {
+  display: none !important;
+}
+
+.provider-model-chip {
+  border-color: rgba(255, 255, 255, .14);
+}
+.provider-model-chip .ws-tab-badge {
+  width: 16px;
+  height: 16px;
+  font-size: 10px;
+}
+.provider-model-live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #6ee7b7;
+  flex: 0 0 auto;
+}
+
+/* Settings -> Providers cards */
+.providers-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+.provider-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid #2b2e35;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.025);
+}
+.provider-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.provider-card-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.provider-card-title {
+  font-size: 13.5px;
+  font-weight: 650;
+  color: #f5f4f0;
+}
+.provider-card-desc {
+  font-size: 11.5px;
+  color: #93908a;
+  margin-top: 2px;
+}
+.provider-card-status {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  color: #b8b5ae;
+}
+.provider-card-status.is-ready {
+  background: rgba(63, 185, 80, 0.16);
+  color: #7ee787;
+}
+.provider-card-detail {
+  font-size: 11.5px;
+  color: #8f8c86;
+}
+.provider-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
 
 /* ---- + New Tab button + Arena / Google mode chooser menu ---- */
 .ws-new-tab-wrap {

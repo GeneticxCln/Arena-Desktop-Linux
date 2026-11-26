@@ -1,3 +1,31 @@
+## Arena Desktop v7.3.0 (Native Linux)
+
+Adds pluggable **Multi-Provider Tabs** (**DeepSeek**, **Claude**, **ChatGPT**, and **Google Antigravity**), live per-provider AI model retrieval & selection, and shared-workspace read/write tools with full `PermissionBroker` controls across every provider.
+
+### Highlights in 7.3.0
+
+- **Multi-Provider Tabs (`arena/providers/`)**:
+  - **DeepSeek (`◇`)**, **Claude (`◈`)**, and **ChatGPT (`◎`)** run inside persistent, signed-in Linux WebKitGTK windows (zero CLI tools, zero API keys, manual sign-in and manual human verification only).
+  - **Google Antigravity (`▲`)** connects to your local `agy` CLI or `google-antigravity` Python SDK inside the active workspace.
+  - Added **Settings → Providers** panel (`GET /api/providers`, `/api/providers/<id>/sign-in`, `/open`, `/verify`, `/models`) and expanded **`+ New tab ▾`** with all six tab providers.
+- **Silent Background Streaming & Live Model Discovery**:
+  - Native WebKit2GTK `evaluate_javascript` calls with exact UTF-8 byte lengths (fixing both strict-CSP `EvalError` on ChatGPT/Claude and `pywebview`'s UTF-8 script truncation bug).
+  - **Claude** streams directly through `claude.ai`'s signed-in same-origin SSE API (`/api/organizations` → `/chat_conversations` → `/completion`) silently in the background, and retrieves real account models from `/api/bootstrap`, `/api/account`, and the live selector.
+  - **ChatGPT** retrieves real account models from `/backend-api/models` and captures live SSE deltas via an observation-only `fetch()` clone hook + `/backend-api/conversation/<id>` hidden-window fallback.
+  - **DeepSeek** discovers live `chat.deepseek.com` modes (Default, DeepThink, Search), uses composer-scoped submission, and captures live SSE reasoning/answer streams + `/api/v0/chat/history_messages` fallback.
+  - **Antigravity** retrieves the full live local model catalog from `agy models` and forwards `--model` and permission-mode flags (`--mode plan`, `--mode accept-edits`, `--mode auto`, `--dangerously-skip-permissions`).
+  - Added an interactive **per-provider model selector chip** in the bottom composer with search, org icons, live indicator, and on-demand refresh.
+- **Shared Workspace Read/Write & Permissions Across All Providers**:
+  - All providers inside a workspace folder share `MEMORY.md`, `AGENTS.md`, and live cross-tab sibling summaries (`[DeepSeek]`, `[Claude]`, `[ChatGPT]`, `[Antigravity]`, `[Arena]`, `[Google]`).
+  - DeepSeek, Claude, and ChatGPT tabs inside a workspace folder now run Arena Desktop's multi-round `agent.LocalTools` loop (`ls`, `read_file`, `read_files`, `search`, `write_file`, `edit_file`, `mkdir`, `delete`, `run_cmd`, `set_todos`, plus local MCP connectors) governed by **`PermissionBroker`** (`Plan`, `Ask`, `Accept edits`, `Auto`, `Bypass`) with live tool cards, diffs, and checkpoints.
+
+### Verification
+
+- Static checks (`bash -n`, `node --check`, `python -m compileall`, static UI hygiene) pass.
+- Non-browser test suite: **474 passed** on Linux with isolated test storage.
+
+---
+
 ## Arena Desktop v7.2.0 (Native Linux)
 
 Introduces the new Workspace-First UI (left Workspaces sidebar + IDE-style top tab bar with per-tab Arena/Google mode selection) and fixes Linux WebKitGTK Google AI mode sign-in & cookie export end-to-end.

@@ -440,6 +440,20 @@ def main():
                                        x=140, y=140, hidden=True, background_color="#242422")
     google_ai.ENGINE.attach(google_win, main_win)
     web_app.GOOGLE_ENGINE = google_ai.ENGINE
+    from arena import providers as _providers
+
+    def _create_provider_window(title: str, url: str, hidden: bool = True):
+        win = webview.create_window(
+            title, url, width=1120, height=780, x=150, y=130,
+            hidden=hidden, background_color="#18191c",
+        )
+        try:
+            diag.watch_object(win, title, ["show", "hide", "restore", "load_url", "evaluate_js", "get_cookies"])
+        except Exception:
+            pass
+        return win
+
+    _providers.set_window_factory(_create_provider_window)
     for win, label in ((main_win, "main-window"), (engine_win, "arena-window"),
                        (google_win, "google-window")):
         try:

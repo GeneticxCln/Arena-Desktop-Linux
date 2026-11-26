@@ -11,11 +11,11 @@ of Edge WebView2.
 ## Status
 
 Verified on **CachyOS (Arch-based), KDE Plasma Wayland, Python 3.14,
-WebKitGTK 2.54** (`v7.2.0`):
+WebKitGTK 2.54** (`v7.3.0`):
 
 - a ~86 MB single-file ELF binary starts, serves the local UI and loads
-  `arena.ai` in the engine window;
-- the non-browser test suite passes (`465 passed`);
+  `arena.ai` plus multi-provider WebKitGTK windows;
+- the non-browser test suite passes (`474 passed`);
 - XDG deep links (`arenadesktop://open`, `new`, `ask`, `chat`) register on
   first launch of the built binary.
 

@@ -167,7 +167,14 @@ def _glib_idle_add(fn) -> bool:
         import gi  # type: ignore
         gi.require_version("Gtk", "3.0")
         from gi.repository import GLib, Gtk  # type: ignore
-        if Gtk.main_level() <= 0:
+        has_loop = Gtk.main_level() > 0
+        if not has_loop:
+            try:
+                from webview.platforms import gtk as gtk_backend  # type: ignore
+                has_loop = bool(getattr(gtk_backend, "_app", None) or gtk_backend.BrowserView.instances)
+            except Exception:
+                has_loop = False
+        if not has_loop:
             return False
 
         def _once():

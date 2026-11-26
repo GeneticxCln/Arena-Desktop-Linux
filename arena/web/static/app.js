@@ -603,6 +603,11 @@
     addWorkspace(path, name = '') { return this.request('/api/workspaces', { method: 'POST', body: name ? { path, name } : { path } }); },
     switchWorkspace(id) { return this.request('/api/workspaces/switch', { method: 'POST', body: { id } }); },
     removeWorkspace(id) { return this.request(`/api/workspaces/${encodeURIComponent(id)}/remove`, { method: 'POST', body: {} }); },
+    getProviders() { return this.request('/api/providers'); },
+    providerSignIn(id) { return this.request(`/api/providers/${encodeURIComponent(id)}/sign-in`, { method: 'POST', body: {} }); },
+    providerOpen(id, body = {}) { return this.request(`/api/providers/${encodeURIComponent(id)}/open`, { method: 'POST', body }); },
+    providerVerify(id) { return this.request(`/api/providers/${encodeURIComponent(id)}/verify`, { method: 'POST', body: {} }); },
+    providerModels(id, force = false) { return this.request(`/api/providers/${encodeURIComponent(id)}/models${force ? '?refresh=1' : ''}`); },
     getArenaChats() { return this.request('/api/arena-chats?limit=50'); },
     openArenaChat(id, type, title) { return this.request(`/api/arena-chats/${encodeURIComponent(id)}/open`, { method: 'POST', body: { type, title } }); },
     archiveArenaChat(id, type) { return this.request(`/api/arena-chats/${encodeURIComponent(id)}/archive`, { method: 'POST', body: { type } }); },
@@ -1195,7 +1200,7 @@
         permission_mode: demoStore.permissionMode,
         workspace: demoStore.workspace,
         workspace_chosen: true,
-        app_version: '7.2.0',
+        app_version: '7.3.0',
         pending_permissions: demoStore.pendingPermissions.length,
         demo: true
       };
@@ -1698,6 +1703,23 @@
       demoStore.activeWorkspacePath = '';
       return { ok: true, workspaces: list, active_id: 'general', active_path: '', demo: true };
     },
+    async getProviders() {
+      await sleep(40);
+      return {
+        ok: true,
+        providers: [
+          { id: 'deepseek', name: 'DeepSeek', short_name: 'DeepSeek', badge: '\u25c7', badge_class: 'is-deepseek', description: 'chat.deepseek.com signed-in window', kind: 'webview', available: false, signed_in: false, open: false, detail: 'Demo mode' },
+          { id: 'claude', name: 'Claude', short_name: 'Claude', badge: '\u25c8', badge_class: 'is-claude', description: 'claude.ai signed-in window', kind: 'webview', available: false, signed_in: false, open: false, detail: 'Demo mode' },
+          { id: 'chatgpt', name: 'ChatGPT', short_name: 'ChatGPT', badge: '\u25ce', badge_class: 'is-chatgpt', description: 'chatgpt.com signed-in window', kind: 'webview', available: false, signed_in: false, open: false, detail: 'Demo mode' },
+          { id: 'antigravity', name: 'Antigravity', short_name: 'Antigravity', badge: '\u25b2', badge_class: 'is-antigravity', description: 'Local Google Antigravity runtime', kind: 'local_agent', available: false, signed_in: false, open: false, detail: 'Demo mode' }
+        ],
+        demo: true
+      };
+    },
+    async providerSignIn() { await sleep(40); return { ok: true, demo: true }; },
+    async providerOpen() { await sleep(40); return { ok: true, demo: true }; },
+    async providerVerify() { await sleep(40); return { ok: true, signed_in: false, demo: true }; },
+    async providerModels(id) { await sleep(40); return { ok: true, provider: id, live: false, active_model: '', models: [], demo: true }; },
     async openNativeAgent() { await sleep(160); return { ok: true, demo: true, url: 'https://arena.ai/agent' }; },
     async googleStatus() { await sleep(60); return { ok: true, desktop: false, signed_in: false, accounts: [], prefs: { hl: 'en', show_window: false, keep_citations: true, supervisor: false, supervisor_steps: 6 }, demo: true }; },
     async googleVerify() { await sleep(80); return { ok: true, signed_in: false, email: '', name: '', accounts: [], demo: true }; },
@@ -2049,6 +2071,11 @@ You can start with a more structured option: one script, short captions, and a c
     workspaces: [{ id: 'general', name: 'General', path: '', builtin: true, chat_count: 0 }],
     activeWorkspaceId: 'general',
     activeWorkspacePath: '',
+    providers: [],
+    providerModels: {},
+    providerModelChoice: (() => {
+      try { return JSON.parse(window.localStorage.getItem('ap-provider-models') || '{}') || {}; } catch { return {}; }
+    })(),
     closedTabIds: new Set(),
     openTabMeta: {},
     newTabMenuOpen: false,
@@ -2341,8 +2368,8 @@ You can start with a more structured option: one script, short captions, and a c
       modality: validModality(raw.modality),
       agent_backend: raw.agent_backend === 'arena' ? 'arena' : raw.agent_backend === 'local' ? 'local' : null,
       pinned: Boolean(raw.pinned ?? raw.starred),
-      source: raw.source === 'arena' ? 'arena'
-        : raw.source === 'google' ? 'google'
+      source: ['arena', 'google', 'deepseek', 'claude', 'chatgpt', 'antigravity'].includes(raw.source)
+        ? raw.source
         : 'local',
       workspace: typeof raw.workspace === 'string' ? raw.workspace : '',
       eval_id: typeof raw.eval_id === 'string' ? raw.eval_id : null,
@@ -3502,8 +3529,159 @@ You can start with a more structured option: one script, short captions, and a c
   /* Chat list                                                             */
   /* ---------------------------------------------------------------------- */
   // ----- tracks: Arena (arena.ai) vs Google AI mode -----
-  // Two independent worlds: own chats, own composer controls, own theme.
-  // Arena keeps the full toolbar; Google AI mode keeps Agent integration only.
+  const EXTRA_TRACK_META = {
+    deepseek: { label: 'DeepSeek', badge: '\u25c7', cls: 'is-deepseek', title: 'Deep<em>Seek</em>', lede: 'Chat with DeepSeek (chat.deepseek.com) inside your signed-in Linux WebKitGTK session, sharing workspace memory with sibling tabs.', note: 'Pure WebKitGTK signed-in window · no CLI or API key required', placeholder: 'Ask DeepSeek…' },
+    claude: { label: 'Claude', badge: '\u25c8', cls: 'is-claude', title: '<em>Claude</em> AI', lede: 'Chat with Claude (claude.ai) inside your signed-in Linux WebKitGTK session, sharing workspace memory with sibling tabs.', note: 'Pure WebKitGTK signed-in window · no CLI or API key required', placeholder: 'Ask Claude…' },
+    chatgpt: { label: 'ChatGPT', badge: '\u25ce', cls: 'is-chatgpt', title: 'Chat<em>GPT</em>', lede: 'Chat with ChatGPT (chatgpt.com) inside your signed-in Linux WebKitGTK session, sharing workspace memory with sibling tabs.', note: 'Pure WebKitGTK signed-in window · no CLI or API key required', placeholder: 'Ask ChatGPT…' },
+    antigravity: { label: 'Antigravity', badge: '\u25b2', cls: 'is-antigravity', title: 'Google <em>Antigravity</em>', lede: 'Run your local Google Antigravity agent directly inside this workspace, sharing MEMORY.md and cross-tab summaries.', note: 'Local Antigravity runtime (auto-detects agy CLI or google-antigravity SDK)', placeholder: 'Ask Antigravity…' }
+  };
+  const ALL_VALID_TRACKS = ['arena', 'google', ...Object.keys(EXTRA_TRACK_META)];
+
+  function isExtraProviderTrack(track) {
+    return Boolean(EXTRA_TRACK_META[track]);
+  }
+
+  function trackBadgeInfo(track) {
+    if (track === 'google') return { badge: 'G', cls: 'is-google', label: 'Google AI mode' };
+    if (EXTRA_TRACK_META[track]) {
+      const m = EXTRA_TRACK_META[track];
+      return { badge: m.badge, cls: m.cls, label: m.label };
+    }
+    return { badge: '\u2726', cls: 'is-arena', label: 'Arena mode' };
+  }
+
+  async function loadProviders() {
+    try {
+      const data = await API.getProviders();
+      if (Array.isArray(data?.providers)) state.providers = data.providers;
+    } catch { /* optional */ }
+  }
+
+  function providerModelEntry(track) {
+    return state.providerModels[track] || { models: [], active_model: '', live: false, loading: false, error: null };
+  }
+
+  function selectedProviderModel(track) {
+    const entry = providerModelEntry(track);
+    const list = Array.isArray(entry.models) ? entry.models : [];
+    const chosenId = state.providerModelChoice[track];
+    if (chosenId !== undefined && chosenId !== null) {
+      const found = list.find((m) => String(m.id) === String(chosenId));
+      if (found) return found;
+    }
+    if (entry.active_model) {
+      const active = list.find((m) => String(m.id) === String(entry.active_model));
+      if (active) return active;
+    }
+    return list[0] || null;
+  }
+
+  function selectProviderModel(track, modelId) {
+    state.providerModelChoice[track] = String(modelId ?? '');
+    try { window.localStorage.setItem('ap-provider-models', JSON.stringify(state.providerModelChoice)); } catch { /* optional */ }
+    renderModelChips();
+    renderComposerContext();
+  }
+
+  async function loadProviderModels(track, { force = false, quiet = true } = {}) {
+    if (!isExtraProviderTrack(track)) return [];
+    const cur = providerModelEntry(track);
+    if (!force && cur.loading) return cur.models;
+    if (!force && cur.models.length && cur.live) return cur.models;
+    state.providerModels[track] = { ...cur, loading: true, error: null };
+    if (state.track === track) { renderModelChips(); renderComposerContext(); }
+    try {
+      const res = await API.providerModels(track, force);
+      const list = Array.isArray(res?.models) ? res.models : [];
+      state.providerModels[track] = {
+        models: list,
+        active_model: String(res?.active_model || ''),
+        live: Boolean(res?.live),
+        loading: false,
+        error: res?.ok === false ? String(res?.error || 'Could not load models') : null,
+      };
+      if (list.length && (state.providerModelChoice[track] === undefined || !list.some((m) => String(m.id) === String(state.providerModelChoice[track])))) {
+        const def = list.find((m) => m.active) || list.find((m) => String(m.id) === String(res?.active_model)) || list[0];
+        if (def) state.providerModelChoice[track] = String(def.id);
+      }
+      if (state.track === track) { renderModelChips(); renderComposerContext(); }
+      return list;
+    } catch (error) {
+      state.providerModels[track] = { ...cur, loading: false, error: errorMessage(error) };
+      if (state.track === track) { renderModelChips(); renderComposerContext(); }
+      if (!quiet) toast(errorMessage(error), 'error', `${EXTRA_TRACK_META[track]?.label || track} models`);
+      return [];
+    }
+  }
+
+  function openProviderModelPicker(track, trigger) {
+    const meta = EXTRA_TRACK_META[track];
+    if (!meta || !trigger) return;
+    const content = el('div');
+    const searchWrap = el('div', { class: 'popover-search' }, iconEl('search'));
+    const searchInput = el('input', { type: 'search', placeholder: `Filter ${meta.label} models`, autocomplete: 'off', 'aria-label': `Filter ${meta.label} models` });
+    searchWrap.appendChild(searchInput);
+    content.appendChild(searchWrap);
+    const list = el('div', { class: 'popover-list', role: 'listbox', 'aria-label': `${meta.label} models` });
+    content.appendChild(list);
+    const foot = el('div', { class: 'popover-foot' });
+    content.appendChild(foot);
+
+    const renderOptions = () => {
+      clear(list);
+      clear(foot);
+      const entry = providerModelEntry(track);
+      const models = Array.isArray(entry.models) ? entry.models : [];
+      if (entry.loading && !models.length) {
+        list.appendChild(el('div', { class: 'popover-empty' }, el('span', { class: 'loading-block' }, el('span', { class: 'mini-spinner' }), el('span', { text: `Loading ${meta.label} models…` }))));
+      } else {
+        const q = searchInput.value.trim().toLocaleLowerCase('en');
+        const filtered = models.filter((m) => !q || `${m.name} ${m.id} ${m.org || ''} ${m.description || ''}`.toLocaleLowerCase('en').includes(q));
+        if (!filtered.length) {
+          list.appendChild(el('div', { class: 'popover-empty', text: models.length ? 'No matching models.' : `No models retrieved from ${meta.label} yet.` }));
+        } else {
+          const current = selectedProviderModel(track);
+          filtered.forEach((m) => {
+            const caps = Array.isArray(m.capabilities) ? m.capabilities : [];
+            const descParts = [m.org || meta.label, ...caps.slice(0, 3)];
+            if (m.description) descParts.push(m.description);
+            const option = popoverOption({
+              title: m.name || m.id,
+              desc: descParts.filter(Boolean).join(' · '),
+              icon: '',
+              selected: current && String(current.id) === String(m.id),
+              tag: m.active ? 'active' : '',
+              onClick: () => {
+                selectProviderModel(track, m.id);
+                closePopover();
+              }
+            });
+            const orgKey = inferOrgFromModelName(`${m.org || ''} ${m.name || ''} ${m.id || ''}`) || (track === 'deepseek' ? 'deepseek' : track === 'claude' ? 'anthropic' : track === 'chatgpt' ? 'openai' : 'google');
+            const avatar = el('span', { class: 'model-avatar has-logo' });
+            avatar.innerHTML = orgLogoSvg(orgKey);
+            option.insertBefore(avatar, option.firstChild);
+            list.appendChild(option);
+          });
+        }
+      }
+      const statusText = entry.loading
+        ? 'Refreshing…'
+        : entry.live
+          ? `Live · ${models.length} model${models.length === 1 ? '' : 's'}`
+          : (track === 'antigravity' ? 'Default list' : 'Default · open window & refresh for live models');
+      foot.appendChild(el('span', { class: 'setting-desc', style: { fontSize: '11px', margin: '0' }, text: statusText }));
+      foot.appendChild(el('button', {
+        class: 'button button-small button-quiet', type: 'button', disabled: Boolean(entry.loading),
+        onclick: () => { void loadProviderModels(track, { force: true, quiet: false }).then(renderOptions); }
+      }, iconEl('refresh'), el('span', { text: 'Refresh' })));
+    };
+
+    searchInput.addEventListener('input', renderOptions);
+    renderOptions();
+    openPopover(trigger, content, { className: 'popover-models', align: 'left' });
+    void loadProviderModels(track, { force: !providerModelEntry(track).live, quiet: true }).then(renderOptions);
+  }
+
   const TRACK_COPY = {
     arena: {
       title: 'Arena <em>Desktop</em>',
@@ -3518,7 +3696,8 @@ You can start with a more structured option: one script, short captions, and a c
             'kept apart from your Arena dialogues.',
       note: 'Google AI mode track · connectors, modes and models are hidden here',
       placeholder: 'Ask Google AI mode…'
-    }
+    },
+    ...EXTRA_TRACK_META
   };
 
   async function loadGoogleStatus({ silent = false } = {}) {
@@ -3733,15 +3912,13 @@ You can start with a more structured option: one script, short captions, and a c
   }
 
   function setTrack(track, { silent = false, keepActive = false } = {}) {
-    const next = track === 'google' ? 'google' : 'arena';
+    const next = ALL_VALID_TRACKS.includes(track) ? track : 'arena';
     const changed = state.track !== next;
     state.track = next;
     try { window.localStorage.setItem('ap-track', next); } catch { /* optional */ }
     document.body?.setAttribute('data-track', next);
     els.app?.setAttribute('data-track', next);
-    // Google AI mode has no mode/model chooser: keep the internal selection on
-    // Direct/Text so returning to Arena is predictable.
-    if (next === 'google' && state.mode !== 'direct') {
+    if (next !== 'arena' && state.mode !== 'direct') {
       state.mode = 'direct';
       state.selectionTouched = true;
     }
@@ -3778,6 +3955,7 @@ You can start with a more structured option: one script, short captions, and a c
     if (noteNode) noteNode.textContent = copy.note;
     if (els.prompt) els.prompt.placeholder = copy.placeholder;
     if (next === 'google') void loadGoogleStatus({ silent: true });
+    if (isExtraProviderTrack(next)) void loadProviderModels(next, { quiet: true });
     renderChats();
     updateComposerState();
     renderChatHead();
@@ -3793,7 +3971,10 @@ You can start with a more structured option: one script, short captions, and a c
   }
 
   function chatTrack(chat) {
-    return (chat && chat.source === 'google') ? 'google' : 'arena';
+    if (!chat) return 'arena';
+    if (chat.source === 'google') return 'google';
+    if (isExtraProviderTrack(chat.source)) return chat.source;
+    return 'arena';
   }
 
   function filteredChats() {
@@ -3843,6 +4024,7 @@ You can start with a more structured option: one script, short captions, and a c
     const row = el('div', { class: `chat-row${active ? ' is-active' : ''}${running ? ' is-running' : ''}${unread ? ' is-unread' : ''}`, role: 'listitem' });
     const metaBits = [];
     if (chat.source === 'google') metaBits.push(chat.imported ? 'Google AI · imported' : 'Google AI');
+    else if (EXTRA_TRACK_META[chat.source]) metaBits.push(EXTRA_TRACK_META[chat.source].label);
     else metaBits.push(chat.mode ? `Arena · ${modeMeta(chat.mode).label}` : 'Arena');
     const cws = chatWorkspacePath(chat);
     if (cws) {
@@ -4108,8 +4290,8 @@ You can start with a more structured option: one script, short captions, and a c
   function chatModeTrack(chat) {
     if (!chat) return 'arena';
     const meta = state.openTabMeta[String(chat.id)];
-    if (meta && (meta.track === 'google' || meta.track === 'arena')) return meta.track;
-    return chat.source === 'google' ? 'google' : 'arena';
+    if (meta && ALL_VALID_TRACKS.includes(meta.track)) return meta.track;
+    return chatTrack(chat);
   }
 
   function workspaceTabs(wsPath = state.activeWorkspacePath) {
@@ -4159,6 +4341,7 @@ You can start with a more structured option: one script, short captions, and a c
     const cid = String(chat.id);
     const active = cid === String(state.activeChatId);
     const mode = chatModeTrack(chat);
+    const badgeInfo = trackBadgeInfo(mode);
     const busy = chatIsGenerating(cid);
     const closeBtn = el('span', {
       class: 'ws-tab-close',
@@ -4174,9 +4357,9 @@ You can start with a more structured option: one script, short captions, and a c
     }, iconEl('x'));
     const children = [
       el('span', {
-        class: `ws-mode-badge ${mode === 'google' ? 'is-google' : 'is-arena'}`,
+        class: `ws-mode-badge ${badgeInfo.cls}`,
         'aria-hidden': 'true',
-        text: mode === 'google' ? 'G' : '\u2726'
+        text: badgeInfo.badge
       }),
       el('span', { class: 'ws-tab-title', text: shortChatTitle(chat.title) })
     ];
@@ -4187,7 +4370,7 @@ You can start with a more structured option: one script, short captions, and a c
       type: 'button',
       role: 'tab',
       'aria-selected': String(active),
-      title: `${chat.title || 'Tab'} (${mode === 'google' ? 'Google AI mode' : 'Arena mode'})`,
+      title: `${chat.title || 'Tab'} (${badgeInfo.label})`,
       onclick: (event) => {
         event.preventDefault();
         setNewTabMenuOpen(false);
@@ -4437,6 +4620,7 @@ You can start with a more structured option: one script, short captions, and a c
     els.chatTitle.textContent = state.activeChatTitle || "Conversation";
     clear(els.chatMeta);
     const google = state.track === 'google';
+    const extraMeta = EXTRA_TRACK_META[state.track] || null;
     if (google) {
       // Google AI mode has no mode / work type / model choice: one honest chip
       // plus the shared workspace chip, and no "Refresh from Arena".
@@ -4444,6 +4628,24 @@ You can start with a more structured option: one script, short captions, and a c
       els.chatMeta.append(
         el('span', { class: 'meta-chip' }, iconEl('spark'), el('span', { text: "Google AI mode" }))
       );
+    } else if (extraMeta) {
+      if (els.chatEyebrow) els.chatEyebrow.textContent = `Active dialogue · ${extraMeta.label}`;
+      els.chatMeta.append(
+        el('span', { class: 'meta-chip' },
+          el('span', { class: `ws-mode-badge ${extraMeta.cls}`, 'aria-hidden': 'true', text: extraMeta.badge }),
+          el('span', { text: extraMeta.label }))
+      );
+      if (state.track !== 'antigravity') {
+        const pid = state.track;
+        els.chatMeta.append(
+          el('button', {
+            class: 'meta-chip',
+            type: 'button',
+            style: 'cursor:pointer',
+            onclick: () => { void API.providerSignIn(pid).catch((err) => toast(errorMessage(err), 'error', extraMeta.label)); }
+          }, iconEl('external'), el('span', { text: `Open ${extraMeta.label} window` }))
+        );
+      }
     } else {
       if (els.chatEyebrow) els.chatEyebrow.textContent = `Active dialogue · ${meta.label}`;
       els.chatMeta.append(
@@ -5269,9 +5471,14 @@ You can start with a more structured option: one script, short captions, and a c
             onclick: () => { void googleSignIn(true); } },
             iconEl('login'), el('span', { text: 'Sign in to Google' })));
         } else if (lane.errorAction === 'open_window') {
+          const errProv = lane.errorProvider || (isExtraProviderTrack(state.track) ? state.track : '');
+          const label = errProv && EXTRA_TRACK_META[errProv] ? `Open ${EXTRA_TRACK_META[errProv].label} window` : 'Open the Google window';
           box.appendChild(el('button', { class: 'button button-small', type: 'button',
-            onclick: () => { void API.googleOpen({}).catch(() => undefined); } },
-            iconEl('external'), el('span', { text: 'Open the Google window' })));
+            onclick: () => {
+              if (errProv) void API.providerSignIn(errProv).catch(() => undefined);
+              else void API.googleOpen({}).catch(() => undefined);
+            } },
+            iconEl('external'), el('span', { text: label })));
         }
         card.appendChild(box);
       });
@@ -5376,9 +5583,14 @@ You can start with a more structured option: one script, short captions, and a c
           onclick: () => { void googleSignIn(true); } },
           iconEl('login'), el('span', { text: 'Sign in to Google' })));
       } else if (turn.errorAction === 'open_window') {
+        const errProv = turn.errorProvider || (isExtraProviderTrack(state.track) ? state.track : '');
+        const label = errProv && EXTRA_TRACK_META[errProv] ? `Open ${EXTRA_TRACK_META[errProv].label} window` : 'Open the Google window';
         box.appendChild(el('button', { class: 'button button-small', type: 'button',
-          onclick: () => { void API.googleOpen({}).catch(() => undefined); } },
-          iconEl('external'), el('span', { text: 'Open the Google window' })));
+          onclick: () => {
+            if (errProv) void API.providerSignIn(errProv).catch(() => undefined);
+            else void API.googleOpen({}).catch(() => undefined);
+          } },
+          iconEl('external'), el('span', { text: label })));
       }
       wrapper.appendChild(box);
     }
@@ -6700,6 +6912,30 @@ You can start with a more structured option: one script, short captions, and a c
   function renderModelChips() {
     if (!els.modelChips) return;
     clear(els.modelChips);
+    if (isExtraProviderTrack(state.track)) {
+      const meta = EXTRA_TRACK_META[state.track];
+      const entry = providerModelEntry(state.track);
+      const selected = selectedProviderModel(state.track);
+      const label = entry.loading && !selected
+        ? `Loading ${meta.label} models…`
+        : (selected ? selected.name : `${meta.label} default`);
+      const chip = el('button', {
+        class: 'composer-chip model-chip provider-model-chip',
+        type: 'button',
+        'data-provider-model-picker': state.track,
+        'aria-label': `Select ${meta.label} model: ${label}`,
+        title: entry.live ? `${label} (live from ${meta.label})` : `${label} (click to pick or refresh models)`,
+        disabled: state.generating
+      },
+        el('span', { class: `ws-tab-badge ${meta.cls}`, 'aria-hidden': 'true', text: meta.badge }),
+        entry.live ? el('span', { class: 'provider-model-live-dot', title: 'Retrieved live' }) : null,
+        el('span', { class: 'chip-label', text: label }),
+        iconEl('chevron-down')
+      );
+      chip.addEventListener('click', () => openProviderModelPicker(state.track, chip));
+      els.modelChips.appendChild(chip);
+      return;
+    }
     const mode = state.mode;
     // Direct: the model chip sits right after the mode slider (left side).
     // Side by Side: both model chips stay on the right, before Agent integration.
@@ -6763,6 +6999,27 @@ You can start with a more structured option: one script, short captions, and a c
 
   function renderComposerContext() {
     if (!els.contextMode) return;
+    if (state.track === 'google') {
+      els.contextMode.textContent = 'Google AI mode';
+      els.contextModality.hidden = true;
+      if (els.contextModality.previousElementSibling) els.contextModality.previousElementSibling.hidden = true;
+      if (els.contextModel.previousElementSibling) els.contextModel.previousElementSibling.hidden = true;
+      els.contextModel.hidden = true;
+      if (els.contextPending) els.contextPending.hidden = !(state.pendingChanges > 0);
+      return;
+    }
+    const extraMeta = EXTRA_TRACK_META[state.track];
+    if (extraMeta) {
+      const selModel = selectedProviderModel(state.track);
+      els.contextMode.textContent = extraMeta.label;
+      els.contextModality.hidden = true;
+      if (els.contextModality.previousElementSibling) els.contextModality.previousElementSibling.hidden = true;
+      if (els.contextModel.previousElementSibling) els.contextModel.previousElementSibling.hidden = false;
+      els.contextModel.hidden = false;
+      els.contextModel.textContent = selModel ? selModel.name : (state.track === 'antigravity' ? 'Local runtime' : 'Signed-in window');
+      if (els.contextPending) els.contextPending.hidden = !(state.pendingChanges > 0);
+      return;
+    }
     const isAgent = state.mode === 'agent';
     els.contextMode.textContent = modeMeta(state.mode).label;
     els.contextModality.textContent = modalityMeta(state.modality).label;
@@ -6812,19 +7069,20 @@ You can start with a more structured option: one script, short captions, and a c
     const noAuth = state.status && state.authenticated === false;
     let disabledReason = '';
     const rateLimitLeft = Math.max(0, Math.ceil((state.rateLimitUntil - Date.now()) / 1000));
+    const isArenaTrack = state.track === 'arena';
     if (busy) disabledReason = "Wait for the current generation to complete";
     else if (state.stopping) disabledReason = "Stopping generation";
     else if (transitions) disabledReason = "Applying settings";
     else if (noServer) disabledReason = "No connection to the local server";
     else if (state.historyLoading) disabledReason = "Loading dialogue history";
     else if (state.historyError) disabledReason = "History not loaded — please try again";
-    else if (state.track !== 'google' && !isValidSelection(state.mode, state.modality)) disabledReason = selectionIssue(state.mode, state.modality);
+    else if (isArenaTrack && !isValidSelection(state.mode, state.modality)) disabledReason = selectionIssue(state.mode, state.modality);
     else if (attachmentsBusy()) disabledReason = "Uploading files…";
     else if (attachmentsFailed()) disabledReason = "Retry or remove the failed file to send";
-    else if (attachmentCompatibilityIssue()) disabledReason = attachmentCompatibilityIssue();
-    else if (noAuth && state.track !== 'google') disabledReason = "First, log in in a separate window or using cookies";
+    else if (isArenaTrack && attachmentCompatibilityIssue()) disabledReason = attachmentCompatibilityIssue();
+    else if (noAuth && isArenaTrack) disabledReason = "First, log in in a separate window or using cookies";
     else if (!text) disabledReason = "Enter a message";
-    else if (state.track !== 'google' && !requiredModelsReady()) disabledReason = state.modelsLoading ? "Loading models"
+    else if (isArenaTrack && !requiredModelsReady()) disabledReason = state.modelsLoading ? "Loading models"
       : state.modelsError ? "Models unavailable"
         : "Select a model";
     else if (state.pendingPermissions.some((item) => !item.chatId || String(item.chatId) === String(state.activeChatId))) disabledReason = "First, resolve the permission request in this chat";
@@ -7457,7 +7715,7 @@ You can start with a more structured option: one script, short captions, and a c
       toast("Local server unavailable. New tab not created.", 'error', "No connection");
       return null;
     }
-    const tabTrack = track === 'google' ? 'google' : track === 'arena' ? 'arena' : (state.track === 'google' ? 'google' : 'arena');
+    const tabTrack = ALL_VALID_TRACKS.includes(track) ? track : (ALL_VALID_TRACKS.includes(state.track) ? state.track : 'arena');
     setNewTabMenuOpen(false);
     state.creatingChat = true;
     els.newChatBtn?.classList.add('is-spinning');
@@ -7475,9 +7733,14 @@ You can start with a more structured option: one script, short captions, and a c
       setTrack(tabTrack, { silent: true, keepActive: true });
       state.activeChatId = cid;
       state.activeChatEvalId = null;
-      state.activeChatSource = tabTrack === 'google' ? 'google' : 'local';
+      const tabSource = tabTrack === 'arena' ? 'local' : tabTrack;
+      state.activeChatSource = tabSource;
       restoreComposerDraft();
-      const defaultTitle = tabTrack === 'google' ? 'New Google tab' : 'New Arena tab';
+      const defaultTitle = tabTrack === 'google'
+        ? 'New Google tab'
+        : EXTRA_TRACK_META[tabTrack]
+          ? `New ${EXTRA_TRACK_META[tabTrack].label} tab`
+          : 'New Arena tab';
       state.activeChatTitle = String(raw?.title ?? raw?.chat?.title ?? defaultTitle);
       state.messages = [];
       state.artifacts = [];
@@ -7490,9 +7753,9 @@ You can start with a more structured option: one script, short captions, and a c
           id: cid,
           title: state.activeChatTitle,
           updated_at: new Date().toISOString(),
-          mode: tabTrack === 'google' ? 'direct' : state.mode,
-          modality: tabTrack === 'google' ? 'text' : state.modality,
-          source: tabTrack === 'google' ? 'google' : 'local',
+          mode: tabTrack === 'arena' ? state.mode : 'direct',
+          modality: tabTrack === 'arena' ? state.modality : 'text',
+          source: tabSource,
           workspace: wsPath,
           unsent: true
         });
@@ -7502,7 +7765,7 @@ You can start with a more structured option: one script, short captions, and a c
       syncGenerationState();
       closeMobileSidebar();
       if (focus) window.setTimeout(focusComposer, 20);
-      announce(tabTrack === 'google' ? "New Google AI tab created." : "New Arena tab created.");
+      announce(`${defaultTitle} created.`);
       return state.activeChatId;
     } catch (error) {
       toast(errorMessage(error), 'error', "New tab not created");
@@ -8312,6 +8575,7 @@ You can start with a more structured option: one script, short captions, and a c
         if (event.sign_in || event.window) {
           lane.errorAction = event.sign_in ? 'sign_in' : 'open_window';
           lane.errorCode = event.code || '';
+          if (event.provider) lane.errorProvider = String(event.provider);
         }
         lane.streaming = false;
         lane.done = true;
@@ -8321,6 +8585,7 @@ You can start with a more structured option: one script, short captions, and a c
         turn.error = message;
         if (event.sign_in) turn.errorAction = 'sign_in';
         else if (event.window) turn.errorAction = 'open_window';
+        if (event.provider) turn.errorProvider = String(event.provider);
       }
       toast(message, 'error', 'Generation error');
       scheduleChatRender();
@@ -8866,7 +9131,8 @@ You can start with a more structured option: one script, short captions, and a c
         toast(state.serverError, 'error', "Server unavailable");
         return;
       }
-      if (state.track !== 'google' && !requiredModelsReady()) {
+      const isArenaTrack = state.track === 'arena';
+      if (isArenaTrack && !requiredModelsReady()) {
         if (state.mode !== 'battle') {
           toast(state.modelsError || (state.modelsLoading ? "Wait for the models to load." : "Select a model to send."), 'warning', "Model is not ready");
           openModelPicker(state.mode === 'side-by-side' && state.modelAId ? 'b' : 'a');
@@ -8875,7 +9141,7 @@ You can start with a more structured option: one script, short captions, and a c
         }
         return;
       }
-      const compatibilityIssue = attachmentCompatibilityIssue();
+      const compatibilityIssue = isArenaTrack ? attachmentCompatibilityIssue() : '';
       if (compatibilityIssue) {
         toast(compatibilityIssue, 'warning', 'Attachment is not supported by this model');
         if (allowsManualModels()) openModelPicker(state.mode === 'side-by-side' && currentModelA() && modelCanReceiveAttachments(currentModelA()) ? 'b' : 'a');
@@ -8906,32 +9172,30 @@ You can start with a more structured option: one script, short captions, and a c
       // late status/chat response can never reroute this send to another mode.
       const body = { message: text, chat_id: chatId, mode: state.mode, modality: state.modality,
                      track: state.track, workspace: state.activeWorkspacePath || '' };
-      if (state.track === 'google') { body.mode = 'direct'; body.modality = 'text'; }
+      if (!isArenaTrack) { body.mode = 'direct'; body.modality = 'text'; }
       try { body.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { /* optional */ }
-      if (state.mode === 'agent') {
+      if (isArenaTrack && state.mode === 'agent') {
         // 'arena' = native Arena Agent Mode streamed in-app; 'local' = the
         // folder-tools loop.  A saved chat keeps its own backend server-side.
         body.agent_backend = state.agentKind === 'native' ? 'arena' : 'local';
       }
-      // Workspace Sync: the composer switch decides whether models get the
-      // automatic folder-tools loop on this computer. It applies to Direct,
-      // Side by Side, Battle and the Local Agent alike.
-      body.tools = state.track === 'google' ? false : Boolean(state.directTools);
-      // Only Direct and Side by Side have user-chosen models.  Battle sends
-      // no ids, Video is Battle-only, and Agent is always automatic.
-      // Google AI mode has no model chooser of its own: the request is just
-      // the message, so none of the Arena model plumbing applies.
-      if (state.track !== 'google' && allowsManualModels()) {
+      body.tools = isArenaTrack
+        ? Boolean(state.directTools)
+        : (isExtraProviderTrack(state.track) ? Boolean(state.activeWorkspacePath) : false);
+      if (isArenaTrack && allowsManualModels()) {
         if (!state.modelAId) throw new ApiError("Model A not selected.");
         body.model_id = state.modelAId;
+      } else if (isExtraProviderTrack(state.track)) {
+        const selProvModel = selectedProviderModel(state.track);
+        if (selProvModel && selProvModel.id) body.model_id = selProvModel.id;
       }
-      if (state.track !== 'google' && state.mode === 'side-by-side') {
+      if (isArenaTrack && state.mode === 'side-by-side') {
         if (!state.modelBId) throw new ApiError("Model B not selected.");
         body.model_id_b = state.modelBId;
       }
       const composerAttachments = state.attachments.map((item) => ({ ...item }));
       const sentAttachments = turnAttachmentsFromComposer();
-      if (state.track !== 'google' && state.mode === 'direct'
+      if (isArenaTrack && state.mode === 'direct'
         && Array.isArray(state.fanoutModels) && state.fanoutModels.length >= 2) {
         body.fanout_models = [...state.fanoutModels];
       }
@@ -8940,8 +9204,7 @@ You can start with a more structured option: one script, short captions, and a c
       const turn = makeGenerationTurn(text, chatId, sentAttachments);
       const isDefaultTitle = !state.activeChatTitle
         || state.activeChatTitle === "New chat"
-        || state.activeChatTitle === "New Arena tab"
-        || state.activeChatTitle === "New Google tab";
+        || /^New .+ tab$/.test(state.activeChatTitle);
       if (isDefaultTitle) {
         state.activeChatTitle = truncate(text, 52);
         const chat = state.chats.find((item) => item.id === String(chatId));
@@ -8950,7 +9213,7 @@ You can start with a more structured option: one script, short captions, and a c
           chat.unsent = false;
           chat.workspace = state.activeWorkspacePath || chat.workspace || '';
         } else {
-          state.chats.unshift({ id: String(chatId), title: state.activeChatTitle, updated_at: new Date().toISOString(), mode: state.mode, modality: state.modality, source: state.track === 'google' ? 'google' : 'local', workspace: state.activeWorkspacePath || '' });
+          state.chats.unshift({ id: String(chatId), title: state.activeChatTitle, updated_at: new Date().toISOString(), mode: state.mode, modality: state.modality, source: state.track === 'arena' ? 'local' : state.track, workspace: state.activeWorkspacePath || '' });
         }
       } else {
         const chat = state.chats.find((item) => item.id === String(chatId));
@@ -11055,6 +11318,7 @@ You can start with a more structured option: one script, short captions, and a c
       ]
       : [
         { id: 'connection', label: 'Account', icon: 'user' },
+        { id: 'providers', label: 'Providers', icon: 'spark' },
         { id: 'permissions', label: 'Permissions', icon: 'shield' },
         { id: 'workspace', label: 'Folder', icon: 'folder' },
         { id: 'memory', label: 'Memory', icon: 'layers' },
@@ -12262,10 +12526,85 @@ You can start with a more structured option: one script, short captions, and a c
       hydrateTab(currentTab);
     }
 
+    function renderProvidersPanel() {
+      const wrap = el('div');
+      wrap.appendChild(el('h3', { class: 'modal-section-title', text: 'Tab providers (no API keys)' }));
+      wrap.appendChild(el('p', {
+        class: 'setting-desc',
+        text: 'DeepSeek, Claude, and ChatGPT run inside persistent Linux WebKitGTK windows using your own manual sign-in. Antigravity connects to your local agy CLI or google-antigravity SDK. All tabs inside the same workspace share MEMORY.md and live cross-tab summaries.'
+      }));
+      const grid = el('div', { class: 'providers-grid' });
+      const list = Array.isArray(state.providers) ? state.providers : [];
+      if (!list.length) {
+        grid.appendChild(el('p', { class: 'setting-desc', text: 'Loading providers…' }));
+      }
+      list.forEach((p) => {
+        const ready = Boolean(p.signed_in);
+        const statusEl = el('span', {
+          class: `provider-card-status${ready ? ' is-ready' : ''}`,
+          text: ready ? 'Ready' : (p.available ? 'Not signed in' : 'Not available')
+        });
+        const actions = el('div', { class: 'provider-card-actions' });
+        if (p.kind === 'webview') {
+          actions.appendChild(settingsActionButton(ready ? 'Open window' : 'Sign in', 'external', async () => {
+            const res = await API.providerSignIn(p.id);
+            if (res?.ok) {
+              toast(`Sign in inside the ${p.name} window, then click Verify or send a message.`, 'info', p.name);
+            } else {
+              toast(res?.error || `Could not open ${p.name}.`, 'error', p.name);
+            }
+            await loadProviders();
+            refreshPanel();
+          }, { variant: ready ? undefined : 'primary' }));
+          actions.appendChild(settingsActionButton('Verify', 'refresh', async () => {
+            const res = await API.providerVerify(p.id);
+            await loadProviders();
+            if (res?.signed_in) await loadProviderModels(p.id, { force: true, quiet: true });
+            refreshPanel();
+            toast(res?.signed_in ? `${p.name} session confirmed.` : (res?.detail || `${p.name} not signed in yet.`),
+              res?.signed_in ? 'success' : 'warning', p.name);
+          }));
+        } else {
+          actions.appendChild(settingsActionButton('Check runtime', 'refresh', async () => {
+            await loadProviders();
+            await loadProviderModels(p.id, { force: true, quiet: true });
+            refreshPanel();
+          }));
+        }
+        actions.appendChild(settingsActionButton('Models', 'refresh', async () => {
+          const list = await loadProviderModels(p.id, { force: true, quiet: false });
+          const entry = providerModelEntry(p.id);
+          refreshPanel();
+          toast(`${p.name}: ${list.length} model${list.length === 1 ? '' : 's'} (${entry.live ? 'live' : 'default'}).`,
+            entry.live ? 'success' : 'info', p.name);
+        }));
+        actions.appendChild(settingsActionButton(`New ${p.short_name} tab`, 'plus', async () => {
+          closeModal();
+          await createNewChat({ track: p.id });
+        }));
+        const mEntry = providerModelEntry(p.id);
+        const mSummary = mEntry.models.length
+          ? `${mEntry.models.length} model${mEntry.models.length === 1 ? '' : 's'} (${mEntry.live ? 'live' : 'default'})`
+          : '';
+        grid.appendChild(el('div', { class: 'provider-card' },
+          el('div', { class: 'provider-card-head' },
+            el('span', { class: `ws-mode-badge ${p.badge_class || `is-${p.id}`}`, 'aria-hidden': 'true', text: p.badge || '*' }),
+            el('div', { class: 'provider-card-copy' },
+              el('div', { class: 'provider-card-title', text: p.name }),
+              el('div', { class: 'provider-card-desc', text: p.description || '' })),
+            statusEl),
+          (p.detail || mSummary) ? el('div', { class: 'provider-card-detail', text: [p.detail, mSummary].filter(Boolean).join(' · ') }) : null,
+          actions));
+      });
+      wrap.appendChild(grid);
+      return wrap;
+    }
+
     function contentFor(tab) {
       if (tab === 'connection') {
         return state.settingsTrack === 'google' ? renderGoogleAccountPanel() : renderConnectionPanel();
       }
+      if (tab === 'providers') return renderProvidersPanel();
       if (tab === 'permissions') return renderPermissionsPanel();
       if (tab === 'workspace') return renderWorkspacePanel();
       if (tab === 'memory') return renderMemoryPanel();
@@ -12285,6 +12624,11 @@ You can start with a more structured option: one script, short captions, and a c
     function hydrateTab(tab) {
       // The cache is app-wide and its size changes while the app runs, so it
       // is measured every time the section opens rather than once per session.
+      if (tab === 'providers') {
+        if (state.serverError || state.networkOffline) return;
+        loadProviders().then(() => { if (state.settingsTab === 'providers') refreshPanel(); });
+        return;
+      }
       if (tab === 'cache') {
         if (state.serverError || state.networkOffline) return;
         API.getCache()
@@ -14207,7 +14551,8 @@ You can start with a more structured option: one script, short captions, and a c
     els.newTabMenu?.addEventListener('click', (event) => {
       const btn = event.target.closest('[data-new-tab-track]');
       if (!btn) return;
-      const chosenTrack = btn.getAttribute('data-new-tab-track') === 'google' ? 'google' : 'arena';
+      const raw = btn.getAttribute('data-new-tab-track') || 'arena';
+      const chosenTrack = ALL_VALID_TRACKS.includes(raw) ? raw : 'arena';
       setNewTabMenuOpen(false);
       void createNewChat({ track: chosenTrack });
     });
@@ -15271,6 +15616,7 @@ async function startApp() {
     if (status) {
       await Promise.allSettled([
         loadWorkspaces(),
+        loadProviders(),
         loadChats(),
         loadModels(state.modality, { quiet: true }),
         refreshWorkspacePanel(),
