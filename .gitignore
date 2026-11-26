@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+*.pyo
+dist/
+build/
+release/
+.venv/
+venv/
+*.egg-info/
+.eggs/
+servers/
+data/
+*.pid
+.claude/
+.pytest_cache/
+.code-review-graph/
+
+# release binary rides along for one-command gh release, never committed
+Arena-Desktop
+*.zip

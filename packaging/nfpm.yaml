@@ -1,0 +1,46 @@
+# Template consumed by packaging/build-packages.sh. __PLACEHOLDERS__ are
+# substituted there so one config builds both the .deb and the .rpm.
+name: arena-desktop
+arch: __NFPM_ARCH__
+platform: linux
+version: __VERSION__
+section: net
+priority: optional
+maintainer: __MAINTAINER__
+vendor: __VENDOR__
+homepage: __HOMEPAGE__
+license: MIT
+description: |
+  Unofficial desktop client for arena.ai with a native Linux shell.
+  Battle, Side by Side, Direct and Agent mode, Workspace Sync, MCP servers
+  and multi-account support, rendered with WebKitGTK.
+contents:
+  - src: __BINARY__
+    dst: /usr/bin/Arena-Desktop
+    file_info:
+      mode: 0755
+  - src: __DESKTOP_FILE__
+    dst: /usr/share/applications/arena-desktop.desktop
+    file_info:
+      mode: 0644
+  - src: __ROOT__/assets/logo.png
+    dst: /usr/share/icons/hicolor/256x256/apps/arena-desktop.png
+    file_info:
+      mode: 0644
+  - src: __ROOT__/README_LINUX.md
+    dst: /usr/share/doc/arena-desktop/README.md
+    file_info:
+      mode: 0644
+  - src: __ROOT__/LICENSE
+    dst: /usr/share/doc/arena-desktop/LICENSE
+    file_info:
+      mode: 0644
+overrides:
+  deb:
+    depends:
+      - libwebkit2gtk-4.1-0
+      - libgtk-3-0
+  rpm:
+    depends:
+      - webkit2gtk4.1
+      - gtk3

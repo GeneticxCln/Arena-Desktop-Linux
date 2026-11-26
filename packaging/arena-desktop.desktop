@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Arena Desktop
+Comment=Unofficial desktop client for arena.ai
+Exec=@EXEC@ %u
+Icon=arena-desktop
+Terminal=false
+MimeType=x-scheme-handler/arenadesktop;
+Categories=Network;Utility;
+StartupWMClass=Arena Desktop

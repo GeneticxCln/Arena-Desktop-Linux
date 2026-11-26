@@ -1,0 +1,78 @@
+name: Build Linux
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Linux x86_64 (WebKitGTK)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install GTK / WebKitGTK build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3-venv python3-pip python3-gi \
+            gir1.2-gtk-3.0 gir1.2-webkit2-4.1 libwebkit2gtk-4.1-0 \
+            libgtk-3-bin libglib2.0-bin xvfb libgl1 libegl1 \
+            rpm zstd file desktop-file-utils
+
+      - name: Prepare environment and run tests
+        # The system Python is required: distro PyGObject lives in
+        # /usr/lib/python3/dist-packages and a setup-python interpreter would
+        # not see it through --system-site-packages.
+        run: |
+          /usr/bin/python3 -m venv --system-site-packages .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r requirements.txt "pyinstaller>=6,<7" "pytest>=8"
+          .venv/bin/python -m pytest -q tests \
+            --ignore=tests/test_ui_browser.py --ignore=tests/test_v58_browser.py
+
+      - name: Build one-file Linux binary
+        run: .venv/bin/python -m PyInstaller --clean --noconfirm arena-cli.spec
+
+      - name: Smoke test under Xvfb
+        run: xvfb-run -a .venv/bin/python scripts/smoke_linux.py dist/Arena-Desktop
+
+      - name: Stage release
+        run: |
+          mkdir -p release
+          cp dist/Arena-Desktop release/Arena-Desktop
+          cp README_LINUX.md release/README.md
+          cp LICENSE release/
+          cp assets/logo.png release/arena-desktop.png
+          cp packaging/arena-desktop.desktop packaging/install-linux.sh release/
+          tar -C release -czf release/Arena-Desktop-linux-x86_64.tar.gz \
+            Arena-Desktop README.md LICENSE arena-desktop.png arena-desktop.desktop install-linux.sh
+
+      - name: Build .deb, .rpm, Arch package and AppImage
+        # Flatten into release/ so the uploaded artifact has no subdirectories
+        # and every asset lands at the release root.
+        run: |
+          ./packaging/build-packages.sh
+          cp release/Arena-Desktop-linux-x86_64/*.deb \
+             release/Arena-Desktop-linux-x86_64/*.rpm \
+             release/Arena-Desktop-linux-x86_64/*.pkg.tar.zst \
+             release/Arena-Desktop-linux-x86_64/*.AppImage \
+             release/
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Arena-Desktop-linux-x86_64
+          path: |
+            release/Arena-Desktop-linux-x86_64.tar.gz
+            release/*.deb
+            release/*.rpm
+            release/*.pkg.tar.zst
+            release/*.AppImage
+          if-no-files-found: error
+          retention-days: 30

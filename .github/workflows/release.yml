@@ -1,0 +1,45 @@
+name: Publish release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux:
+    uses: ./.github/workflows/build-linux.yml
+
+  publish:
+    name: Publish GitHub release
+    needs: [linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create checksums
+        run: |
+          cd release-assets
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\n' | sort | xargs sha256sum > SHA256SUMS
+          ls -lh
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Arena Desktop ${{ github.ref_name }}
+          files: release-assets/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          make_latest: true

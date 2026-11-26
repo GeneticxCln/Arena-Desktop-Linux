@@ -1,0 +1,4 @@
+pytest>=8
+pyinstaller>=6,<7
+# Optional for browser UI tests (RUN_BROWSER_TESTS=1):
+# playwright>=1.40
