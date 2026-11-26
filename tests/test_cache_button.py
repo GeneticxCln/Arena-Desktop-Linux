@@ -147,3 +147,14 @@ def test_the_browser_calls_the_real_cache_routes():
     assert "settingsClearCacheBtn" in js
     assert "if (tab === 'cache') return renderCachePanel();" in js
     assert js.count("id: 'cache', label: 'Cache', icon: 'trash'") == 2
+
+
+def test_appcache_tracks_linux_webview_profile(tmp_path):
+    (tmp_path / "webview").mkdir()
+    (tmp_path / "webview" / "cache.bin").write_bytes(b"w" * 1024)
+    summary = appcache.summary(tmp_path)
+    assert any(item["id"] == "webview" and item["bytes"] >= 1024 for item in summary["items"])
+    kept = appcache.clear(tmp_path, keep=("webview",))
+    assert (tmp_path / "webview").exists() and "webview" not in kept["removed"]
+    wiped = appcache.clear(tmp_path)
+    assert "webview" in wiped["removed"] and not (tmp_path / "webview").exists()

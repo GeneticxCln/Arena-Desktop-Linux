@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -18,6 +19,23 @@ import urllib.parse
 from pathlib import Path
 
 LOG = logging.getLogger("arena.desktop")
+_EXIT_LOCK = threading.Lock()
+_EXITING = False
+
+
+def _shutdown_and_exit(code: int = 0) -> None:
+    """Stop MCP servers, Gateway tunnels, sub-agents, and clean instance files before exiting."""
+    global _EXITING
+    with _EXIT_LOCK:
+        if _EXITING:
+            return
+        _EXITING = True
+    try:
+        from arena.web import app as web_app
+        web_app.shutdown_runtime()
+    except Exception:
+        LOG.exception("runtime shutdown failed")
+    os._exit(code)
 
 
 def gui_backend():
@@ -77,8 +95,9 @@ def find_free_port() -> int:
 
 
 def start_flask(port: int):
-    from arena.web.app import app
-    app.run(host="127.0.0.1", port=port, debug=False, threaded=True, use_reloader=False)
+    from arena.web import app as web_app
+    web_app._start_automation_scheduler()
+    web_app.app.run(host="127.0.0.1", port=port, debug=False, threaded=True, use_reloader=False)
 
 
 def wait_port(port: int, timeout: float = 10.0) -> bool:
@@ -267,7 +286,7 @@ class Tray:
                 self.icon.stop()
         except Exception:
             pass
-        os._exit(0)
+        _shutdown_and_exit(0)
 
     def start(self) -> bool:
         try:
@@ -367,6 +386,12 @@ def main():
     instance_token = deep_links.new_instance_token()
     web_app.INSTANCE_TOKEN = instance_token
 
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, lambda *_a: _shutdown_and_exit(0))
+        except Exception:
+            pass
+
     port = int(os.environ.get("ARENA_PORT") or 0) or find_free_port()
     threading.Thread(target=start_flask, args=(port,), daemon=True).start()
     wait_port(port)
@@ -407,6 +432,10 @@ def main():
                                        hidden=True, background_color="#242422", js_api=ENGINE.bridge())
     ENGINE.attach(engine_win, main_win)
     ENGINE.dock = None
+    try:
+        diag.make_window_calls_non_blocking(engine_win)
+    except Exception:
+        LOG.exception("could not wrap arena-window for GTK thread safety")
     google_win = webview.create_window("Google AI mode - Arena Desktop", "about:blank", width=1100, height=760,
                                        x=140, y=140, hidden=True, background_color="#242422")
     google_ai.ENGINE.attach(google_win, main_win)
@@ -419,7 +448,7 @@ def main():
                                            "get_cookies"])
         except Exception:
             LOG.exception("could not trace %s", label)
-    main_win.events.closed += lambda *a: os._exit(0)
+    main_win.events.closed += lambda *a: _shutdown_and_exit(0)
     tray = None
     tray_started = False
     if cfg.get("tray_enabled") or background:
@@ -454,7 +483,7 @@ def main():
     storage.mkdir(parents=True, exist_ok=True)
     webview.start(gui=backend, private_mode=False, storage_path=str(storage),
                   icon=str(ico) if ico.exists() else None, debug=bool(os.environ.get("ARENA_DEBUG")))
-    os._exit(0)
+    _shutdown_and_exit(0)
 
 
 if __name__ == "__main__":

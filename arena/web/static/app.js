@@ -609,6 +609,7 @@
     compactChat(id) { return this.request(`/api/chats/${encodeURIComponent(id)}/compact`, { method: 'POST', body: {} }); },
     getMemory() { return this.request('/api/memory' + settingsQuery()); },
     saveMemory(body) { return this.request('/api/memory', { method: 'POST', body: withScope(body) }); },
+    syncTabsMemory() { return this.request('/api/memory/sync-tabs', { method: 'POST', body: withScope({}) }); },
     updateCheck(force = false) { return this.request(`/api/update-check${force ? '?force=1' : ''}`); },
     exportSettings() { return this.request('/api/settings/export'); },
     importSettings(bundle) { return this.request('/api/settings/import', { method: 'POST', body: bundle }); },
@@ -1190,7 +1191,7 @@
         permission_mode: demoStore.permissionMode,
         workspace: demoStore.workspace,
         workspace_chosen: true,
-        app_version: '7.0.0',
+        app_version: '7.1.0',
         pending_permissions: demoStore.pendingPermissions.length,
         demo: true
       };
@@ -1384,7 +1385,11 @@
     },
     async getMemory() {
       await sleep(80);
-      return { enabled: demoStore.memoryEnabled !== false, folder: demoStore.workspace || null,
+      return { enabled: demoStore.memoryEnabled !== false,
+               cross_tab_enabled: demoStore.crossTabMemory !== false,
+               cross_tab_preview: demoStore.crossTabPreview || '',
+               cross_tab_count: demoStore.crossTabPreview ? 1 : 0,
+               folder: demoStore.workspace || null,
                global: demoStore.memoryGlobal || '', workspace: demoStore.memoryWorkspace ?? '', demo: true };
     },
     async saveMemory(body = {}) {
@@ -1392,7 +1397,13 @@
       if (typeof body.global === 'string') demoStore.memoryGlobal = body.global;
       if (typeof body.workspace === 'string') demoStore.memoryWorkspace = body.workspace;
       if ('enabled' in body) demoStore.memoryEnabled = Boolean(body.enabled);
-      return { ok: true, enabled: demoStore.memoryEnabled !== false, demo: true };
+      if ('cross_tab_enabled' in body) demoStore.crossTabMemory = Boolean(body.cross_tab_enabled);
+      return { ok: true, enabled: demoStore.memoryEnabled !== false,
+               cross_tab_enabled: demoStore.crossTabMemory !== false, demo: true };
+    },
+    async syncTabsMemory() {
+      await sleep(60);
+      return { ok: true, count: 0, workspace: demoStore.memoryWorkspace || '', demo: true };
     },
     async updateCheck() { await sleep(60); return { enabled: true, current: 'demo', latest: null, update: false, url: null, demo: true }; },
     async exportSettings() { await sleep(60); return { app: 'Arena Desktop', version: 1, config: {}, memory_global: demoStore.memoryGlobal || '', memory_workspace: demoStore.memoryWorkspace || '', mcp: null, demo: true }; },
@@ -10990,7 +11001,7 @@ You can start with a more structured option: one script, short captions, and a c
       const wrap = el('div');
       const data = state.memoryData || null;
       wrap.appendChild(el('h3', { class: 'modal-section-title', text: 'Memory across chats' }));
-      wrap.appendChild(el('p', { class: 'setting-desc', text: "Short Markdown notes that travel with the first message of every new conversation, so models remember your projects between chats \u2014 like Claude Code's memory. General memory applies everywhere. Project memory lives in MEMORY.md inside the selected folder: models working there can update it, and Compact appends a session summary to it." }));
+      wrap.appendChild(el('p', { class: 'setting-desc', text: "Short Markdown notes that travel with every new conversation (and refresh automatically when updated), so models remember your projects across tabs. General memory applies everywhere. Project memory lives in MEMORY.md inside the selected folder, and sibling tabs in the same folder can also share compact live summaries." }));
       if (!data) {
         wrap.appendChild(el('p', { class: 'setting-desc', text: 'Loading memory\u2026' }));
         return wrap;
@@ -10999,6 +11010,11 @@ You can start with a more structured option: one script, short captions, and a c
       wrap.appendChild(el('label', { class: 'setting-toggle-row' },
         el('span', { text: 'Use memory in chats' }),
         el('span', { class: 'switch' }, toggle, el('span', { class: 'switch-track', 'aria-hidden': 'true' }))));
+
+      const crossToggle = el('input', { type: 'checkbox', class: 'switch-input', checked: data.cross_tab_enabled !== false, 'aria-label': 'Share recent tabs in this project' });
+      wrap.appendChild(el('label', { class: 'setting-toggle-row' },
+        el('span', { text: 'Share recent tabs in this project (live cross-tab context)' }),
+        el('span', { class: 'switch' }, crossToggle, el('span', { class: 'switch-track', 'aria-hidden': 'true' }))));
 
       wrap.appendChild(el('h3', { class: 'modal-section-title', text: 'General memory (all projects)' }));
       const globalField = el('textarea', { class: 'input mono memory-field', rows: '6', spellcheck: 'false',
@@ -11012,18 +11028,45 @@ You can start with a more structured option: one script, short captions, and a c
         placeholder: data.folder ? '# Project memory\n- Stack: \u2026\n- Conventions: \u2026' : 'Select a folder first \u2014 project memory is stored as MEMORY.md inside it.' });
       wsField.value = data.workspace || '';
       wrap.appendChild(wsField);
-      if (!data.folder) wrap.appendChild(el('p', { class: 'setting-desc', text: 'Choose a folder in the Folder tab to keep per-project memory next to the project itself.' }));
+      if (!data.folder) wrap.appendChild(el('p', { class: 'setting-desc', text: 'Choose a folder in the Folder tab to keep per-project memory and cross-tab context for that project.' }));
+
+      const tabCount = Number(data.cross_tab_count || 0);
+      wrap.appendChild(el('h3', { class: 'modal-section-title',
+        text: tabCount > 0 ? `Live cross-tab context (${tabCount} recent ${tabCount === 1 ? 'tab' : 'tabs'})` : 'Live cross-tab context' }));
+      wrap.appendChild(el('p', { class: 'setting-desc',
+        text: 'Automatically built from completed sibling tabs in this folder (goal, edited files, latest outcome). Whenever another tab finishes a turn, open tabs pick up the update on their next message.' }));
+      const crossField = el('textarea', { class: 'input mono memory-field', rows: '5', readonly: true, spellcheck: 'false',
+        'aria-label': 'Live cross-tab context',
+        placeholder: data.folder ? 'No completed sibling tabs recorded in this folder yet.' : 'Select a project folder to share live summaries across tabs.' });
+      crossField.value = data.cross_tab_preview || '';
+      wrap.appendChild(crossField);
 
       const save = settingsActionButton('Save memory', 'check', async () => {
-        const body = { global: globalField.value, enabled: toggle.checked };
+        const body = { global: globalField.value, enabled: toggle.checked, cross_tab_enabled: crossToggle.checked };
         if (data.folder) body.workspace = wsField.value;
         const result = await API.saveMemory(body);
         state.memoryData = { ...data, global: globalField.value,
-          workspace: data.folder ? wsField.value : data.workspace, enabled: result?.enabled !== false };
-        toast('Memory saved. It applies from the next new conversation, or right away in a chat you compact.', 'success', 'Memory');
+          workspace: data.folder ? wsField.value : data.workspace,
+          enabled: result?.enabled !== false,
+          cross_tab_enabled: result?.cross_tab_enabled !== false,
+          cross_tab_preview: result?.cross_tab_preview ?? data.cross_tab_preview,
+          cross_tab_count: result?.cross_tab_count ?? data.cross_tab_count };
+        toast('Memory saved. Open and new chats pick up changes on their next message.', 'success', 'Memory');
         refreshPanel();
       }, { variant: 'primary' });
-      wrap.appendChild(el('div', { class: 'setting-actions' }, save));
+      const actions = el('div', { class: 'setting-actions' }, save);
+      if (data.folder && tabCount > 0) {
+        const snapshotBtn = settingsActionButton('Snapshot tabs to MEMORY.md', 'plus', async () => {
+          const res = await API.syncTabsMemory();
+          if (res?.ok) {
+            state.memoryData = { ...data, workspace: res.workspace ?? wsField.value };
+            toast(`Appended ${res.count} tab ${res.count === 1 ? 'summary' : 'summaries'} to MEMORY.md.`, 'success', 'Memory');
+            refreshPanel();
+          }
+        });
+        actions.appendChild(snapshotBtn);
+      }
+      wrap.appendChild(actions);
       wrap.appendChild(el('p', { class: 'setting-desc', text: 'Tip: in any chat with Workspace Sync on, just tell the model \u201cremember this\u201d \u2014 it will write it to MEMORY.md itself.' }));
       return wrap;
     }

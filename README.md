@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-7.0.0-8b5cf6?style=flat-square" alt="Version 7.0.0" />
+  <img src="https://img.shields.io/badge/version-7.1.0-8b5cf6?style=flat-square" alt="Version 7.1.0" />
   <img src="https://img.shields.io/badge/platform-Linux-blue?style=flat-square" alt="Linux" />
   <img src="https://img.shields.io/badge/python-3.11%2B-3776ab?style=flat-square" alt="Python 3.11+" />
   <img src="https://img.shields.io/badge/models-400%2B%20via%20arena.ai-10b981?style=flat-square" alt="400+ models via arena.ai" />
@@ -56,7 +56,7 @@ Arena Desktop wraps the full `arena.ai` experience in a native Linux desktop app
 
 ### Agent & Workspace Capabilities
 - **Native Arena Agent**: Streams natively in-app with structured `ask_user` cards, image choices, voice auditions, Workspace Sync file downloads, and up to 6 parallel native sub-agents.
-- **Local Agent**: Supports `propose_plan` approval cards, `set_todos` live checklists, `ask_user` prompts, parallel read-only sub-agents, `AGENTS.md` + `MEMORY.md` project memory, and plan-only scheduled automations.
+- **Local Agent**: Supports `propose_plan` approval cards, `set_todos` live checklists, `ask_user` prompts, parallel read-only sub-agents, `AGENTS.md` + `MEMORY.md` project memory with live cross-tab summaries, and plan-only scheduled automations.
 - **Rich Workspace Previews**: Scriptless/CSP-sandboxed HTML previews, rendered Markdown, inline images/audio/video/PDF, and read-only code views.
 - **Local Security**: Per-instance local API token (`X-Arena-Token`), loopback-only host/origin enforcement, path-traversal protection, and constant-time pairing auth on the Agent Gateway.
 

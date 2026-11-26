@@ -381,7 +381,7 @@ def _diag_trace(fn):
 
 _API_TOKEN = secrets.token_urlsafe(32)
 
-APP_VERSION = "7.0.0"
+APP_VERSION = "7.1.0"
 
 # One tick of every polling loop that waits on something outside the request
 # (a question the person has to answer, a permission, a preview URL). It is a
@@ -414,6 +414,16 @@ def _validate_chat_id(chat_id: str) -> bool:
     return bool(_UUID_RE.match(chat_id))
 
 
+def _norm_workspace_path(folder) -> str:
+    """Canonical path string for matching chats belonging to the same project."""
+    if not folder:
+        return ""
+    try:
+        return str(Path(folder).expanduser().resolve())
+    except OSError:
+        return str(folder)
+
+
 def _save_chat(chat_id: str, title: str, messages: list,
                mode: str = 'battle', modality: str = 'auto',
                model_a: str = None, model_b: str = None, eval_id: str = None,
@@ -422,7 +432,8 @@ def _save_chat(chat_id: str, title: str, messages: list,
                mcp_guide_hash: str = None, memory_hash: str = None,
                pending_digest: str = None, parent_id: str = None,
                delegate_guide: bool = None, gateway_session: str = None,
-               account_id: str = None, supervisor_of: str = None):
+               account_id: str = None, supervisor_of: str = None,
+               workspace_dir: str = None):
     with _chat_file_lock:
         if not _validate_chat_id(chat_id):
             return
@@ -436,10 +447,15 @@ def _save_chat(chat_id: str, title: str, messages: list,
                 existing = json.loads(chat_file.read_text(encoding="utf-8"))
             except Exception:
                 pass
+        if workspace_dir is not None:
+            ws_value = _norm_workspace_path(workspace_dir) or None
+        else:
+            ws_value = existing.get("workspace") or (_norm_workspace_path(_chosen_ws()) or None)
         data = {
             "id": chat_id,
             "title": title,
             "account_id": existing.get("account_id") or account_id or _current_account_id(),
+            "workspace": ws_value,
             "created_at": existing.get("created_at", now),
             "updated_at": now,
             "mode": mode,
@@ -514,6 +530,7 @@ def _list_chats() -> list:
                 "modality": data.get("modality"),
                 "eval_id": data.get("eval_id"),
                 "parent_id": data.get("parent_id"),
+                "workspace": data.get("workspace") or "",
                 "source": data.get("source") or "local",
                 "message_count": len(data.get("messages", [])),
                 "external_url": data.get("external_url") or "",
@@ -817,8 +834,16 @@ def _global_memory_file() -> Path:
     return GLOBAL_MEMORY_FILE
 
 
+CROSS_TAB_MAX_CHATS = 5
+CROSS_TAB_MAX_CHARS = 2_500
+
+
 def _memory_enabled() -> bool:
     return _settings_value("memory_enabled", True) is not False
+
+
+def _cross_tab_memory_enabled() -> bool:
+    return _settings_value("cross_tab_memory", True) is not False
 
 
 def _read_memory_file(path: Path, cap: int) -> str:
@@ -829,15 +854,123 @@ def _read_memory_file(path: Path, cap: int) -> str:
     return text[:cap]
 
 
-def _memory_block(folder) -> tuple:
-    """Combined general + project memory, formatted for the model.
+def _summarize_tab_for_memory(data: dict) -> str:
+    """One-line deterministic digest of a sibling chat tab in the same project."""
+    messages = [m for m in (data.get("messages") or []) if isinstance(m, dict)]
+    users = [m for m in messages if m.get("role") == "user" and (m.get("text") or "").strip()]
+    assistants = [
+        m for m in messages
+        if m.get("role") == "assistant"
+        and ((m.get("text") or "").strip() or (m.get("text_b") or "").strip() or (m.get("tools") or []))
+    ]
+    if not users or not assistants:
+        return ""
+    title = _clip(data.get("title") or "Conversation", 64)
+    stamp = str(data.get("updated_at") or "")[:16].replace("T", " ")
+    goal = _clip(" ".join(str(users[0].get("text") or "").split()), 140)
+    latest_ask = _clip(" ".join(str(users[-1].get("text") or "").split()), 140) if len(users) > 1 else ""
+    touched = []
+    for m in messages:
+        for step in (m.get("tools") or []):
+            if not isinstance(step, dict):
+                continue
+            if step.get("tool") in ("write_file", "edit_file") and step.get("summary"):
+                summary = str(step["summary"]).strip()
+                if summary and summary not in touched:
+                    touched.append(summary)
+    outcome = ""
+    for m in reversed(assistants):
+        raw = (m.get("text") or "").strip() or (m.get("text_b") or "").strip()
+        cleaned = " ".join(agent.strip_tool_calls(raw).split())
+        if cleaned:
+            outcome = _clip(cleaned, 220)
+            break
+    segments = []
+    if goal:
+        segments.append(f"Goal: {goal}")
+    if latest_ask and latest_ask != goal:
+        segments.append(f"Latest: {latest_ask}")
+    if touched:
+        segments.append("Files: " + ", ".join(touched[-5:]))
+    if outcome:
+        segments.append(f"Outcome: {outcome}")
+    if not segments:
+        return ""
+    header = f'- "{title}"' + (f" ({stamp})" if stamp else "")
+    return header + " \u2014 " + " | ".join(segments)
+
+
+def _cross_tab_memory(folder, exclude_chat_ids=None) -> tuple:
+    """Compact live digest of recent sibling tabs in the same project folder.
+
+    Returns ``(text, count)``. Only top-level chats belonging to the current
+    account, track and workspace folder are included, sorted newest first.
+    """
+    target = _norm_workspace_path(folder)
+    if not target or not CHATS_DIR.exists():
+        return "", 0
+    excluded = {str(cid) for cid in (exclude_chat_ids or ()) if cid}
+    track = _request_track()
+    store = _accounts_load()
+    current_id, first_id = store.get("current"), _first_account_id(store)
+    candidates = []
+    try:
+        entries = list(CHATS_DIR.iterdir())
+    except OSError:
+        return "", 0
+    for d in entries:
+        if not d.is_dir() or d.name in excluded:
+            continue
+        chat_file = d / "chat.json"
+        if not chat_file.exists():
+            continue
+        try:
+            data = json.loads(chat_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        cid = str(data.get("id") or d.name)
+        if cid in excluded:
+            continue
+        if data.get("parent_id") or data.get("supervisor_of"):
+            continue
+        if not _chat_visible(data, current_id, first_id):
+            continue
+        is_google = (data.get("source") == "google")
+        if (track == "google") != is_google:
+            continue
+        if _norm_workspace_path(data.get("workspace")) != target:
+            continue
+        candidates.append((str(data.get("updated_at") or ""), data))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    lines = []
+    budget = CROSS_TAB_MAX_CHARS
+    for _, data in candidates:
+        if len(lines) >= CROSS_TAB_MAX_CHATS:
+            break
+        line = _summarize_tab_for_memory(data)
+        if not line:
+            continue
+        cost = len(line) + (1 if lines else 0)
+        if cost > budget and lines:
+            break
+        if len(line) > budget:
+            line = _clip(line, max(80, budget))
+        lines.append(line)
+        budget -= len(line) + 1
+        if budget < 80:
+            break
+    return "\n".join(lines), len(lines)
+
+
+def _memory_block(folder, exclude_chat_id=None) -> tuple:
+    """Combined general + project + cross-tab memory, formatted for the model.
 
     Returns (block, hash); ("", None) when there is nothing to send.  The
     block travels once per Arena session and again only when it changed
     (same discipline as the MCP connector guide).
     """
     parts = []
-    general = _read_memory_file(GLOBAL_MEMORY_FILE, 3_000)
+    general = _read_memory_file(_global_memory_file(), 3_000)
     if general:
         parts.append("General memory (all projects):\n" + general)
     if folder:
@@ -847,6 +980,19 @@ def _memory_block(folder) -> tuple:
         project = _read_memory_file(Path(folder) / MEMORY_FILE_NAME, 6_000)
         if project:
             parts.append(f"Project memory ({MEMORY_FILE_NAME} in {folder}):\n" + project)
+        if _cross_tab_memory_enabled():
+            excluded = (
+                exclude_chat_id
+                if isinstance(exclude_chat_id, (list, tuple, set, frozenset))
+                else ([exclude_chat_id] if exclude_chat_id else [])
+            )
+            cross_text, _cross_count = _cross_tab_memory(folder, exclude_chat_ids=excluded)
+            if cross_text:
+                parts.append(
+                    f"Recent sibling tabs in this project ({folder}) \u2014 "
+                    "automatic summaries from other chats in the same folder:\n"
+                    + cross_text
+                )
     if not parts:
         return "", None
     body = "\n\n".join(parts)
@@ -2012,14 +2158,15 @@ _SETTINGS_ALLOWLIST = frozenset({
     "update_check", "beta_updates", "elo_enabled", "auto_continue", "notify_sound",
     "pacing", "pacing_preset", "cheap_subagents", "multi_session_subagents",
     "account_failover", "tray_enabled", "layout", "arena_connectors_off",
-    "memory_enabled", "persona", "show_reasoning", "auto_copy", "max_history", "browser",
+    "memory_enabled", "cross_tab_memory", "persona", "show_reasoning", "auto_copy",
+    "max_history", "browser",
 })
 
 # Keys that mean something per track (they follow the mode switch); the rest
 # stay app-wide, because a font size or a window layout is not a chat setting.
 _TRACKED_SETTING_KEYS = frozenset({
     "workspace_dir", "default_mode", "default_modality", "model_a", "model_b",
-    "permission_mode", "memory_enabled", "gateway_enabled", "gateway_auto",
+    "permission_mode", "memory_enabled", "cross_tab_memory", "gateway_enabled", "gateway_auto",
     "gateway_servers", "gateway_workspace", "gateway_tunnel_protocol",
     "persona", "show_reasoning", "auto_copy", "auto_continue", "elo_enabled",
     "cheap_subagents", "multi_session_subagents", "account_failover", "pacing",
@@ -2480,8 +2627,12 @@ def api_chat_compact(chat_id):
 def api_memory_get():
     folder = _chosen_ws()
     memory_file = _global_memory_file()
+    cross_text, cross_count = _cross_tab_memory(folder) if folder else ("", 0)
     return jsonify({
         "enabled": _memory_enabled(),
+        "cross_tab_enabled": _cross_tab_memory_enabled(),
+        "cross_tab_preview": cross_text,
+        "cross_tab_count": cross_count,
         "track": _request_track(),
         "folder": str(folder) if folder else None,
         "global": _read_memory_file(memory_file, 100_000),
@@ -2504,11 +2655,48 @@ def api_memory_save():
             (Path(folder) / MEMORY_FILE_NAME).write_text(data["workspace"], encoding="utf-8")
     except OSError as e:
         return jsonify({"error": f"Could not save memory: {e}", "code": "save_failed"}), 500
+    patch = {}
     if "enabled" in data:
-        _settings_store({"memory_enabled": bool(data.get("enabled"))})
+        patch["memory_enabled"] = bool(data.get("enabled"))
+    if "cross_tab_enabled" in data:
+        patch["cross_tab_memory"] = bool(data.get("cross_tab_enabled"))
+    if patch:
+        _settings_store(patch)
+    cross_text, cross_count = _cross_tab_memory(folder) if folder else ("", 0)
     return jsonify({"ok": True, "enabled": _memory_enabled(),
+                    "cross_tab_enabled": _cross_tab_memory_enabled(),
+                    "cross_tab_preview": cross_text,
+                    "cross_tab_count": cross_count,
                     "track": _request_track(),
                     "folder": str(folder) if folder else None})
+
+
+@app.route("/api/memory/sync-tabs", methods=["POST"])
+def api_memory_sync_tabs():
+    """Snapshot the active project's recent sibling-tab summaries into MEMORY.md."""
+    folder = _chosen_ws()
+    if not folder:
+        return jsonify({"error": "Select a project folder first.", "code": "no_workspace"}), 400
+    cross_text, count = _cross_tab_memory(folder)
+    if not cross_text or not count:
+        return jsonify({"error": "No completed sibling tabs in this folder yet.",
+                        "code": "empty"}), 400
+    path = Path(folder) / MEMORY_FILE_NAME
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    entry = f"\n## Cross-tab snapshot \u2014 {stamp}\n\n{cross_text}\n"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            current = path.read_text(encoding="utf-8")
+        else:
+            current = ("# Project memory\n\nPersistent notes shared across Arena Desktop "
+                       "chats in this folder, kept by the user and the models.\n")
+        updated = current.rstrip() + "\n" + entry
+        path.write_text(updated, encoding="utf-8")
+    except OSError as e:
+        return jsonify({"error": f"Could not update MEMORY.md: {e}", "code": "save_failed"}), 500
+    return jsonify({"ok": True, "count": count, "path": str(path),
+                    "workspace": _read_memory_file(path, 100_000)})
 
 
 _update_cache = {"t": 0.0, "data": None}
@@ -2568,9 +2756,11 @@ def _settings_bundle() -> dict:
     """Everything Settings export carries: config, memory files, MCP config.
     Account cookies are never part of it."""
     cfg = load_config()
+    google_mem = GLOBAL_MEMORY_FILE.with_name("memory-google.md")
     bundle = {"app": "Arena Desktop", "version": 1,
               "config": {key: value for key, value in cfg.items() if key in _SETTINGS_ALLOWLIST},
-              "memory_global": _read_memory_file(GLOBAL_MEMORY_FILE, 100_000)}
+              "memory_global": _read_memory_file(GLOBAL_MEMORY_FILE, 100_000),
+              "memory_global_google": _read_memory_file(google_mem, 100_000)}
     folder = _chosen_ws()
     bundle["memory_workspace"] = (
         _read_memory_file(Path(folder) / MEMORY_FILE_NAME, 100_000) if folder else None)
@@ -2609,6 +2799,10 @@ def api_settings_import():
         if isinstance(data.get("memory_global"), str):
             GLOBAL_MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
             GLOBAL_MEMORY_FILE.write_text(data["memory_global"], encoding="utf-8")
+        if isinstance(data.get("memory_global_google"), str):
+            google_mem = GLOBAL_MEMORY_FILE.with_name("memory-google.md")
+            google_mem.parent.mkdir(parents=True, exist_ok=True)
+            google_mem.write_text(data["memory_global_google"], encoding="utf-8")
         folder = _chosen_ws()
         if folder and isinstance(data.get("memory_workspace"), str):
             (Path(folder) / MEMORY_FILE_NAME).write_text(data["memory_workspace"], encoding="utf-8")
@@ -3638,7 +3832,7 @@ def _run_automation(item):
             "allow_delegate": True, "delegate_sent": False}
     prefix = ""
     if _memory_enabled():
-        block, _h = _memory_block(_chosen_ws())
+        block, _h = _memory_block(_chosen_ws(), exclude_chat_id=chat_id)
         prefix = block or ""
     history = [{"role": "user", "text": prompt}]
     out = {"a": "", "b": ""}
@@ -3805,9 +3999,6 @@ def api_automations_run(aid):
     if not _spawn_automation(item):
         return jsonify({"error": "That automation is already running.", "code": "busy"}), 409
     return jsonify({"ok": True})
-
-
-_start_automation_scheduler()
 
 
 def _archive_agentic_on_arena(session_id: str) -> Optional[str]:
@@ -4441,7 +4632,7 @@ class _QuietHandler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
-_preview = {"port": None}
+_preview = {"port": None, "server": None}
 _preview_lock = threading.Lock()
 
 
@@ -4458,6 +4649,7 @@ def _preview_url(root: Path):
         if _preview["port"] is None:
             srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(_QuietHandler, directory=str(base)))
             _preview["port"] = srv.server_address[1]
+            _preview["server"] = srv
             threading.Thread(target=srv.serve_forever, daemon=True).start()
     return f"http://127.0.0.1:{_preview['port']}/{urllib.parse.quote(rel)}/index.html"
 
@@ -5297,12 +5489,16 @@ def _register_subagent_context(parent_id, client, timezone):
     if root is None:
         return ""
     handle = secrets.token_urlsafe(32)
+    now = time.time()
     context = {"parent": str(parent_id), "client": client, "root": Path(root).resolve(),
                "timezone": timezone, "mode": _perm_mode(),
-               "parent_stop": _chat_stop_event(parent_id)}
+               "parent_stop": _chat_stop_event(parent_id), "created": now}
     with _SUBAGENT_CONTEXTS_LOCK:
-        for key in [key for key, ctx in _SUBAGENT_CONTEXTS.items() if ctx["parent"] == str(parent_id)]:
+        for key in [key for key, ctx in _SUBAGENT_CONTEXTS.items()
+                    if ctx["parent"] == str(parent_id) or (now - float(ctx.get("created") or 0)) > 3600]:
             del _SUBAGENT_CONTEXTS[key]
+        while len(_SUBAGENT_CONTEXTS) >= 100:
+            _SUBAGENT_CONTEXTS.pop(next(iter(_SUBAGENT_CONTEXTS)), None)
         _SUBAGENT_CONTEXTS[handle] = context
     return handle
 
@@ -5859,6 +6055,8 @@ def _native_probe_out(client, address, pat):
         probe.close()
         LOG.info("native probe: %s -> HTTP %s %s", url, code, head)
         if code == 200:
+            while len(_NATIVE_OUT_OVERRIDE) >= 200:
+                _NATIVE_OUT_OVERRIDE.pop(next(iter(_NATIVE_OUT_OVERRIDE)), None)
             _NATIVE_OUT_OVERRIDE[key] = url
             LOG.info("native probe: using %s for this session", url)
             return url
@@ -7644,7 +7842,7 @@ def _run_subagent(client, parent_conv: dict, call: dict, lane: str, child_id: st
                   "allowed_tools": (set(agent.READ_ONLY_TOOLS) if smode == "research" else None)}
     prefix = ""
     if _memory_enabled():
-        block, _hash = _memory_block(_chosen_ws())
+        block, _hash = _memory_block(_chosen_ws(), exclude_chat_id=(child_id, parent_conv.get("chat_id")))
         prefix = block or ""
     _generation_started(child_id)
     prev_error = getattr(_tl, "error", None)
@@ -8827,6 +9025,11 @@ def _supervisor_run(client, google_chat_id: str, title: str, user_message: str,
     yield _sse({"type": "supervisor", "state": "started", "chat_id": executor_id,
                 "title": exec_title, "steps": steps})
     instruction = _supervisor_brief(user_message, brief, workspace, 0, steps, ru)
+    if _memory_enabled():
+        block, mem_hash = _memory_block(_chosen_ws(), exclude_chat_id=(executor_id, google_chat_id))
+        if block:
+            instruction = block + instruction
+            conv["memory_hash"] = mem_hash
     history = []
     report = ""
     raw = ""
@@ -9468,6 +9671,8 @@ def _google_call_bounded(fn, fallback, limit: float = 2.5):
 def _cache_browser_profiles() -> tuple[str, ...]:
     """Profiles that must survive this run, because a live window uses them."""
     keep = ["google-browser"]
+    if _engine_on():
+        keep.append("webview")
     engine = _google_engine()
     try:
         window = getattr(engine, "window", None)
@@ -9477,7 +9682,7 @@ def _cache_browser_profiles() -> tuple[str, ...]:
         state = {}
     if isinstance(state, dict) and state.get("running"):
         name = state.get("name")
-        if name:
+        if name and str(name) not in keep:
             keep.append(str(name))
     return tuple(keep)
 
@@ -10270,7 +10475,7 @@ def _api_chat_impl():
         native_mem_hash = existing.get("memory_hash")
         native_digest = existing.get("pending_digest") or ""
         if _memory_enabled():
-            block, mem_hash = _memory_block(_chosen_ws())
+            block, mem_hash = _memory_block(_chosen_ws(), exclude_chat_id=chat_id)
             fresh_native = not (existing.get("native") or {}).get("session_id")
             if block and (fresh_native or native_digest or mem_hash != native_mem_hash):
                 native_prefix += block
@@ -10444,7 +10649,7 @@ def _api_chat_impl():
     if modality not in ("image", "video"):
         digest = existing.get("pending_digest") or ""
         if _memory_enabled():
-            block, mem_hash = _memory_block(_chosen_ws())
+            block, mem_hash = _memory_block(_chosen_ws(), exclude_chat_id=chat_id)
             if block and (conv["new"] or digest or mem_hash != conv.get("memory_hash")):
                 conv["prefix"] += block
                 conv["memory_hash"] = mem_hash
@@ -10561,150 +10766,6 @@ def _api_chat_impl():
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
-
-# ---------- File CRUD (IDE) ----------
-
-def _safe_resolve(rel_path: str) -> Path:
-    """Resolve a user-supplied path, blocking traversal outside home."""
-    home = Path.home().resolve()
-    if rel_path in ("", "."):
-        return home
-    p = Path(rel_path).expanduser()
-    p = (p if p.is_absolute() else home / p).resolve()
-    if p != home and home not in p.parents:
-        raise PermissionError("Access denied: outside home directory")
-    return p
-
-
-@app.route("/api/files")
-def api_files_list():
-    rel = request.args.get("path", ".")
-    try:
-        p = _safe_resolve(rel)
-    except PermissionError as e:
-        return jsonify({"error": str(e)}), 403
-    if not p.is_dir():
-        return jsonify({"error": "Not a directory"}), 400
-    items = []
-    try:
-        for child in sorted(p.iterdir()):
-            try:
-                items.append({
-                    "name": child.name,
-                    "path": str(child),
-                    "is_dir": child.is_dir(),
-                    "size": child.stat().st_size if child.is_file() else 0,
-                })
-            except (PermissionError, OSError):
-                pass
-    except PermissionError:
-        return jsonify({"error": "Permission denied"}), 403
-    return jsonify({"files": items, "cwd": str(p)})
-
-
-@app.route("/api/files/read")
-def api_files_read():
-    rel = request.args.get("path", "")
-    if not rel:
-        return jsonify({"error": "No path"}), 400
-    try:
-        p = _safe_resolve(rel)
-    except PermissionError as e:
-        return jsonify({"error": str(e)}), 403
-    if not p.is_file():
-        return jsonify({"error": "Not a file"}), 404
-    if p.stat().st_size > 2 * 1024 * 1024:
-        return jsonify({"error": "File too large (>2 MB)"}), 400
-    try:
-        content = p.read_text(encoding="utf-8", errors="replace")
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-    return jsonify({"content": content, "path": str(p)})
-
-
-@app.route("/api/files/write", methods=["POST"])
-def api_files_write():
-    data = request.get_json(silent=True) or {}
-    rel = data.get("path", "")
-    content = data.get("content", "")
-    if not rel:
-        return jsonify({"error": "No path"}), 400
-    try:
-        p = _safe_resolve(rel)
-    except PermissionError as e:
-        return jsonify({"error": str(e)}), 403
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content, encoding="utf-8")
-    return jsonify({"ok": True, "path": str(p)})
-
-
-@app.route("/api/files/delete", methods=["POST"])
-def api_files_delete():
-    data = request.get_json(silent=True) or {}
-    rel = data.get("path", "")
-    if not rel:
-        return jsonify({"error": "No path"}), 400
-    try:
-        p = _safe_resolve(rel)
-    except PermissionError as e:
-        return jsonify({"error": str(e)}), 403
-    if p.is_file():
-        p.unlink()
-    elif p.is_dir():
-        import shutil
-        shutil.rmtree(p)
-    else:
-        return jsonify({"error": "Not found"}), 404
-    return jsonify({"ok": True})
-
-
-@app.route("/api/files/mkdir", methods=["POST"])
-def api_files_mkdir():
-    data = request.get_json(silent=True) or {}
-    rel = data.get("path", "")
-    if not rel:
-        return jsonify({"error": "No path"}), 400
-    try:
-        p = _safe_resolve(rel)
-    except PermissionError as e:
-        return jsonify({"error": str(e)}), 403
-    p.mkdir(parents=True, exist_ok=True)
-    return jsonify({"ok": True, "path": str(p)})
-
-
-# ---------- Terminal ----------
-
-@app.route("/api/terminal", methods=["POST"])
-def api_terminal():
-    import subprocess
-    data = request.get_json(silent=True) or {}
-    cmd = data.get("command", "").strip()
-    if not cmd:
-        return jsonify({"error": "No command"}), 400
-    if permissions.CATASTROPHIC.search(cmd):
-        return jsonify({"error": "This command is never allowed"}), 403
-    if re.search(r"(?:^|\s)(?:-c|-e|--eval|-enc|-encodedcommand)(?:\s|$)", cmd, re.I):
-        return jsonify({"error": "Inline code execution flags are blocked"}), 403
-    blocked = ["format", "del /s", "rd /s", "rmdir /s", "rm -rf /"]
-    for b in blocked:
-        if b in cmd.lower():
-            return jsonify({"error": f"Blocked: {b}"}), 403
-    try:
-        result = subprocess.run(
-            ["/bin/sh", "-lc", cmd],
-            shell=False, capture_output=True, text=True,
-            timeout=30, cwd=str(Path.home()),
-        )
-        return jsonify({
-            "output": result.stdout[-4000:] if result.stdout else "",
-            "error": result.stderr[-2000:] if result.stderr else "",
-            "code": result.returncode,
-        })
-    except subprocess.TimeoutExpired:
-        return jsonify({"error": "Command timed out (30s)"}), 408
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 
 # ---------- Guard, permissions, engine, diagnostics, workspace ----------
@@ -11801,8 +11862,70 @@ def api_media_save():
     return jsonify({"ok": True, "path": str(target), "folder": str(folder)})
 
 
+_shutdown_lock = threading.Lock()
+_shutdown_done = False
+
+
+def shutdown_runtime() -> dict:
+    """Cleanly stop background runtime resources (Gateway, MCP, sub-agents, preview server, instance file)."""
+    global _shutdown_done
+    with _shutdown_lock:
+        if _shutdown_done:
+            return {"already": True}
+        _shutdown_done = True
+    report = {}
+    try:
+        report["permissions_cancelled"] = BROKER.cancel_all()
+    except Exception:
+        LOG.exception("shutdown: broker cancel failed")
+    try:
+        report["subagents_cancelled"] = _NATIVE_SUBAGENTS.cancel_all()
+    except Exception:
+        LOG.exception("shutdown: subagent cancel failed")
+    try:
+        if _GATEWAY is not None:
+            _GATEWAY.stop()
+            report["gateway_stopped"] = True
+    except Exception:
+        LOG.exception("shutdown: gateway stop failed")
+    try:
+        CONNECTORS.shutdown()
+        report["connectors_shutdown"] = True
+    except Exception:
+        LOG.exception("shutdown: connectors shutdown failed")
+    try:
+        with _preview_lock:
+            srv = _preview.get("server")
+            _preview["server"] = None
+            _preview["port"] = None
+        if srv is not None:
+            srv.shutdown()
+            srv.server_close()
+            report["preview_stopped"] = True
+    except Exception:
+        LOG.exception("shutdown: preview server stop failed")
+    try:
+        from arena import deep_links
+        inst = deep_links.read_instance()
+        if inst and int(inst.get("pid") or 0) == os.getpid():
+            deep_links.instance_path().unlink(missing_ok=True)
+            report["instance_removed"] = True
+    except Exception:
+        LOG.exception("shutdown: instance file cleanup failed")
+    try:
+        from arena.config import cleanup_pid
+        cleanup_pid()
+    except Exception:
+        pass
+    return report
+
+
 def run_server(port: int = 5000, open_browser: bool = True):
     """Start the Flask server and optionally open browser."""
+    _start_automation_scheduler()
     if open_browser:
         threading.Timer(1.0, lambda: webbrowser.open(f"http://localhost:{port}")).start()
-    app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
+    try:
+        app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
+    finally:
+        shutdown_runtime()

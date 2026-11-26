@@ -41,9 +41,8 @@ from pathlib import Path
 
 LOG = logging.getLogger("arena.appcache")
 
-# Both browser profiles. They are created on first use, so a missing one is
-# simply "nothing to clear".
-BROWSER_PROFILES = ("google-browser", "arena-browser")
+# Browser profiles (Linux WebKitGTK storage plus legacy Chromium profile names).
+BROWSER_PROFILES = ("webview", "google-browser", "arena-browser")
 # Written by the app, cheap to rebuild, and the thing most likely to be stale.
 CATALOG_FILES = ("models_cache.json", "elo_cache.json")
 # Logs are cache in the practical sense: they are only read when something is

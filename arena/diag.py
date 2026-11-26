@@ -161,270 +161,91 @@ _BLOCKING_WINDOW_CALLS = ("show", "hide", "resize", "move", "restore", "load_url
 _wrapped_windows: "list" = []
 
 
+def _glib_idle_add(fn) -> bool:
+    """Schedule ``fn`` on the active GTK/GLib main loop without blocking."""
+    try:
+        from gi.repository import GLib, Gtk  # type: ignore
+        if Gtk.main_level() <= 0:
+            return False
+
+        def _once():
+            try:
+                fn()
+            except Exception:
+                LOG.info("[window] GLib UI callback failed", exc_info=True)
+            return False  # GLib.SOURCE_REMOVE: run once
+
+        GLib.idle_add(_once)
+        return True
+    except Exception:
+        return False
+
+
 def run_on_ui_nonblocking(window, action, name: str = "ui-call") -> bool:
-    """Run ``action`` on the window's UI thread WITHOUT ever blocking.
+    """Run ``action`` safely on the GTK UI thread without blocking.
 
-    This is the fix for the freeze, and it has to work at this level.
-
-    pywebview's own ``BrowserView.hide()`` is::
-
-        def hide(self):
-            self.Invoke(Func[Type](self.Hide))     # no InvokeRequired check
-
-    ``Form.Invoke`` blocks until the UI thread runs the delegate, and pythonnet
-    performs that call **holding the GIL**. A blocking .NET call from a worker
-    thread therefore stops every Python thread in the process — the log, the
-    watchdog, the heartbeat — and if the UI thread is itself waiting on
-    something, the block never ends. Moving the call to a daemon thread does
-    not help: the GIL is global, so one blocked thread freezes them all.
-
-    ``show()`` (line below it in pywebview) checks ``InvokeRequired`` first;
-    ``hide()`` does not. That asymmetry is the whole bug: closing the chats
-    drawer hides a window, and in Google mode that path froze the app.
-
-    So the call is posted with ``BeginInvoke``, which returns immediately, and
-    the GIL is never held while waiting. Returns True when the work was queued.
+    Touching GTK/WebKitGTK widgets from a background thread (Flask workers,
+    engine load callbacks) can corrupt state or crash under Wayland. When the
+    GTK main loop is running and the caller is off the main thread, dispatch
+    via ``GLib.idle_add``; otherwise run directly.
     """
     if window is None:
         return False
-    native = getattr(window, "native", None)
-    if native is None:
-        # No WinForms host (tests, non-Windows): plain call, nothing to block on.
-        try:
-            action()
+    if threading.current_thread() is not threading.main_thread():
+        if _glib_idle_add(action):
             return True
-        except Exception:
-            LOG.info("[window] %s failed: %s", name, exc_info=True)
-            return False
-    def call():
-        try:
-            action()
-        except Exception:
-            LOG.info("[window] %s failed on the UI thread", name)
-
     try:
-        from System.Windows.Forms import MethodInvoker  # type: ignore
-        delegate = MethodInvoker(call)
-    except Exception:
-        # Not on Windows (tests, wine smoke): BeginInvoke still accepts a
-        # plain callable, and on the real host the import above succeeds.
-        delegate = call
-
-    try:
-        if getattr(native, "InvokeRequired", False):
-            if hasattr(native, "BeginInvoke"):
-                native.BeginInvoke(delegate)
-                return True
-            # Refuse rather than deadlock: a blocking Invoke here would stop
-            # every thread in the application.
-            LOG.warning("[window] %s skipped: window has no BeginInvoke", name)
-            return False
-        call()
+        action()
         return True
     except Exception:
-        LOG.info("[window] %s could not be queued, running directly",
-                 name, exc_info=True)
-        try:
-            action()
-            return True
-        except Exception:
-            LOG.info("[window] %s failed", name, exc_info=True)
-            return False
+        LOG.info("[window] %s failed", name, exc_info=True)
+        return False
 
 
 def make_window_calls_non_blocking(window) -> None:
-    """Make pywebview's window calls safe to invoke from any thread.
+    """Marshal pywebview window calls onto the GTK main thread via GLib.idle_add.
 
-    ``BrowserView.hide()`` is ``self.Invoke(Func[Type](self.Hide))`` — a
-    blocking WinForms Invoke with no ``InvokeRequired`` guard (``show()`` has
-    one). Called from a worker it blocks while pythonnet holds the GIL, so the
-    whole process stops; if the UI thread is busy, it never returns at all.
-    This is the freeze when the chats drawer is closed in Google mode.
-
-    The wrappers below do the same work — the native form's ``Hide()``,
-    ``Show()``, ``SetBounds`` — but post it with ``BeginInvoke``, which returns
-    at once and never holds the GIL while waiting.
+    ``pywebview.platforms.gtk`` calls ``show_all()``, ``move()``, and
+    ``resize()`` directly on the calling thread instead of via ``GLib.idle_add``.
+    Wrapping these methods guarantees thread safety on GTK/Wayland while always
+    calling through to the real method (never silently dropping calls).
     """
     if not enabled() or window is None:
         return
     if any(win is window for win in _wrapped_windows):
         return
-    # A browser window is not pywebview: it has no native form to marshal to,
-    # and these wrappers *replace* `show()`/`load_url()` with no-ops that only
-    # work through a WinForms host. Applied to one, the wrappers made the sign-in
-    # button open nothing at all: `show()` did nothing, `native` was None, and
-    # the browser process was never started. Leave the real methods alone.
     if getattr(window, "is_browser", False) is True:
-        LOG.info("[window] browser window: its own calls kept (no BeginInvoke routing)")
+        LOG.info("[window] browser window: its own calls kept")
         return
-    # The same applies to the lazy wrapper: its `show()` is what *creates* the
-    # real window, and replacing it with a marshalling no-op meant the window
-    # was never created at all -- the sign-in click opened nothing. The wrapper
-    # wraps the real window itself, once it exists (see `LazyWindow.ensure`).
     if hasattr(window, "_factory") and hasattr(window, "ensure"):
         LOG.info("[window] lazy window: wrapped after creation, not before")
         return
     _wrapped_windows.append(window)
 
-    def native_of():
-        native = getattr(window, "native", None)
-        return native if native is not None else None
-
-    def original_of(name):
-        """The method this wrapper replaced, or None."""
-        return window.__dict__.get("_original_" + name)
-
-    def has_host(*members):
-        """True when `native` really is a WinForms host for these calls.
-
-        A window whose `native` is a browser stub, a test double or plain
-        ``object()`` has nothing to marshal to: its own methods must be used, or
-        the call silently disappears.
-        """
-        native = native_of()
-        if native is None:
-            return False
-        return any(hasattr(native, member) for member in members)
-
-    def hide():
-        native = native_of()
-        if has_host("Hide"):
-            # Straight to the form's own Hide(): this is what pywebview's
-            # BrowserView.hide() wraps in a blocking Invoke.
-            run_on_ui_nonblocking(window, native.Hide, "hide")
-            return
-        # No native host: nothing to marshal, so the real method is the honest
-        # answer. Dropping the call here is what made the sign-in button do
-        # nothing once the window behind it was a browser rather than WinForms.
-        try:
-            original = original_of("hide")
-            if callable(original):
-                original()
-        except Exception:
-            LOG.info("[window] hide skipped")
-
-    def show():
-        native = native_of()
-        if not has_host("Show", "Activate"):
-            # No form to marshal to: call the real `show()`. For a lazy wrapper
-            # that is what creates the window, and for a browser window it is
-            # what starts the browser -- dropping the call there is what made
-            # the sign-in button open nothing.
-            original = original_of("show")
-            if callable(original):
-                return original()
-            return None
-
-        def bring_up():
-            if hasattr(native, "Show"):
-                native.Show()
-            if hasattr(native, "Activate"):
-                native.Activate()
-
-        run_on_ui_nonblocking(window, bring_up, "show")
-
-    def resize(*args, **kwargs):
-        native = native_of()
-        if not has_host("SetBounds"):
-            return
-        try:
-            width, height = int(args[0]), int(args[1])
-            fixed = kwargs.get("fix_point", True)
-            x = native.Left if fixed else native.Left
-            y = native.Top if fixed else native.Top
-            run_on_ui_nonblocking(
-                window, lambda: native.SetBounds(x, y, width, height), "resize")
-        except Exception:
-            LOG.info("[window] resize wrapper skipped")
-
-    def move(*args, **kwargs):
-        native = native_of()
-        if not has_host("SetLocation", "SetBounds"):
-            return
-        try:
-            x, y = int(args[0]), int(args[1])
-            run_on_ui_nonblocking(window, lambda: native.SetLocation(x, y), "move")
-        except Exception:
-            LOG.info("[window] move wrapper skipped")
-
-    def restore():
-        native = native_of()
-        if not has_host("Show", "Activate"):
-            return
-        run_on_ui_nonblocking(
-            window, lambda: native.WindowState == 0 or native.Show(), "restore")
-
-
-    # load_url was declared in _BLOCKING_WINDOW_CALLS but never wrapped, so it
-    # stayed pywebview's blocking version: @_shown_call parks the caller for 20
-    # seconds waiting for `shown` while holding the GIL. The thread dump from a
-    # real machine shows the result -- "window.load_url не возвращается уже 10 с"
-    # with the UI thread inside app.Run() -- and Google sign-in opened nothing.
-    # Navigating straight to the browser is what lets a hidden or
-    # never-shown window load a page at all.
-    def load_url(url):
-        url = str(url)
-
-        def navigate():
-            native = native_of()
-            control = getattr(native, "webview", None) if native is not None else None
-            core = getattr(control, "CoreWebView2", None) if control is not None else None
-            if core is not None:
-                run_on_ui_nonblocking(window, lambda: core.Navigate(url), "load_url")
-                return True
-            return False
-
-        if not has_host("webview"):
-            # No WinForms host with a WebView2 control (a browser window, a
-            # test): nothing can block here, so the real method is the honest
-            # choice -- and for a browser window it is the *only* thing that
-            # starts the browser.
-            try:
-                original = original_of("load_url")
-                if callable(original):
-                    return original(url)
-            except Exception:
-                LOG.info("[window] load_url skipped")
-            return
-
-        if navigate():
-            return
-
-        # CoreWebView2 is created asynchronously by pywebview, so the very first
-        # load can arrive before the browser exists. The old code called
-        # pywebview's load_url here, which parks the caller for 20 s waiting for
-        # `shown` while holding the GIL -- the freeze from the field dump. Wait
-        # for the browser on a daemon thread instead; the caller never blocks.
-        def retry():
-            end = time.time() + 30.0
-            while time.time() < end:
-                if navigate():
-                    LOG.info("[window] load_url navigated once CoreWebView2 was ready")
-                    return
-                time.sleep(0.2)
-            LOG.warning("[window] load_url gave up: CoreWebView2 never became ready "
-                        "(%s)", url)
-
-        threading.Thread(target=retry, daemon=True, name="window-load-url").start()
-
-    wrappers = {"hide": hide, "show": show, "resize": resize,
-                "move": move, "restore": restore, "load_url": load_url}
-    for name, wrapper in wrappers.items():
+    wrapped = []
+    for name in _BLOCKING_WINDOW_CALLS:
         original = getattr(window, name, None)
         if not callable(original):
             continue
-        # Keep every original: a wrapper with no native host to marshal to must
-        # call through to it. Otherwise the call is silently dropped -- that is
-        # how `show()` on a browser window became a no-op and the sign-in button
-        # opened nothing at all.
         window.__dict__["_original_" + name] = original
+
+        def _make_wrapper(fn, method_name):
+            def _wrapped(*args, **kwargs):
+                if threading.current_thread() is not threading.main_thread():
+                    if _glib_idle_add(lambda: fn(*args, **kwargs)):
+                        return None
+                return fn(*args, **kwargs)
+            return _wrapped
+
         try:
-            setattr(window, name, wrapper)
+            setattr(window, name, _make_wrapper(original, name))
+            wrapped.append(name)
         except Exception:
             LOG.info("[window] could not replace %s", name)
 
-    LOG.info("[window] window calls routed through BeginInvoke: %s",
-             ", ".join(sorted(wrappers)))
+    if wrapped:
+        LOG.info("[window] window calls marshaled for GTK thread safety: %s",
+                 ", ".join(sorted(wrapped)))
 
 
 def _start_watchdog() -> None:

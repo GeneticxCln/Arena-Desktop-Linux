@@ -222,3 +222,42 @@ def test_linux_chromium_v11_keyring_password_derives_key(monkeypatch):
     assert len(keys) == 2
     assert keys[0] != keys[1]  # keyring-derived key first, fallback 'peanuts' second
     assert keys[1] == appmod._linux_chromium_key()
+
+
+def test_dead_unpermissioned_terminal_and_files_routes_removed():
+    client = appmod.app.test_client()
+    assert client.post("/api/terminal", json={"command": "echo hi"}).status_code == 404
+    assert client.post("/api/files/write", json={"path": "x.txt", "content": "x"}).status_code == 404
+    assert client.get("/api/files").status_code == 404
+
+
+def test_shutdown_runtime_stops_gateway_connectors_subagents_and_instance(tmp_path, monkeypatch):
+    from arena import deep_links
+
+    events = []
+    fake_gw = SimpleNamespace(stop=lambda: events.append("gateway"))
+    fake_connectors = SimpleNamespace(shutdown=lambda: events.append("connectors"))
+    fake_subagents = SimpleNamespace(cancel_all=lambda: (events.append("subagents"), 1)[1])
+    fake_srv = SimpleNamespace(
+        shutdown=lambda: events.append("preview_shutdown"),
+        server_close=lambda: events.append("preview_close"),
+    )
+    deep_links.write_instance(51234, "tok")
+    assert deep_links.instance_path().exists()
+
+    monkeypatch.setattr(appmod, "_shutdown_done", False)
+    monkeypatch.setattr(appmod, "_GATEWAY", fake_gw)
+    monkeypatch.setattr(appmod, "CONNECTORS", fake_connectors)
+    monkeypatch.setattr(appmod, "_NATIVE_SUBAGENTS", fake_subagents)
+    monkeypatch.setitem(appmod._preview, "server", fake_srv)
+    monkeypatch.setitem(appmod._preview, "port", 51235)
+
+    report = appmod.shutdown_runtime()
+    assert report["gateway_stopped"] is True
+    assert report["connectors_shutdown"] is True
+    assert report["preview_stopped"] is True
+    assert report["instance_removed"] is True
+    assert not deep_links.instance_path().exists()
+    assert events == ["subagents", "gateway", "connectors", "preview_shutdown", "preview_close"]
+    # Idempotent on second call
+    assert appmod.shutdown_runtime() == {"already": True}

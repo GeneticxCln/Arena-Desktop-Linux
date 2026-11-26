@@ -83,16 +83,51 @@ class _Window:
     def load_url(self, url):
         self.calls.append(("load", url))
 
+    def resize(self, w, h):
+        self.calls.append(("resize", w, h))
+
+    def move(self, x, y):
+        self.calls.append(("move", x, y))
+
+    def restore(self):
+        self.calls.append("restore")
+
 
 def test_nonblocking_window_calls_still_reach_the_window(monkeypatch):
-    """A wrapper with no WinForms host must call through, never drop the call."""
+    """Wrapped window calls must call through on Linux, never silently drop."""
     monkeypatch.delenv("ARENA_DIAG", raising=False)
     window = _Window()
     diag.make_window_calls_non_blocking(window)
     window.show()
     window.hide()
+    window.resize(800, 600)
+    window.move(10, 20)
+    window.restore()
     window.load_url("https://example.test/")
-    assert window.calls == ["show", "hide", ("load", "https://example.test/")]
+    assert window.calls == [
+        "show", "hide", ("resize", 800, 600), ("move", 10, 20),
+        "restore", ("load", "https://example.test/"),
+    ]
+
+
+def test_nonblocking_window_calls_marshal_off_main_thread(monkeypatch):
+    """Worker-thread calls dispatch through GLib.idle_add when GTK loop is active."""
+    import threading
+
+    monkeypatch.delenv("ARENA_DIAG", raising=False)
+    queued = []
+    monkeypatch.setattr(diag, "_glib_idle_add", lambda fn: queued.append(fn) or True)
+    window = _Window()
+    diag.make_window_calls_non_blocking(window)
+
+    t = threading.Thread(target=lambda: (window.resize(900, 700), window.move(5, 6), window.show()))
+    t.start()
+    t.join(timeout=5)
+    assert window.calls == []
+    assert len(queued) == 3
+    for cb in queued:
+        cb()
+    assert window.calls == [("resize", 900, 700), ("move", 5, 6), "show"]
 
 
 def test_browser_windows_keep_their_own_methods(monkeypatch):

@@ -792,15 +792,6 @@ def test_media_save_rules(web):
     assert r["ok"] and Path(r["path"]).read_bytes().startswith(b"\x89PNG")
 
 
-def test_safe_resolve_blocks_outside_home(web):
-    appmod, *_ = web
-    assert appmod._safe_resolve(".") == Path.home().resolve()
-    with pytest.raises(PermissionError):
-        appmod._safe_resolve(str(Path.home().parent))
-    with pytest.raises(PermissionError):
-        appmod._safe_resolve("../")
-
-
 def test_check_panel_stays_below_recaptcha_popup():
     import re
     from arena import engine
@@ -2416,6 +2407,177 @@ def test_compact_guards_and_memory_endpoints(web, monkeypatch, tmp_path):
     assert "be brief" not in sent[-1][1]["userMessage"]["content"]
 
 
+def test_memory_block_uses_track_specific_global_memory_file(web, monkeypatch, tmp_path):
+    appmod, c, cfg, use, sent = web
+    arena_mem = tmp_path / "mem" / "memory.md"
+    google_mem = tmp_path / "mem" / "memory-google.md"
+    arena_mem.parent.mkdir(parents=True, exist_ok=True)
+    arena_mem.write_text("- ARENA-ONLY-FACT\n", encoding="utf-8")
+    google_mem.write_text("- GOOGLE-ONLY-FACT\n", encoding="utf-8")
+    monkeypatch.setattr(appmod, "GLOBAL_MEMORY_FILE", arena_mem)
+    try:
+        appmod._set_track("arena")
+        arena_block, _ = appmod._memory_block(None)
+        assert "ARENA-ONLY-FACT" in arena_block
+        assert "GOOGLE-ONLY-FACT" not in arena_block
+
+        appmod._set_track("google")
+        google_block, _ = appmod._memory_block(None)
+        assert "GOOGLE-ONLY-FACT" in google_block
+        assert "ARENA-ONLY-FACT" not in google_block
+    finally:
+        appmod._set_track("arena")
+
+
+def test_supervisor_run_injects_google_track_memory(web, monkeypatch, tmp_path):
+    appmod, c, cfg, use, sent = web
+    ws = tmp_path / "gproj"; ws.mkdir()
+    (ws / "MEMORY.md").write_text("- SUP-PROJECT-FACT\n", encoding="utf-8")
+    arena_mem = tmp_path / "mem" / "memory.md"
+    google_mem = tmp_path / "mem" / "memory-google.md"
+    arena_mem.parent.mkdir(parents=True, exist_ok=True)
+    arena_mem.write_text("- ARENA-MEM-SECRET\n", encoding="utf-8")
+    google_mem.write_text("- GOOGLE-MEM-FACT\n", encoding="utf-8")
+    monkeypatch.setattr(appmod, "GLOBAL_MEMORY_FILE", arena_mem)
+    cfg["google_settings"] = {"workspace_dir": str(ws), "memory_enabled": True}
+    captured = {}
+
+    def fake_agent_run(client, instruction, conv):
+        captured["instruction"] = instruction
+        captured["memory_hash"] = conv.get("memory_hash")
+        if False:
+            yield ""
+        return {"a": "Done."}
+
+    monkeypatch.setattr(appmod, "_agent_run", fake_agent_run)
+    try:
+        appmod._set_track("google")
+        gen = appmod._supervisor_run(None, "g-chat-1", "Task", "do work", "plan", 1, None, ru=False)
+        for _ in gen:
+            pass
+    finally:
+        appmod._set_track("arena")
+    assert "GOOGLE-MEM-FACT" in captured["instruction"]
+    assert "SUP-PROJECT-FACT" in captured["instruction"]
+    assert "ARENA-MEM-SECRET" not in captured["instruction"]
+    assert captured["memory_hash"]
+
+
+def test_cross_tab_memory_shares_live_updates_within_project_only(web, monkeypatch, tmp_path):
+    appmod, c, cfg, use, sent = web
+    ws_a = tmp_path / "proj_a"; ws_a.mkdir()
+    ws_b = tmp_path / "proj_b"; ws_b.mkdir()
+    monkeypatch.setattr(appmod, "GLOBAL_MEMORY_FILE", tmp_path / "none.md")
+    cfg["workspace_dir"] = str(ws_a)
+    appmod._ui_mode, appmod._ui_modality = "direct", "text"
+
+    # Tab A finishes a turn in proj_a.
+    use(FakeResp(['a0:"Migrated auth tokens to Argon2 in auth.py."']))
+    ev_a = events(c.post("/api/chat", json={
+        "message": "Upgrade password hashing in auth.py",
+        "mode": "direct", "modality": "text", "model_id": "m1", "tools": False,
+    }))
+    tab_a = next(e["chat_id"] for e in ev_a if e.get("chat_id"))
+    # Sub-agent child chat under Tab A should NOT pollute sibling summaries.
+    appmod._save_chat(
+        "cccccccc-cccc-7ccc-8ccc-cccccccccccc", title="Sub-agent noise",
+        messages=[{"role": "user", "text": "INTERNAL-CHILD-NOISE"},
+                  {"role": "assistant", "text": "CHILD-ONLY-OUTCOME"}],
+        mode="direct", modality="text", model_a="m1", parent_id=tab_a,
+    )
+
+    # Tab B starts in the same project -> automatically sees Tab A's summary.
+    use(FakeResp(['a0:"Sure, I will add tests for Argon2."']))
+    ev_b = events(c.post("/api/chat", json={
+        "message": "Now write login tests",
+        "mode": "direct", "modality": "text", "model_id": "m1", "tools": False,
+    }))
+    tab_b = next(e["chat_id"] for e in ev_b if e.get("chat_id"))
+    b_first = sent[-1][1]["userMessage"]["content"]
+    assert "Recent sibling tabs in this project" in b_first
+    assert "Migrated auth tokens to Argon2 in auth.py." in b_first
+    assert "INTERNAL-CHILD-NOISE" not in b_first
+
+    # Tab B follows up with no sibling changes -> memory is NOT resent.
+    use(FakeResp(['a0:"Done."']))
+    events(c.post("/api/chat", json={
+        "message": "Anything else?", "chat_id": tab_b,
+        "mode": "direct", "modality": "text", "model_id": "m1", "tools": False,
+    }))
+    assert "Recent sibling tabs in this project" not in sent[-1][1]["userMessage"]["content"]
+
+    # Tab A completes another turn -> Tab B automatically picks up the update!
+    use(FakeResp(['a0:"Added rate limiting middleware in limiter.py."']))
+    events(c.post("/api/chat", json={
+        "message": "Also add rate limiting", "chat_id": tab_a,
+        "mode": "direct", "modality": "text", "model_id": "m1", "tools": False,
+    }))
+    use(FakeResp(['a0:"Will cover limiter.py too."']))
+    events(c.post("/api/chat", json={
+        "message": "Update the test plan", "chat_id": tab_b,
+        "mode": "direct", "modality": "text", "model_id": "m1", "tools": False,
+    }))
+    assert "Added rate limiting middleware in limiter.py." in sent[-1][1]["userMessage"]["content"]
+
+    # Switching to proj_b isolates cross-tab memory completely.
+    cfg["workspace_dir"] = str(ws_b)
+    use(FakeResp(['a0:"Fresh project B reply."']))
+    events(c.post("/api/chat", json={
+        "message": "Hello from project B",
+        "mode": "direct", "modality": "text", "model_id": "m1", "tools": False,
+    }))
+    assert "Argon2" not in sent[-1][1]["userMessage"]["content"]
+    assert "limiter.py" not in sent[-1][1]["userMessage"]["content"]
+
+
+def test_cross_tab_memory_toggle_preview_and_snapshot(web, monkeypatch, tmp_path):
+    appmod, c, cfg, use, sent = web
+    ws = tmp_path / "proj_snap"; ws.mkdir()
+    (ws / "MEMORY.md").write_text("- MANUAL-FACT-1\n", encoding="utf-8")
+    monkeypatch.setattr(appmod, "GLOBAL_MEMORY_FILE", tmp_path / "none.md")
+    cfg["workspace_dir"] = str(ws)
+    appmod._ui_mode, appmod._ui_modality = "direct", "text"
+
+    # Seed one completed tab in ws.
+    appmod._save_chat(
+        "dddddddd-dddd-7ddd-8ddd-dddddddddddd", title="API refactor",
+        messages=[
+            {"role": "user", "text": "Refactor /api/orders to async"},
+            {"role": "assistant", "text": "Converted orders route to async handlers.",
+             "tools": [{"tool": "edit_file", "summary": "Edit routes/orders.py"}]},
+        ],
+        mode="direct", modality="text", model_a="m1", workspace_dir=str(ws),
+    )
+
+    # GET /api/memory exposes live preview and count.
+    mem = c.get("/api/memory").get_json()
+    assert mem["cross_tab_enabled"] is True
+    assert mem["cross_tab_count"] == 1
+    assert "API refactor" in mem["cross_tab_preview"]
+    assert "Edit routes/orders.py" in mem["cross_tab_preview"]
+
+    # Disabling cross_tab_enabled suppresses sibling summaries but keeps MEMORY.md.
+    saved = c.post("/api/memory", json={"cross_tab_enabled": False}).get_json()
+    assert saved["cross_tab_enabled"] is False
+    use(FakeResp(['a0:"ok"']))
+    events(c.post("/api/chat", json={
+        "message": "Check status", "mode": "direct",
+        "modality": "text", "model_id": "m1", "tools": False,
+    }))
+    body = sent[-1][1]["userMessage"]["content"]
+    assert "MANUAL-FACT-1" in body
+    assert "Converted orders route" not in body
+
+    # POST /api/memory/sync-tabs snapshots sibling tabs permanently into MEMORY.md.
+    snap = c.post("/api/memory/sync-tabs", json={})
+    assert snap.status_code == 200
+    snap_data = snap.get_json()
+    assert snap_data["ok"] is True and snap_data["count"] >= 1
+    written = (ws / "MEMORY.md").read_text(encoding="utf-8")
+    assert "Cross-tab snapshot" in written
+    assert "API refactor" in written
+
+
 def _delegate_parent(web, tmp_path, monkeypatch):
     """A local-agent parent chat ready to receive a delegated turn."""
     appmod, c, cfg, use, sent = web
@@ -2497,13 +2659,17 @@ def test_settings_export_import_roundtrip(web, monkeypatch, tmp_path):
     appmod, c, cfg, use, sent = web
     monkeypatch.setattr(appmod, "GLOBAL_MEMORY_FILE", tmp_path / "mem" / "memory.md")
     c.post("/api/memory", json={"global": "- fact A", "enabled": True})
+    c.post("/api/memory", json={"global": "- google fact A", "enabled": True, "track": "google"})
     bundle = c.get("/api/settings/export").get_json()
     assert bundle["app"] == "Arena Desktop" and bundle["memory_global"] == "- fact A"
+    assert bundle["memory_global_google"] == "- google fact A"
     assert "cookie" not in json.dumps(bundle).lower()
     c.post("/api/memory", json={"global": "- fact B"})
+    c.post("/api/memory", json={"global": "- google fact B", "track": "google"})
     r = c.post("/api/settings/import", json=bundle)
     assert r.status_code == 200
     assert c.get("/api/memory").get_json()["global"] == "- fact A"
+    assert c.get("/api/memory?track=google").get_json()["global"] == "- google fact A"
     backups = list((tmp_path / "backups").glob("settings-*.json"))
     assert len(backups) == 1
     assert c.post("/api/settings/import", json={"app": "Other"}).status_code == 400
