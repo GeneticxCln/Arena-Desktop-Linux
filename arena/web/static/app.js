@@ -232,8 +232,9 @@
   function orgLogoSvg(org, color) {
     const key = String(org || '').trim().toLowerCase();
     if (ORG_LOGOS[key]) return ORG_LOGOS[key];
-    const initial = (key || '?')[0].toUpperCase();
-    const colors = { minimax: '#14B8A6', zai: '#8B5CF6', stepfun: '#EC4899', bytedance: '#00D1FF', tencent: '#2B82EE', amazon: '#FF9900', microsoft: '#00BCF2', ibm: '#054ADA', cohere: '#F43F5E' };
+    const rawInitial = (key || '?')[0].toUpperCase();
+    const initial = /^[A-Z0-9]$/.test(rawInitial) ? rawInitial : '?';
+    const colors = { kimi: '#0EA5E9', minimax: '#14B8A6', zai: '#8B5CF6', stepfun: '#EC4899', bytedance: '#00D1FF', tencent: '#2B82EE', amazon: '#FF9900', microsoft: '#00BCF2', ibm: '#054ADA', cohere: '#F43F5E' };
     const fill = colors[key] || '#3a4040';
     return `<svg viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="12" r="10" fill="${fill}"/><text x="12" y="16" text-anchor="middle" fill="#e8f0ea" font-size="11" font-weight="700" font-family="sans-serif">${initial}</text></svg>`;
   }
@@ -247,10 +248,12 @@
     if (/llama|meta/.test(text)) return 'meta';
     if (/mistral|mixtral|codestral/.test(text)) return 'mistral';
     if (/deepseek/.test(text)) return 'deepseek';
-    if (/qwen|alibaba|tongyi/.test(text)) return 'alibaba';
+    if (/qwen|qwq|alibaba|tongyi/.test(text)) return 'alibaba';
+    if (/kimi|moonshot/.test(text)) return 'kimi';
+    if (/\bglm\b|z\.ai|\bzai\b|zhipu/.test(text)) return 'zai';
     if (/nvidia|nemotron/.test(text)) return 'nvidia';
     if (/command|cohere/.test(text)) return 'cohere';
-    if (/minimax/.test(text)) return 'minimax';
+    if (/minimax|abab/.test(text)) return 'minimax';
     return '';
   }
 
@@ -608,6 +611,12 @@
     providerOpen(id, body = {}) { return this.request(`/api/providers/${encodeURIComponent(id)}/open`, { method: 'POST', body }); },
     providerVerify(id) { return this.request(`/api/providers/${encodeURIComponent(id)}/verify`, { method: 'POST', body: {} }); },
     providerModels(id, force = false) { return this.request(`/api/providers/${encodeURIComponent(id)}/models${force ? '?refresh=1' : ''}`); },
+    providerSelectModel(id, modelId) { return this.request(`/api/providers/${encodeURIComponent(id)}/model`, { method: 'POST', body: { model_id: modelId } }); },
+    terminalList() { return this.request('/api/terminal/sessions'); },
+    terminalCreate(body = {}) { return this.request('/api/terminal/sessions', { method: 'POST', body }); },
+    terminalInput(sid, data) { return this.request(`/api/terminal/sessions/${encodeURIComponent(sid)}/input`, { method: 'POST', body: { data } }); },
+    terminalResize(sid, cols, rows) { return this.request(`/api/terminal/sessions/${encodeURIComponent(sid)}/resize`, { method: 'POST', body: { cols, rows } }); },
+    terminalClose(sid) { return this.request(`/api/terminal/sessions/${encodeURIComponent(sid)}`, { method: 'DELETE' }); },
     getArenaChats() { return this.request('/api/arena-chats?limit=50'); },
     openArenaChat(id, type, title) { return this.request(`/api/arena-chats/${encodeURIComponent(id)}/open`, { method: 'POST', body: { type, title } }); },
     archiveArenaChat(id, type) { return this.request(`/api/arena-chats/${encodeURIComponent(id)}/archive`, { method: 'POST', body: { type } }); },
@@ -1200,7 +1209,7 @@
         permission_mode: demoStore.permissionMode,
         workspace: demoStore.workspace,
         workspace_chosen: true,
-        app_version: '7.3.0',
+        app_version: '7.4.0',
         pending_permissions: demoStore.pendingPermissions.length,
         demo: true
       };
@@ -1711,6 +1720,10 @@
           { id: 'deepseek', name: 'DeepSeek', short_name: 'DeepSeek', badge: '\u25c7', badge_class: 'is-deepseek', description: 'chat.deepseek.com signed-in window', kind: 'webview', available: false, signed_in: false, open: false, detail: 'Demo mode' },
           { id: 'claude', name: 'Claude', short_name: 'Claude', badge: '\u25c8', badge_class: 'is-claude', description: 'claude.ai signed-in window', kind: 'webview', available: false, signed_in: false, open: false, detail: 'Demo mode' },
           { id: 'chatgpt', name: 'ChatGPT', short_name: 'ChatGPT', badge: '\u25ce', badge_class: 'is-chatgpt', description: 'chatgpt.com signed-in window', kind: 'webview', available: false, signed_in: false, open: false, detail: 'Demo mode' },
+          { id: 'qwen', name: 'Qwen', short_name: 'Qwen', badge: 'Q', badge_class: 'is-qwen', description: 'chat.qwen.ai signed-in window', kind: 'webview', available: false, signed_in: false, open: false, detail: 'Demo mode' },
+          { id: 'kimi', name: 'Kimi', short_name: 'Kimi', badge: 'K', badge_class: 'is-kimi', description: 'kimi.ai/en signed-in window', kind: 'webview', available: false, signed_in: false, open: false, detail: 'Demo mode' },
+          { id: 'zai', name: 'Z.AI / GLM', short_name: 'Z.AI', badge: 'Z', badge_class: 'is-zai', description: 'chat.z.ai signed-in window', kind: 'webview', available: false, signed_in: false, open: false, detail: 'Demo mode' },
+          { id: 'minimax', name: 'MiniMax', short_name: 'MiniMax', badge: 'M', badge_class: 'is-minimax', description: 'agent.minimax.io signed-in window', kind: 'webview', available: false, signed_in: false, open: false, detail: 'Demo mode' },
           { id: 'antigravity', name: 'Antigravity', short_name: 'Antigravity', badge: '\u25b2', badge_class: 'is-antigravity', description: 'Local Google Antigravity runtime', kind: 'local_agent', available: false, signed_in: false, open: false, detail: 'Demo mode' }
         ],
         demo: true
@@ -1720,6 +1733,17 @@
     async providerOpen() { await sleep(40); return { ok: true, demo: true }; },
     async providerVerify() { await sleep(40); return { ok: true, signed_in: false, demo: true }; },
     async providerModels(id) { await sleep(40); return { ok: true, provider: id, live: false, active_model: '', models: [], demo: true }; },
+    async providerSelectModel(id, modelId) { await sleep(30); return { ok: true, provider: id, model_id: modelId, demo: true }; },
+    async terminalList() { return { ok: true, sessions: [], demo: true }; },
+    async terminalCreate(body = {}) {
+      const id = 'demo' + Math.random().toString(16).slice(2, 12);
+      const cwd = body.cwd || '/home/demo/projects/foto-studio';
+      const folder = cwd.split('/').filter(Boolean).pop() || 'home';
+      return { ok: true, session: { id, title: `bash · ${folder}`, shell: 'bash', cwd, folder, cols: body.cols || 100, rows: body.rows || 24, alive: true, exit_code: null }, demo: true };
+    },
+    async terminalInput() { return { ok: true, alive: true, demo: true }; },
+    async terminalResize(sid, cols, rows) { return { ok: true, cols, rows, demo: true }; },
+    async terminalClose() { return { ok: true, closed: true, demo: true }; },
     async openNativeAgent() { await sleep(160); return { ok: true, demo: true, url: 'https://arena.ai/agent' }; },
     async googleStatus() { await sleep(60); return { ok: true, desktop: false, signed_in: false, accounts: [], prefs: { hl: 'en', show_window: false, keep_citations: true, supervisor: false, supervisor_steps: 6 }, demo: true }; },
     async googleVerify() { await sleep(80); return { ok: true, signed_in: false, email: '', name: '', accounts: [], demo: true }; },
@@ -2368,7 +2392,7 @@ You can start with a more structured option: one script, short captions, and a c
       modality: validModality(raw.modality),
       agent_backend: raw.agent_backend === 'arena' ? 'arena' : raw.agent_backend === 'local' ? 'local' : null,
       pinned: Boolean(raw.pinned ?? raw.starred),
-      source: ['arena', 'google', 'deepseek', 'claude', 'chatgpt', 'antigravity'].includes(raw.source)
+      source: ['arena', 'google', 'deepseek', 'claude', 'chatgpt', 'qwen', 'kimi', 'zai', 'minimax', 'antigravity'].includes(raw.source)
         ? raw.source
         : 'local',
       workspace: typeof raw.workspace === 'string' ? raw.workspace : '',
@@ -3533,6 +3557,10 @@ You can start with a more structured option: one script, short captions, and a c
     deepseek: { label: 'DeepSeek', badge: '\u25c7', cls: 'is-deepseek', title: 'Deep<em>Seek</em>', lede: 'Chat with DeepSeek (chat.deepseek.com) inside your signed-in Linux WebKitGTK session, sharing workspace memory with sibling tabs.', note: 'Pure WebKitGTK signed-in window · no CLI or API key required', placeholder: 'Ask DeepSeek…' },
     claude: { label: 'Claude', badge: '\u25c8', cls: 'is-claude', title: '<em>Claude</em> AI', lede: 'Chat with Claude (claude.ai) inside your signed-in Linux WebKitGTK session, sharing workspace memory with sibling tabs.', note: 'Pure WebKitGTK signed-in window · no CLI or API key required', placeholder: 'Ask Claude…' },
     chatgpt: { label: 'ChatGPT', badge: '\u25ce', cls: 'is-chatgpt', title: 'Chat<em>GPT</em>', lede: 'Chat with ChatGPT (chatgpt.com) inside your signed-in Linux WebKitGTK session, sharing workspace memory with sibling tabs.', note: 'Pure WebKitGTK signed-in window · no CLI or API key required', placeholder: 'Ask ChatGPT…' },
+    qwen: { label: 'Qwen', badge: 'Q', cls: 'is-qwen', title: '<em>Qwen</em> AI', lede: 'Chat with Qwen (chat.qwen.ai) inside your signed-in Linux WebKitGTK session, sharing workspace memory and read/write tools with sibling tabs.', note: 'Pure WebKitGTK signed-in window · no CLI or API key required', placeholder: 'Ask Qwen…' },
+    kimi: { label: 'Kimi', badge: 'K', cls: 'is-kimi', title: '<em>Kimi</em> AI', lede: 'Chat with Kimi (kimi.ai/en) inside your signed-in Linux WebKitGTK session, sharing workspace memory and read/write tools with sibling tabs.', note: 'Pure WebKitGTK signed-in window · no CLI or API key required', placeholder: 'Ask Kimi…' },
+    zai: { label: 'Z.AI / GLM', badge: 'Z', cls: 'is-zai', title: '<em>Z.AI</em> / GLM', lede: 'Chat with Z.AI / GLM (chat.z.ai) inside your signed-in Linux WebKitGTK session, sharing workspace memory and read/write tools with sibling tabs.', note: 'Pure WebKitGTK signed-in window · no CLI or API key required', placeholder: 'Ask Z.AI / GLM…' },
+    minimax: { label: 'MiniMax', badge: 'M', cls: 'is-minimax', title: 'Mini<em>Max</em>', lede: 'Chat with MiniMax (agent.minimax.io) inside your signed-in Linux WebKitGTK session, sharing workspace memory and read/write tools with sibling tabs.', note: 'Pure WebKitGTK signed-in window · no CLI or API key required', placeholder: 'Ask MiniMax…' },
     antigravity: { label: 'Antigravity', badge: '\u25b2', cls: 'is-antigravity', title: 'Google <em>Antigravity</em>', lede: 'Run your local Google Antigravity agent directly inside this workspace, sharing MEMORY.md and cross-tab summaries.', note: 'Local Antigravity runtime (auto-detects agy CLI or google-antigravity SDK)', placeholder: 'Ask Antigravity…' }
   };
   const ALL_VALID_TRACKS = ['arena', 'google', ...Object.keys(EXTRA_TRACK_META)];
@@ -3576,22 +3604,39 @@ You can start with a more structured option: one script, short captions, and a c
     return list[0] || null;
   }
 
+  const _providerModelsReqSeq = {};
+  const _providerModelSelectedAt = {};
+
   function selectProviderModel(track, modelId) {
-    state.providerModelChoice[track] = String(modelId ?? '');
+    const idStr = String(modelId ?? '');
+    state.providerModelChoice[track] = idStr;
+    _providerModelSelectedAt[track] = Date.now();
+    const entry = state.providerModels[track];
+    if (entry && Array.isArray(entry.models)) {
+      entry.active_model = idStr;
+      entry.models = entry.models.map((m) => ({ ...m, active: String(m.id) === idStr }));
+    }
     try { window.localStorage.setItem('ap-provider-models', JSON.stringify(state.providerModelChoice)); } catch { /* optional */ }
     renderModelChips();
     renderComposerContext();
+    if (isExtraProviderTrack(track) && track !== 'antigravity' && idStr) {
+      void API.providerSelectModel(track, idStr).catch(() => {});
+    }
   }
 
-  async function loadProviderModels(track, { force = false, quiet = true } = {}) {
+  async function loadProviderModels(track, { force = false, quiet = true, syncActive = false } = {}) {
     if (!isExtraProviderTrack(track)) return [];
     const cur = providerModelEntry(track);
     if (!force && cur.loading) return cur.models;
     if (!force && cur.models.length && cur.live) return cur.models;
+    const seq = (_providerModelsReqSeq[track] || 0) + 1;
+    _providerModelsReqSeq[track] = seq;
+    const startedAt = Date.now();
     state.providerModels[track] = { ...cur, loading: true, error: null };
     if (state.track === track) { renderModelChips(); renderComposerContext(); }
     try {
       const res = await API.providerModels(track, force);
+      if (_providerModelsReqSeq[track] !== seq) return providerModelEntry(track).models;
       const list = Array.isArray(res?.models) ? res.models : [];
       state.providerModels[track] = {
         models: list,
@@ -3600,13 +3645,20 @@ You can start with a more structured option: one script, short captions, and a c
         loading: false,
         error: res?.ok === false ? String(res?.error || 'Could not load models') : null,
       };
-      if (list.length && (state.providerModelChoice[track] === undefined || !list.some((m) => String(m.id) === String(state.providerModelChoice[track])))) {
+      const pickedDuringFetch = (_providerModelSelectedAt[track] || 0) >= startedAt;
+      const missingChoice = state.providerModelChoice[track] === undefined
+        || !list.some((m) => String(m.id) === String(state.providerModelChoice[track]));
+      if (list.length && !pickedDuringFetch && (syncActive || missingChoice)) {
         const def = list.find((m) => m.active) || list.find((m) => String(m.id) === String(res?.active_model)) || list[0];
-        if (def) state.providerModelChoice[track] = String(def.id);
+        if (def) {
+          state.providerModelChoice[track] = String(def.id);
+          try { window.localStorage.setItem('ap-provider-models', JSON.stringify(state.providerModelChoice)); } catch { /* optional */ }
+        }
       }
       if (state.track === track) { renderModelChips(); renderComposerContext(); }
       return list;
     } catch (error) {
+      if (_providerModelsReqSeq[track] !== seq) return providerModelEntry(track).models;
       state.providerModels[track] = { ...cur, loading: false, error: errorMessage(error) };
       if (state.track === track) { renderModelChips(); renderComposerContext(); }
       if (!quiet) toast(errorMessage(error), 'error', `${EXTRA_TRACK_META[track]?.label || track} models`);
@@ -3656,7 +3708,8 @@ You can start with a more structured option: one script, short captions, and a c
                 closePopover();
               }
             });
-            const orgKey = inferOrgFromModelName(`${m.org || ''} ${m.name || ''} ${m.id || ''}`) || (track === 'deepseek' ? 'deepseek' : track === 'claude' ? 'anthropic' : track === 'chatgpt' ? 'openai' : 'google');
+            const fallbackOrgMap = { deepseek: 'deepseek', claude: 'anthropic', chatgpt: 'openai', qwen: 'alibaba', kimi: 'kimi', zai: 'zai', minimax: 'minimax', antigravity: 'google' };
+            const orgKey = inferOrgFromModelName(`${m.org || ''} ${m.name || ''} ${m.id || ''}`) || fallbackOrgMap[track] || 'google';
             const avatar = el('span', { class: 'model-avatar has-logo' });
             avatar.innerHTML = orgLogoSvg(orgKey);
             option.insertBefore(avatar, option.firstChild);
@@ -3672,7 +3725,7 @@ You can start with a more structured option: one script, short captions, and a c
       foot.appendChild(el('span', { class: 'setting-desc', style: { fontSize: '11px', margin: '0' }, text: statusText }));
       foot.appendChild(el('button', {
         class: 'button button-small button-quiet', type: 'button', disabled: Boolean(entry.loading),
-        onclick: () => { void loadProviderModels(track, { force: true, quiet: false }).then(renderOptions); }
+        onclick: () => { void loadProviderModels(track, { force: true, quiet: false, syncActive: true }).then(renderOptions); }
       }, iconEl('refresh'), el('span', { text: 'Refresh' })));
     };
 
@@ -4446,11 +4499,30 @@ You can start with a more structured option: one script, short captions, and a c
       state.workspace = state.activeWorkspacePath;
       state.workspaceChosen = true;
     } else {
+      state.workspace = '';
       state.workspaceChosen = false;
     }
     state.memoryData = null;
+    state.gitStatus = null;
     renderWorkspaceSidebar();
     renderRailChats();
+  }
+
+  function _resetEmptyWorkspaceView() {
+    stashActiveTurns();
+    saveComposerDraft();
+    state.activeChatId = null;
+    state.activeChatEvalId = null;
+    state.activeChatExternal = '';
+    state.activeChatSource = 'local';
+    state.historyChars = 0;
+    state.messages = [];
+    state.artifacts = [];
+    state.view = 'welcome';
+    renderChatArea();
+    setView('welcome');
+    updateTopbarTitle();
+    updateComposerState();
   }
 
   async function loadWorkspaces() {
@@ -4471,19 +4543,15 @@ You can start with a more structured option: one script, short captions, and a c
       state.workspacePanelRoot = '';
       resetWorkspaceTree();
       renderWorkspaceTreePanel();
-      if (state.workspacePanelOpen) void loadWorkspaceTree('.', { force: true });
+      if (state.workspacePanelOpen) {
+        void loadWorkspaceTree('.', { force: true });
+        if (state.workspaceTab === 'git') void loadGitStatus({ force: true });
+      }
       const tabs = workspaceTabs(state.activeWorkspacePath);
       if (tabs.length) {
         await openChat(tabs[0].id);
       } else {
-        state.activeChatId = null;
-        state.activeChatEvalId = null;
-        state.messages = [];
-        state.artifacts = [];
-        state.view = 'welcome';
-        renderChatArea();
-        setView('welcome');
-        updateComposerState();
+        _resetEmptyWorkspaceView();
       }
     } catch (error) {
       toast(errorMessage(error), 'error', 'Workspace');
@@ -4501,17 +4569,16 @@ You can start with a more structured option: one script, short captions, and a c
         state.workspacePanelRoot = '';
         resetWorkspaceTree();
         renderWorkspaceTreePanel();
-        if (state.workspacePanelOpen) void loadWorkspaceTree('.', { force: true });
+        if (state.workspacePanelOpen) {
+          void loadWorkspaceTree('.', { force: true });
+          if (state.workspaceTab === 'git') void loadGitStatus({ force: true });
+        }
         toast(state.activeWorkspacePath, 'success', 'Workspace opened');
         const tabs = workspaceTabs(state.activeWorkspacePath);
         if (tabs.length) {
           await openChat(tabs[0].id);
         } else {
-          state.activeChatId = null;
-          state.messages = [];
-          state.view = 'welcome';
-          renderChatArea();
-          setView('welcome');
+          _resetEmptyWorkspaceView();
         }
         return state.activeWorkspacePath;
       } catch (error) {
@@ -4531,16 +4598,15 @@ You can start with a more structured option: one script, short captions, and a c
       state.workspacePanelRoot = '';
       resetWorkspaceTree();
       renderWorkspaceTreePanel();
-      if (state.workspacePanelOpen) void loadWorkspaceTree('.', { force: true });
+      if (state.workspacePanelOpen) {
+        void loadWorkspaceTree('.', { force: true });
+        if (state.workspaceTab === 'git') void loadGitStatus({ force: true });
+      }
       const tabs = workspaceTabs(state.activeWorkspacePath);
       if (tabs.length) {
         await openChat(tabs[0].id);
       } else {
-        state.activeChatId = null;
-        state.messages = [];
-        state.view = 'welcome';
-        renderChatArea();
-        setView('welcome');
+        _resetEmptyWorkspaceView();
       }
     } catch (error) {
       toast(errorMessage(error), 'error', 'Workspace');
@@ -6455,7 +6521,12 @@ You can start with a more structured option: one script, short captions, and a c
   }
 
   function renderUnattachedPermissions(renderedIds) {
-    const remaining = state.pendingPermissions.filter((permission) => !permission.id || !renderedIds.has(String(permission.id)));
+    const activeId = state.activeChatId ? String(state.activeChatId) : '';
+    const remaining = state.pendingPermissions.filter((permission) => {
+      if (permission.id && renderedIds.has(String(permission.id))) return false;
+      if (permission.chatId && activeId && String(permission.chatId) !== activeId) return false;
+      return true;
+    });
     if (!remaining.length) return null;
     const section = el('section', { class: 'message-turn', 'aria-label': "Pending approval" });
     section.appendChild(el('div', { class: 'activity-head' },
@@ -6927,7 +6998,7 @@ You can start with a more structured option: one script, short captions, and a c
         title: entry.live ? `${label} (live from ${meta.label})` : `${label} (click to pick or refresh models)`,
         disabled: state.generating
       },
-        el('span', { class: `ws-tab-badge ${meta.cls}`, 'aria-hidden': 'true', text: meta.badge }),
+        el('span', { class: `ws-mode-badge ${meta.cls}`, 'aria-hidden': 'true', text: meta.badge }),
         entry.live ? el('span', { class: 'provider-model-live-dot', title: 'Retrieved live' }) : null,
         el('span', { class: 'chip-label', text: label }),
         iconEl('chevron-down')
@@ -7124,14 +7195,15 @@ You can start with a more structured option: one script, short captions, and a c
     els.prompt.setAttribute('aria-label', `Message for models. ${meta.label}, ${mod.label}. ${disabledReason && !text ? disabledReason : ''}`);
 
     if (els.composerSecondaryHint) {
+      const isArenaTrack = state.track === 'arena';
       if (state.demo) els.composerSecondaryHint.textContent = "Demo: no requests to arena.ai";
       else if (state.pendingChanges) els.composerSecondaryHint.textContent = "Waiting for settings to apply";
       else if (state.remoteBusy) els.composerSecondaryHint.textContent = "Server is busy with the current generation";
       else if (state.serverError) els.composerSecondaryHint.textContent = "No connection with the local server";
-      else if (noAuth) els.composerSecondaryHint.textContent = "Not signed in";
-      else if (!requiredModelsReady() && state.modelsError) els.composerSecondaryHint.textContent = "Models unavailable";
-      else if (state.modelsLoading) els.composerSecondaryHint.textContent = "Loading models";
-      else if (allowsManualModels() && !currentModelA()) els.composerSecondaryHint.textContent = "Select a model";
+      else if (isArenaTrack && noAuth) els.composerSecondaryHint.textContent = "Not signed in";
+      else if (isArenaTrack && !requiredModelsReady() && state.modelsError) els.composerSecondaryHint.textContent = "Models unavailable";
+      else if (isArenaTrack && state.modelsLoading) els.composerSecondaryHint.textContent = "Loading models";
+      else if (isArenaTrack && allowsManualModels() && !currentModelA()) els.composerSecondaryHint.textContent = "Select a model";
       else if (state.pendingPermissions.length) els.composerSecondaryHint.textContent = "Permission request exists";
       else els.composerSecondaryHint.textContent = "Attachments are not supported by the server";
     }
@@ -7625,6 +7697,10 @@ You can start with a more structured option: one script, short captions, and a c
       if (historyToken !== state.historyRequest || String(state.activeChatId) !== String(chatId)) return;
       const chat = normalizeChat(chatRaw);
       if (chat) {
+        const resolvedTrack = chatTrack(chat);
+        if (resolvedTrack && state.track !== resolvedTrack) {
+          setTrack(resolvedTrack, { silent: true, keepActive: true });
+        }
         state.activeChatTitle = chat.title || state.activeChatTitle;
         state.activeChatEvalId = chat.eval_id || chat.raw?.eval_id || null;
         state.activeChatSource = chat.source || 'local';
@@ -7635,9 +7711,14 @@ You can start with a more structured option: one script, short captions, and a c
         state.selectionTouched = true;
         if (chat.agent_backend) state.agentKind = chat.agent_backend === 'arena' ? 'native' : 'local';
         state.historyChars = Number(chat.raw?.history_chars || 0);
-        // Restore manual selections saved by Flask only in modes where Arena
-        // permits them.  Battle ignores ids and Agent never exposes one.
-        if (allowsManualModels()) {
+        // Restore manual selections saved by Flask only on Arena chats; for
+        // extra providers restore providerModelChoice without clobbering Arena's modelAId.
+        if (isExtraProviderTrack(chatTrack(chat))) {
+          const pTrack = chatTrack(chat);
+          if (chat.raw?.model_a) {
+            state.providerModelChoice[pTrack] = String(chat.raw.model_a);
+          }
+        } else if (allowsManualModels()) {
           if (Object.prototype.hasOwnProperty.call(chat.raw, 'model_a')) state.modelAId = chat.raw.model_a || null;
           if (Object.prototype.hasOwnProperty.call(chat.raw, 'model_b')) state.modelBId = chat.raw.model_b || null;
         } else {
@@ -7659,6 +7740,11 @@ You can start with a more structured option: one script, short captions, and a c
         // This chat is generating right now: keep showing the live stream
         // instead of the server's last saved snapshot.
         state.messages = liveTurns;
+      } else if (Array.isArray(chatRaw?.messages)) {
+        // Use per-chat messages directly from GET /api/chats/<id> so parallel tabs
+        // can never collide on the process-global GET /api/history buffer.
+        state.messages = normalizeHistory({ messages: chatRaw.messages });
+        state.chatTurns[String(chatId)] = state.messages;
       } else {
         const historyRaw = await API.getHistory();
         if (historyToken !== state.historyRequest || String(state.activeChatId) !== String(chatId)) return;
@@ -8192,7 +8278,10 @@ You can start with a more structured option: one script, short captions, and a c
         }
       }
       // The existing backend emits names as {a, b}, not a models array.
-      if (event.names?.a && !metaModels.a) metaModels.a = { id: 'a', name: String(event.names.a), org: '', color: '', capabilities: [] };
+      if (event.names?.a) {
+        if (!metaModels.a) metaModels.a = { id: 'a', name: String(event.names.a), org: '', color: '', capabilities: [] };
+        else if (event.provider) metaModels.a.name = String(event.names.a);
+      }
       if (event.names?.b && !metaModels.b) metaModels.b = { id: 'b', name: String(event.names.b), org: '', color: '', capabilities: [] };
       const activeModel = event.model_id ? normalizeModel(event.model_id) : null;
       if (state.track === 'google' && !state.demo) {
@@ -8239,7 +8328,8 @@ You can start with a more structured option: one script, short captions, and a c
 
     if (type === 'text' || type === 'message') {
       const delta = textValue(event.text ?? event.delta ?? event.content ?? '');
-      if (delta) lane.text += delta;
+      if (event.replace) lane.text = delta;
+      else if (delta) lane.text += delta;
       // Google AI mode has no tool stages: "writing…" is a spinner line, not
       // a step to keep once the answer itself is on screen.
       if (delta && state.track === 'google') lane.agentStages = [];
@@ -8257,7 +8347,8 @@ You can start with a more structured option: one script, short captions, and a c
     }
     if (type === 'reasoning') {
       const delta = textValue(event.text ?? event.delta ?? event.reasoning ?? '');
-      if (delta) lane.reasoning += delta;
+      if (event.replace) lane.reasoning = delta;
+      else if (delta) lane.reasoning += delta;
       scheduleChatRender();
       return;
     }
@@ -8412,13 +8503,18 @@ You can start with a more structured option: one script, short captions, and a c
       const decision = String(event.decision ?? event.status ?? 'done');
       state.pendingPermissions = state.pendingPermissions.filter((item) => String(item.id) !== String(id));
       state.permissionCount = state.pendingPermissions.length;
-      state.messages.forEach((messageTurn) => {
-        Object.values(messageTurn.lanes || {}).forEach((messageLane) => {
-          (messageLane.permissions || []).forEach((permission) => {
-            if (id && String(permission.id) === String(id)) permission.status = decision;
+      const markPermissionDone = (turnsList) => {
+        (turnsList || []).forEach((messageTurn) => {
+          Object.values(messageTurn.lanes || {}).forEach((messageLane) => {
+            (messageLane.permissions || []).forEach((permission) => {
+              if (id && String(permission.id) === String(id)) permission.status = decision;
+            });
           });
         });
-      });
+      };
+      markPermissionDone(state.messages);
+      if (generation?.turn) markPermissionDone([generation.turn]);
+      Object.values(state.chatTurns || {}).forEach((list) => markPermissionDone(list));
       updatePendingPermissionsBadge();
       scheduleChatRender();
       state.settingsRerender?.();
@@ -8637,19 +8733,28 @@ You can start with a more structured option: one script, short captions, and a c
   function makeGenerationTurn(message, chatId, attachments = []) {
     const mode = state.mode;
     const lanes = {};
-    // Google AI mode has no Arena model: the lane is named after the mode so
-    // the answer header never reads "Model A".
+    // Google AI mode & extra providers have their own model labels so the
+    // answer header never flashes an unrelated Arena model or "Model A".
+    const extraMeta = EXTRA_TRACK_META[state.track];
+    const selProvModel = extraMeta ? selectedProviderModel(state.track) : null;
     const laneA = state.track === 'google'
       ? { ...emptyLane('a', null), modelId: null, modelName: 'Google AI mode', modelOrg: '' }
-      : emptyLane('a', mode === 'agent' ? null : currentModelA());
-    if (mode === 'agent' && state.track !== 'google') {
+      : extraMeta
+        ? {
+          ...emptyLane('a', null),
+          modelId: selProvModel?.id || null,
+          modelName: selProvModel?.name ? `${extraMeta.label} \u00b7 ${selProvModel.name}` : extraMeta.label,
+          modelOrg: selProvModel?.org || ''
+        }
+        : emptyLane('a', mode === 'agent' ? null : currentModelA());
+    if (mode === 'agent' && state.track === 'arena') {
       laneA.modelId = null;
       laneA.modelName = 'Agent';
       laneA.modelOrg = "Automatic model selection";
     }
     laneA.streaming = true;
     lanes.a = laneA;
-    if (mode === 'battle' || mode === 'side-by-side') {
+    if (state.track === 'arena' && (mode === 'battle' || mode === 'side-by-side')) {
       const laneB = emptyLane('b', currentModelB());
       laneB.streaming = true;
       lanes.b = laneB;
@@ -8666,7 +8771,7 @@ You can start with a more structured option: one script, short captions, and a c
       chatId,
       mode,
       modality: state.modality,
-      toolsEnabled: Boolean(state.directTools)
+      toolsEnabled: state.track === 'arena' ? Boolean(state.directTools) : Boolean(extraMeta && state.activeWorkspacePath)
     };
   }
 
@@ -9103,7 +9208,7 @@ You can start with a more structured option: one script, short captions, and a c
       toast(state.serverError || "No connection to the local server. Request not sent.", 'error', "Server unavailable");
       return;
     }
-    if (state.status && !state.authenticated && state.track !== 'google') {
+    if (state.status && !state.authenticated && state.track === 'arena') {
       toast("Log in first in a separate window or using cookies.", 'warning', "Not signed in");
       openSettings('connection');
       return;
@@ -12531,7 +12636,7 @@ You can start with a more structured option: one script, short captions, and a c
       wrap.appendChild(el('h3', { class: 'modal-section-title', text: 'Tab providers (no API keys)' }));
       wrap.appendChild(el('p', {
         class: 'setting-desc',
-        text: 'DeepSeek, Claude, and ChatGPT run inside persistent Linux WebKitGTK windows using your own manual sign-in. Antigravity connects to your local agy CLI or google-antigravity SDK. All tabs inside the same workspace share MEMORY.md and live cross-tab summaries.'
+        text: 'DeepSeek, Claude, ChatGPT, Qwen, Kimi, Z.AI / GLM, and MiniMax run inside persistent Linux WebKitGTK windows using your own manual sign-in. Antigravity connects to your local agy CLI or google-antigravity SDK. All tabs inside the same workspace share MEMORY.md, workspace read/write tools, and live cross-tab summaries.'
       }));
       const grid = el('div', { class: 'providers-grid' });
       const list = Array.isArray(state.providers) ? state.providers : [];
@@ -12685,7 +12790,6 @@ You can start with a more structured option: one script, short captions, and a c
       // Arena keeps the neutral panel it always had.
       className: state.settingsTrack === 'google' ? 'modal-settings-google' : '',
       content: layout,
-      onClose: () => { state.settingsTrack = null; state.settingsRefresh = null; },
       actions: [
         { label: 'Done', variant: 'primary' }
       ],
@@ -12693,6 +12797,8 @@ You can start with a more structured option: one script, short captions, and a c
         selectTab(currentTab, false);
       },
       onClose: () => {
+        state.settingsTrack = null;
+        state.settingsRefresh = null;
         if (state.settingsRerender === refreshPanel) state.settingsRerender = null;
       }
     });
@@ -14484,6 +14590,7 @@ You can start with a more structured option: one script, short captions, and a c
     els.messageList?.addEventListener('pause', () => { window.setTimeout(flushDeferredChatRender, 60); }, true);
     els.messageList?.addEventListener('ended', () => { window.setTimeout(flushDeferredChatRender, 60); }, true);
     document.addEventListener('keydown', (event) => {
+      if (event.target?.closest?.('#terminalDrawer, .xterm')) return;
       if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey
         && event.key.toLowerCase() === 'f' && state.view === 'chat') {
         event.preventDefault();
@@ -14932,7 +15039,10 @@ You can start with a more structured option: one script, short captions, and a c
   }
 
   function handleGlobalKeydown(event) {
+    // Never hijack terminal keys (F1 for htop/mc/vim, Ctrl+K, Ctrl+N, Ctrl+/) while focused in terminal.
+    const inTerminal = Boolean(event.target?.closest?.('#terminalDrawer, .xterm'));
     if (event.key === 'F1') {
+      if (inTerminal) return;
       event.preventDefault();
       openHelp();
       return;
@@ -14948,6 +15058,7 @@ You can start with a more structured option: one script, short captions, and a c
       return;
     }
     if (state.activeModal) return;
+    if (inTerminal) return;
     const modifier = event.ctrlKey || event.metaKey;
     if (!modifier || event.altKey) return;
     const key = event.key.toLowerCase();
@@ -15588,6 +15699,7 @@ async function startApp() {
   restoreSidebarPreference();
   restoreWorkspacePanelPreference();
   setupLayoutResize();
+  initTerminalDrawer();
   bindEvents();
   setTrack(state.track, { silent: true });
   state.view = 'welcome';
@@ -15664,6 +15776,531 @@ async function startApp() {
     if (state.serverError) {
       announce("Local server unavailable. The interface shows the actual status and offers demo separately.");
     }
+  }
+}
+
+// --- Built-in Linux PTY Terminal Emulator (xterm.js + FitAddon) -------------
+const terminalState = {
+  open: false,
+  height: 260,
+  activeId: null,
+  tabs: new Map(), // id -> { id, meta, term, fit, pane, abort, inputBuf, inputTimer, inputChain, resizeTimer, demoLine }
+  resizeObserver: null,
+  initialized: false,
+  creating: false,
+  reattached: false,
+};
+
+function _b64ToBytes(b64) {
+  const bin = atob(b64 || '');
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function _terminalTheme() {
+  return {
+    background: '#111315',
+    foreground: '#e5e7eb',
+    cursor: '#a78bfa',
+    cursorAccent: '#111315',
+    selectionBackground: 'rgba(139, 92, 246, 0.35)',
+    black: '#1e2024',
+    red: '#f87171',
+    green: '#4ade80',
+    yellow: '#facc15',
+    blue: '#60a5fa',
+    magenta: '#c084fc',
+    cyan: '#22d3ee',
+    white: '#e5e7eb',
+    brightBlack: '#6b7280',
+    brightRed: '#fca5a5',
+    brightGreen: '#86efac',
+    brightYellow: '#fde047',
+    brightBlue: '#93c5fd',
+    brightMagenta: '#d8b4fe',
+    brightCyan: '#67e8f9',
+    brightWhite: '#ffffff',
+  };
+}
+
+function renderTerminalTabs() {
+  const bar = document.getElementById('terminalTabs');
+  if (!bar) return;
+  clear(bar);
+  for (const [id, tab] of terminalState.tabs.entries()) {
+    const active = id === terminalState.activeId;
+    const alive = tab.meta?.alive !== false;
+    const closeBtn = el('button', {
+      class: 'terminal-tab-close',
+      type: 'button',
+      title: 'Close terminal',
+      'aria-label': `Close ${tab.meta?.title || 'terminal'}`,
+      onclick: (ev) => {
+        ev.stopPropagation();
+        void closeTerminalTab(id);
+      },
+      text: '\u00d7',
+    });
+    const pill = el('div', {
+      class: `terminal-tab${active ? ' is-active' : ''}${alive ? '' : ' is-exited'}`,
+      role: 'tab',
+      tabindex: active ? '0' : '-1',
+      'aria-selected': String(active),
+      title: tab.meta?.cwd || tab.meta?.title || 'Terminal',
+      onclick: () => activateTerminalTab(id),
+      onkeydown: (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') {
+          ev.preventDefault();
+          activateTerminalTab(id);
+        }
+      },
+    },
+      el('span', { class: 'terminal-tab-dot', 'aria-hidden': 'true' }),
+      el('span', { text: tab.meta?.title || 'Terminal' }),
+      closeBtn
+    );
+    bar.appendChild(pill);
+  }
+}
+
+function fitActiveTerminal() {
+  if (!terminalState.open || !terminalState.activeId) return;
+  const tab = terminalState.tabs.get(terminalState.activeId);
+  if (!tab || !tab.fit || !tab.term) return;
+  try {
+    tab.fit.fit();
+    const cols = tab.term.cols || 100;
+    const rows = tab.term.rows || 24;
+    if (cols !== tab.lastCols || rows !== tab.lastRows) {
+      tab.lastCols = cols;
+      tab.lastRows = rows;
+      if (!state.demo && tab.meta?.alive !== false) {
+        if (tab.resizeTimer) clearTimeout(tab.resizeTimer);
+        tab.resizeTimer = setTimeout(() => {
+          tab.resizeTimer = null;
+          if (tab.meta?.alive !== false) {
+            void API.terminalResize(tab.id, tab.lastCols, tab.lastRows).catch(() => {});
+          }
+        }, 65);
+      }
+    }
+  } catch { /* panel transitioning */ }
+}
+
+function activateTerminalTab(id) {
+  if (!terminalState.tabs.has(id)) return;
+  terminalState.activeId = id;
+  for (const [tid, tab] of terminalState.tabs.entries()) {
+    tab.pane.classList.toggle('is-active', tid === id);
+  }
+  renderTerminalTabs();
+  requestAnimationFrame(() => {
+    fitActiveTerminal();
+    try { terminalState.tabs.get(id)?.term?.focus(); } catch { /* optional */ }
+  });
+}
+
+async function _streamTerminalTab(tab) {
+  if (state.demo) {
+    const cwd = tab.meta?.cwd || '/home/demo/projects/foto-studio';
+    tab.term.writeln('\x1b[38;5;141mArena Desktop Terminal (Demo mode)\x1b[0m');
+    tab.term.write(`\x1b[32mdemo@linux\x1b[0m:\x1b[34m${cwd}\x1b[0m$ `);
+    return;
+  }
+  const ac = new AbortController();
+  tab.abort = ac;
+  let sawExit = false;
+  try {
+    const res = await fetch(`/api/terminal/sessions/${encodeURIComponent(tab.id)}/stream`, {
+      method: 'GET',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      headers: { Accept: 'text/event-stream', 'X-Arena-Token': _apiToken },
+      signal: ac.signal,
+    });
+    if (!res.ok || !res.body) {
+      tab.meta.alive = false;
+      renderTerminalTabs();
+      return;
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) !== -1) {
+        const block = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        for (const rawLine of block.split('\n')) {
+          if (!rawLine.startsWith('data: ')) continue;
+          let ev = null;
+          try { ev = JSON.parse(rawLine.slice(6)); } catch { continue; }
+          if (!ev) continue;
+          if (ev.type === 'data' && ev.b64) {
+            tab.term.write(_b64ToBytes(ev.b64));
+          } else if (ev.type === 'exit') {
+            sawExit = true;
+            tab.meta.alive = false;
+            tab.meta.exit_code = ev.code;
+            tab.term.writeln(`\r\n\x1b[90m[Process exited with code ${ev.code ?? 0}]\x1b[0m`);
+            renderTerminalTabs();
+          }
+        }
+      }
+    }
+    if (!sawExit && !ac.signal.aborted && tab.meta.alive !== false) {
+      tab.meta.alive = false;
+      tab.term.writeln('\r\n\x1b[90m[Terminal stream disconnected]\x1b[0m');
+      renderTerminalTabs();
+    }
+  } catch (err) {
+    if (err?.name !== 'AbortError') {
+      DIAG.error('terminal stream error', String(err?.message || err));
+      if (tab.meta.alive !== false) {
+        tab.meta.alive = false;
+        renderTerminalTabs();
+      }
+    }
+  }
+}
+
+function _mountTerminalSession(sess, { activate = true } = {}) {
+  const viewport = document.getElementById('terminalViewport');
+  if (!viewport || !sess?.id) return null;
+  if (terminalState.tabs.has(sess.id)) {
+    if (activate) activateTerminalTab(sess.id);
+    return terminalState.tabs.get(sess.id);
+  }
+  const TermCtor = window.Terminal;
+  const FitCtor = window.FitAddon?.FitAddon;
+  if (typeof TermCtor !== 'function') {
+    toast('xterm.js failed to load.', 'error', 'Terminal');
+    return null;
+  }
+  const pane = el('div', { class: 'terminal-pane', 'data-terminal-id': sess.id });
+  viewport.appendChild(pane);
+
+  const term = new TermCtor({
+    fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Mono", ui-monospace, SFMono-Regular, Menlo, monospace',
+    fontSize: 13,
+    lineHeight: 1.25,
+    cursorBlink: true,
+    scrollback: 5000,
+    convertEol: false,
+    theme: _terminalTheme(),
+  });
+  const fit = FitCtor ? new FitCtor() : null;
+  if (fit) term.loadAddon(fit);
+  term.open(pane);
+
+  const tab = {
+    id: sess.id,
+    meta: sess,
+    term,
+    fit,
+    pane,
+    abort: null,
+    inputBuf: '',
+    inputTimer: null,
+    inputChain: Promise.resolve(),
+    resizeTimer: null,
+    lastCols: 0,
+    lastRows: 0,
+    demoLine: '',
+  };
+
+  term.attachCustomKeyEventHandler((ev) => {
+    // Allow Ctrl+` to toggle the terminal drawer without bubbling to window listener.
+    if (ev.type === 'keydown' && ev.ctrlKey && !ev.altKey && !ev.shiftKey && (ev.key === '`' || ev.code === 'Backquote')) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      void toggleTerminalDrawer();
+      return false;
+    }
+    // Ctrl+Shift+C copies current selection (never fall through to send SIGINT ^C)
+    if (ev.type === 'keydown' && ev.ctrlKey && ev.shiftKey && (ev.key === 'C' || ev.key === 'c')) {
+      const sel = term.getSelection();
+      if (sel && navigator.clipboard?.writeText) {
+        void navigator.clipboard.writeText(sel).catch(() => {});
+      }
+      ev.preventDefault();
+      ev.stopPropagation();
+      return false;
+    }
+    // Ctrl+Shift+V pastes into PTY (with native execCommand fallback if Clipboard API is denied)
+    if (ev.type === 'keydown' && ev.ctrlKey && ev.shiftKey && (ev.key === 'V' || ev.key === 'v')) {
+      if (navigator.clipboard?.readText) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        void navigator.clipboard.readText().then((txt) => {
+          if (txt) _queueTerminalInput(tab, txt);
+        }).catch(() => {
+          try { document.execCommand('paste'); } catch { /* fallback */ }
+        });
+        return false;
+      }
+    }
+    return true;
+  });
+
+  term.onData((data) => {
+    if (state.demo) {
+      const promptStr = `\x1b[32mdemo@linux\x1b[0m:\x1b[34m${sess.cwd}\x1b[0m$ `;
+      if (data === '\x03') {
+        tab.demoLine = '';
+        term.writeln('^C');
+        term.write(promptStr);
+        return;
+      }
+      if (data.startsWith('\x1b')) return; // ignore ANSI escape / arrow sequences in demo
+      for (const ch of data) {
+        if (ch === '\r' || ch === '\n') {
+          term.writeln('');
+          if (tab.demoLine.trim()) term.writeln(`demo: ${tab.demoLine.trim()}`);
+          tab.demoLine = '';
+          term.write(promptStr);
+        } else if (ch === '\x7f' || ch === '\b') {
+          if (tab.demoLine.length) {
+            tab.demoLine = tab.demoLine.slice(0, -1);
+            term.write('\b \b');
+          }
+        } else if (ch >= ' ') {
+          tab.demoLine += ch;
+          term.write(ch);
+        }
+      }
+      return;
+    }
+    _queueTerminalInput(tab, data);
+  });
+
+  terminalState.tabs.set(sess.id, tab);
+  if (activate) activateTerminalTab(sess.id);
+  else renderTerminalTabs();
+  void _streamTerminalTab(tab);
+  return tab;
+}
+
+async function createTerminalTab({ cwd = '' } = {}) {
+  if (terminalState.creating) return null;
+  terminalState.creating = true;
+  try {
+    const targetCwd = cwd || state.activeWorkspacePath || '';
+    const res = await API.terminalCreate({ cwd: targetCwd, cols: 100, rows: 16 });
+    const sess = res?.session;
+    if (!res?.ok || !sess?.id) {
+      toast(res?.error || 'Could not start terminal session.', 'error', 'Terminal');
+      return null;
+    }
+    return _mountTerminalSession(sess, { activate: true });
+  } catch (err) {
+    toast(errorMessage(err), 'error', 'Terminal');
+    return null;
+  } finally {
+    terminalState.creating = false;
+  }
+}
+
+async function _reattachOrCreateTerminal() {
+  if (terminalState.creating || terminalState.reattaching) return;
+  terminalState.reattaching = true;
+  try {
+    if (!state.demo && !terminalState.reattached) {
+      terminalState.reattached = true;
+      try {
+        const res = await API.terminalList();
+        const alive = (res?.sessions || []).filter((s) => s && s.id && s.alive);
+        if (alive.length) {
+          alive.forEach((s, idx) => _mountTerminalSession(s, { activate: idx === alive.length - 1 }));
+          return;
+        }
+      } catch { /* fall through to create */ }
+    }
+    if (!terminalState.tabs.size) {
+      await createTerminalTab();
+    }
+  } finally {
+    terminalState.reattaching = false;
+  }
+}
+
+function _queueTerminalInput(tab, data) {
+  if (!tab || !data || tab.meta?.alive === false) return;
+  tab.inputBuf += data;
+  if (tab.inputTimer) return;
+  tab.inputTimer = setTimeout(() => {
+    const chunk = tab.inputBuf;
+    tab.inputBuf = '';
+    tab.inputTimer = null;
+    if (chunk) {
+      // Strictly serialize input POSTs per tab so fast typing/paste stays in exact order.
+      tab.inputChain = tab.inputChain
+        .then(() => API.terminalInput(tab.id, chunk))
+        .catch(() => {});
+    }
+  }, 8);
+}
+
+async function closeTerminalTab(id) {
+  const tab = terminalState.tabs.get(id);
+  if (!tab) return;
+  if (tab.inputTimer) clearTimeout(tab.inputTimer);
+  if (tab.resizeTimer) clearTimeout(tab.resizeTimer);
+  try { tab.abort?.abort(); } catch { /* optional */ }
+  try { tab.term?.dispose(); } catch { /* optional */ }
+  tab.pane?.remove();
+  terminalState.tabs.delete(id);
+  if (!state.demo) {
+    void API.terminalClose(id).catch(() => {});
+  }
+  if (terminalState.activeId === id) {
+    const remaining = Array.from(terminalState.tabs.keys());
+    terminalState.activeId = remaining.length ? remaining[remaining.length - 1] : null;
+  }
+  renderTerminalTabs();
+  if (terminalState.activeId) {
+    activateTerminalTab(terminalState.activeId);
+  } else {
+    setTerminalDrawerOpen(false);
+  }
+}
+
+function setTerminalDrawerOpen(open) {
+  const drawer = document.getElementById('terminalDrawer');
+  const toggleBtn = document.getElementById('terminalToggleBtn');
+  if (!drawer) return;
+  terminalState.open = Boolean(open);
+  drawer.hidden = !terminalState.open;
+  document.body?.classList.toggle('has-terminal-open', terminalState.open);
+  if (terminalState.open) {
+    drawer.style.height = `${terminalState.height}px`;
+  }
+  if (toggleBtn) {
+    toggleBtn.setAttribute('aria-expanded', String(terminalState.open));
+    toggleBtn.classList.toggle('is-active', terminalState.open);
+  }
+  if (terminalState.open) {
+    if (!terminalState.tabs.size) {
+      void _reattachOrCreateTerminal();
+    } else {
+      requestAnimationFrame(() => {
+        fitActiveTerminal();
+        try { terminalState.tabs.get(terminalState.activeId)?.term?.focus(); } catch { /* optional */ }
+      });
+    }
+  }
+}
+
+async function toggleTerminalDrawer() {
+  setTerminalDrawerOpen(!terminalState.open);
+}
+
+function sendTerminalOutputToChat() {
+  const tab = terminalState.tabs.get(terminalState.activeId);
+  if (!tab || !tab.term || !els.prompt) return;
+  let snippet = (tab.term.getSelection() || '').trim();
+  if (!snippet) {
+    const buf = tab.term.buffer?.active;
+    if (buf) {
+      const lines = [];
+      const end = buf.length - 1;
+      for (let i = Math.max(0, end - 60); i <= end; i++) {
+        const ln = buf.getLine(i)?.translateToString(true) || '';
+        lines.push(ln);
+      }
+      while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+      snippet = lines.slice(-40).join('\n').trim();
+    }
+  }
+  if (!snippet) {
+    toast('Terminal has no output to send yet.', 'info', 'Terminal');
+    return;
+  }
+  const tickRuns = snippet.match(/`+/g) || [];
+  const maxTicks = tickRuns.reduce((m, s) => Math.max(m, s.length), 2);
+  const fence = '`'.repeat(Math.max(3, maxTicks + 1));
+  const block = `${fence}terminal\n${snippet}\n${fence}`;
+  const cur = els.prompt.value.trim();
+  els.prompt.value = cur ? `${cur}\n\n${block}\n` : `${block}\n`;
+  resizePrompt();
+  updateComposerState();
+  els.prompt.focus();
+  toast('Terminal output inserted into chat composer.', 'success', 'Terminal');
+}
+
+function initTerminalDrawer() {
+  if (terminalState.initialized) return;
+  terminalState.initialized = true;
+  try {
+    const saved = Number(window.localStorage.getItem('ap-terminal-height'));
+    if (Number.isFinite(saved) && saved >= 150 && saved <= 700) terminalState.height = saved;
+  } catch { /* optional */ }
+
+  const drawer = document.getElementById('terminalDrawer');
+  const handle = document.getElementById('terminalResizeHandle');
+  const toggleBtn = document.getElementById('terminalToggleBtn');
+  const newBtn = document.getElementById('terminalNewBtn');
+  const clearBtn = document.getElementById('terminalClearBtn');
+  const closeBtn = document.getElementById('terminalCloseBtn');
+  const sendBtn = document.getElementById('terminalSendToChatBtn');
+  const viewport = document.getElementById('terminalViewport');
+
+  toggleBtn?.addEventListener('click', () => { void toggleTerminalDrawer(); });
+  newBtn?.addEventListener('click', () => { void createTerminalTab(); });
+  closeBtn?.addEventListener('click', () => setTerminalDrawerOpen(false));
+  clearBtn?.addEventListener('click', () => {
+    const tab = terminalState.tabs.get(terminalState.activeId);
+    tab?.term?.clear();
+    tab?.term?.focus();
+  });
+  sendBtn?.addEventListener('click', () => sendTerminalOutputToChat());
+
+  // Global Ctrl+` shortcut (skip if xterm already handled & stopped propagation)
+  window.addEventListener('keydown', (ev) => {
+    if (ev.defaultPrevented) return;
+    if (ev.ctrlKey && !ev.altKey && !ev.shiftKey && !ev.metaKey && (ev.key === '`' || ev.code === 'Backquote')) {
+      ev.preventDefault();
+      void toggleTerminalDrawer();
+    }
+  });
+
+  // Drag-resize bottom drawer height
+  if (handle && drawer) {
+    handle.addEventListener('mousedown', (ev) => {
+      ev.preventDefault();
+      const startY = ev.clientY;
+      const startH = drawer.getBoundingClientRect().height || terminalState.height;
+      drawer.classList.add('is-resizing');
+      const onMove = (m) => {
+        const maxH = Math.max(240, Math.round(window.innerHeight * 0.72));
+        const nextH = clamp(Math.round(startH + (startY - m.clientY)), 150, maxH);
+        terminalState.height = nextH;
+        drawer.style.height = `${nextH}px`;
+        fitActiveTerminal();
+      };
+      const onUp = () => {
+        drawer.classList.remove('is-resizing');
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        window.removeEventListener('blur', onUp);
+        try { window.localStorage.setItem('ap-terminal-height', String(terminalState.height)); } catch { /* optional */ }
+        fitActiveTerminal();
+      };
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+      window.addEventListener('blur', onUp);
+    });
+  }
+
+  if (viewport && typeof ResizeObserver !== 'undefined') {
+    terminalState.resizeObserver = new ResizeObserver(() => {
+      if (terminalState.open) fitActiveTerminal();
+    });
+    terminalState.resizeObserver.observe(viewport);
   }
 }
 

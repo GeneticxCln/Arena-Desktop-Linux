@@ -5007,6 +5007,22 @@ body[data-track="google"] .ws-tab.is-active {
   background: rgba(16, 185, 129, 0.22);
   color: #6ee7b7;
 }
+.ws-mode-badge.is-qwen {
+  background: rgba(99, 102, 241, 0.24);
+  color: #a5b4fc;
+}
+.ws-mode-badge.is-kimi {
+  background: rgba(14, 165, 233, 0.22);
+  color: #7dd3fc;
+}
+.ws-mode-badge.is-zai {
+  background: rgba(168, 85, 247, 0.24);
+  color: #d8b4fe;
+}
+.ws-mode-badge.is-minimax {
+  background: rgba(20, 184, 166, 0.22);
+  color: #5eead4;
+}
 .ws-mode-badge.is-antigravity {
   background: rgba(236, 72, 153, 0.22);
   color: #f9a8d4;
@@ -5025,6 +5041,22 @@ body[data-track="chatgpt"] .modality-chip,
 body[data-track="chatgpt"] .mode-chip,
 body[data-track="chatgpt"] .model-strip,
 body[data-track="chatgpt"] .agent-integration-chip,
+body[data-track="qwen"] .modality-chip,
+body[data-track="qwen"] .mode-chip,
+body[data-track="qwen"] .model-strip,
+body[data-track="qwen"] .agent-integration-chip,
+body[data-track="kimi"] .modality-chip,
+body[data-track="kimi"] .mode-chip,
+body[data-track="kimi"] .model-strip,
+body[data-track="kimi"] .agent-integration-chip,
+body[data-track="zai"] .modality-chip,
+body[data-track="zai"] .mode-chip,
+body[data-track="zai"] .model-strip,
+body[data-track="zai"] .agent-integration-chip,
+body[data-track="minimax"] .modality-chip,
+body[data-track="minimax"] .mode-chip,
+body[data-track="minimax"] .model-strip,
+body[data-track="minimax"] .agent-integration-chip,
 body[data-track="antigravity"] .modality-chip,
 body[data-track="antigravity"] .mode-chip,
 body[data-track="antigravity"] .model-strip,
@@ -5035,7 +5067,7 @@ body[data-track="antigravity"] .agent-integration-chip {
 .provider-model-chip {
   border-color: rgba(255, 255, 255, .14);
 }
-.provider-model-chip .ws-tab-badge {
+.provider-model-chip .ws-mode-badge {
   width: 16px;
   height: 16px;
   font-size: 10px;
@@ -5046,6 +5078,175 @@ body[data-track="antigravity"] .agent-integration-chip {
   border-radius: 50%;
   background: #6ee7b7;
   flex: 0 0 auto;
+}
+
+/* ---------- Built-in Linux PTY Terminal Drawer (VS Code style) ---------- */
+.terminal-drawer {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+  height: 260px;
+  min-height: 150px;
+  max-height: 70vh;
+  background: #111315;
+  border-top: 1px solid #2b2f35;
+  z-index: 45;
+}
+body.has-terminal-open .jump-pill,
+body.has-terminal-open .scroll-bottom-btn {
+  display: none !important;
+}
+.terminal-drawer[hidden] {
+  display: none !important;
+}
+.terminal-resize-handle {
+  position: absolute;
+  top: -3px;
+  left: 0;
+  right: 0;
+  height: 7px;
+  cursor: ns-resize;
+  z-index: 2;
+}
+.terminal-resize-handle:hover,
+.terminal-drawer.is-resizing .terminal-resize-handle {
+  background: rgba(139, 92, 246, .45);
+}
+.terminal-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 10px;
+  background: #17191c;
+  border-bottom: 1px solid #24272c;
+  flex: 0 0 auto;
+  user-select: none;
+}
+.terminal-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  min-width: 0;
+  scrollbar-width: none;
+}
+.terminal-tabs::-webkit-scrollbar { display: none; }
+.terminal-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 8px 0 10px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #a1a6ae;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.terminal-tab:hover {
+  background: #202328;
+  color: #e6e8ec;
+}
+.terminal-tab.is-active {
+  background: #242830;
+  border-color: #353a44;
+  color: #f4f6f8;
+}
+.terminal-tab-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #34d399;
+  flex: 0 0 auto;
+}
+.terminal-tab.is-exited .terminal-tab-dot {
+  background: #9ca3af;
+}
+.terminal-tab-close {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #8b9199;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+.terminal-tab-close:hover {
+  background: rgba(255, 255, 255, .1);
+  color: #fff;
+}
+.terminal-header-spacer { flex: 1; min-width: 6px; }
+.terminal-icon-btn,
+.terminal-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #aeb4bc;
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.terminal-icon-btn:hover,
+.terminal-action-btn:hover {
+  background: #242830;
+  color: #f4f6f8;
+}
+.terminal-action-btn {
+  border-color: #2f343d;
+  background: #1d2026;
+  padding: 0 9px;
+}
+.terminal-action-btn:hover {
+  border-color: #4b5563;
+}
+.terminal-icon-btn .icon,
+.terminal-action-btn .icon {
+  width: 14px;
+  height: 14px;
+}
+.topbar-icon.is-active {
+  background: #272b33;
+  color: #ffffff;
+}
+.terminal-viewport {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  padding: 6px 8px 4px;
+  background: #111315;
+}
+.terminal-pane {
+  width: 100%;
+  height: 100%;
+  display: none;
+}
+.terminal-pane.is-active {
+  display: block;
+}
+.terminal-pane .xterm {
+  height: 100%;
+}
+.terminal-pane .xterm-viewport {
+  background-color: #111315 !important;
 }
 
 /* Settings -> Providers cards */
@@ -5129,6 +5330,8 @@ body[data-track="antigravity"] .agent-integration-chip {
   right: 0;
   z-index: 80;
   min-width: 248px;
+  max-height: 70vh;
+  overflow-y: auto;
   padding: 6px;
   border: 1px solid #30333b;
   border-radius: 12px;

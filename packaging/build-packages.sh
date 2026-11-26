@@ -12,9 +12,21 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ROOT="$(pwd)"
-BINARY="${BINARY:-dist/Arena-Desktop}"
+MACHINE="$(uname -m)"
+case "$MACHINE" in
+  x86_64|amd64)
+    NFPM_ARCH="amd64"; RPM_ARCH="x86_64"; APPIMAGE_ARCH="x86_64"; NFPM_MACHINE="x86_64"
+    DEFAULT_BINARY="dist/Arena-Desktop" ;;
+  aarch64|arm64)
+    NFPM_ARCH="arm64"; RPM_ARCH="aarch64"; APPIMAGE_ARCH="aarch64"; NFPM_MACHINE="arm64"
+    DEFAULT_BINARY="dist/Arena-Desktop-arm64" ;;
+  *)
+    echo "Unsupported architecture: $MACHINE" >&2
+    exit 1 ;;
+esac
+BINARY="${BINARY:-$DEFAULT_BINARY}"
 VERSION="${VERSION:-$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' arena/web/app.py | head -1)}"
-VERSION="${VERSION:-7.3.0}"
+VERSION="${VERSION:-7.4.0}"
 MAINTAINER="${MAINTAINER:-Quinton Titus <93550885+GeneticxCln@users.noreply.github.com>}"
 VENDOR="${VENDOR:-Quinton Titus}"
 HOMEPAGE="${HOMEPAGE:-https://github.com/GeneticxCln/Arena-Desktop-Linux}"
@@ -35,17 +47,6 @@ verify_sha256() {
     exit 1
   fi
 }
-
-MACHINE="$(uname -m)"
-case "$MACHINE" in
-  x86_64|amd64)
-    NFPM_ARCH="amd64"; RPM_ARCH="x86_64"; APPIMAGE_ARCH="x86_64"; NFPM_MACHINE="x86_64" ;;
-  aarch64|arm64)
-    NFPM_ARCH="arm64"; RPM_ARCH="aarch64"; APPIMAGE_ARCH="aarch64"; NFPM_MACHINE="arm64" ;;
-  *)
-    echo "Unsupported architecture: $MACHINE" >&2
-    exit 1 ;;
-esac
 
 STAGE="release/Arena-Desktop-linux-${MACHINE}"
 TOOLS="build/tools"

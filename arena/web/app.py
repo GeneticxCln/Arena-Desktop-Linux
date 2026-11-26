@@ -43,7 +43,7 @@ from arena.models import (sync_models, get_models_for_modality, get_router_model
                           get_auto_agent_model, model_input_support,
                           model_can_receive_attachment, ORG_COLOR_MAP)
 from arena.auth import detect_installed_browsers, parse_cookie_input
-from arena import google_http, providers
+from arena import google_http, providers, terminal as pty_terminal
 from arena.deep_links import parse_deep_link
 
 import base64
@@ -281,6 +281,7 @@ VALID_API_MODES = contracts.API_MODES
 VALID_API_MODALITIES = ("chat", "webdev", "search", "image", "video")
 BROKER = permissions.PermissionBroker()
 CONNECTORS = connectors.ConnectorManager(lambda: _panel_workspace_root())
+TERMINAL_MANAGER = pty_terminal.TerminalManager()
 _stop = threading.Event()
 _generation_lock = threading.Lock()
 _active_generations = 0
@@ -381,7 +382,7 @@ def _diag_trace(fn):
 
 _API_TOKEN = secrets.token_urlsafe(32)
 
-APP_VERSION = "7.3.0"
+APP_VERSION = "7.4.0"
 
 # One tick of every polling loop that waits on something outside the request
 # (a question the person has to answer, a permission, a preview URL). It is a
@@ -902,6 +903,10 @@ def _summarize_tab_for_memory(data: dict) -> str:
         "deepseek": "[DeepSeek]",
         "claude": "[Claude]",
         "chatgpt": "[ChatGPT]",
+        "qwen": "[Qwen]",
+        "kimi": "[Kimi]",
+        "zai": "[Z.AI]",
+        "minimax": "[MiniMax]",
         "antigravity": "[Antigravity]",
     }
     mode_tag = _SRC_TAG.get(str(data.get("source") or "").lower(), "[Arena]")
@@ -1248,12 +1253,13 @@ def _sync_current_account_cookie(cookie: str):
         if not current:
             return
         for record in store["accounts"]:
-            if record.get("id") == current and record.get("cookie") != cookie:
-                record["cookie"] = cookie
-                record["updated_at"] = datetime.now(timezone.utc).isoformat()
-                record["expired"] = False
-                _accounts_save(store)
-            break
+            if record.get("id") == current:
+                if record.get("cookie") != cookie:
+                    record["cookie"] = cookie
+                    record["updated_at"] = datetime.now(timezone.utc).isoformat()
+                    record["expired"] = False
+                    _accounts_save(store)
+                break
 
 
 def _sync_account_cookie(account_id: str, cookie: str):
@@ -1361,19 +1367,7 @@ _ID_RE = None
 
 
 def _check_dependencies() -> dict:
-    """The interpreter, the UI libraries, and the pythonnet bridge.
-
-    The bridge check needs care in a PyInstaller build. ``Python.Runtime.dll``
-    and ``ClrLoader.dll`` are bundled *inside* the executable, not dropped
-    beside it: pythonnet loads them from the extraction directory, which only
-    exists once the app has unpacked itself. Looking for them next to the .exe
-    therefore failed on a perfectly good build — the startup screen refused to
-    let anyone in, on an install that was fine.
-
-    The rule here: the bridge is proven by *using* it. Importing ``clr`` inside
-    the frozen app exercises the same DLLs. A missing file is only reported
-    when that import actually fails.
-    """
+    """Verify the Python interpreter, pywebview, and Flask runtime are importable."""
     import platform as _platform
     import sys as _sys
 
@@ -1408,7 +1402,14 @@ def _check_integrity() -> dict:
 
     root = _Path(__file__).resolve().parent
     missing = []
-    for name in ("static/index.html", "static/app.js", "static/style.css"):
+    for name in (
+        "static/index.html",
+        "static/app.js",
+        "static/style.css",
+        "static/vendor/xterm.js",
+        "static/vendor/xterm.css",
+        "static/vendor/xterm-addon-fit.js",
+    ):
         if not (root / name).exists():
             missing.append(name.split("/")[-1])
 
@@ -1536,14 +1537,36 @@ def _check_accounts() -> dict:
     }
 
 
+def _count_saved_chats(source_filter: str) -> int:
+    """Count saved chats in CHATS_DIR/<id>/chat.json (plus legacy top-level *.json)."""
+    chats_dir = Path(CHATS_DIR)
+    if not chats_dir.exists():
+        return 0
+    count = 0
+    for chat_file in chats_dir.glob("*/chat.json"):
+        try:
+            data = json.loads(chat_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        src = str(data.get("source") or "local").lower()
+        if source_filter == "google":
+            if src == "google":
+                count += 1
+        elif src != "google":
+            count += 1
+    for legacy in chats_dir.glob("*.json"):
+        is_g = legacy.name.startswith("google_")
+        if (source_filter == "google" and is_g) or (source_filter != "google" and not is_g):
+            count += 1
+    return count
+
+
 def _check_arena_chats() -> dict:
     """Check saved Arena chats on startup."""
     client = get_client()
     has_arena = bool(getattr(client, "user", None) is not None or client.cookie_str)
     try:
-        chats_dir = Path(CHATS_DIR)
-        files = [p for p in chats_dir.glob("*.json") if not p.name.startswith("google_")] if chats_dir.exists() else []
-        count = len(files)
+        count = _count_saved_chats("arena")
     except Exception as exc:
         return {
             "id": "arena_chats",
@@ -1583,9 +1606,7 @@ def _check_google_chats() -> dict:
         for a in (g_store.get("accounts") or [])
     )
     try:
-        chats_dir = Path(CHATS_DIR)
-        files = list(chats_dir.glob("google_*.json")) if chats_dir.exists() else []
-        count = len(files)
+        count = _count_saved_chats("google")
     except Exception as exc:
         return {
             "id": "google_chats",
@@ -4627,12 +4648,15 @@ def _permit(mode: str, tool: str, info: dict):
     # while this one waits for an answer.
     info = dict(info, chat_id=getattr(_tl, "chat_id", None))
     pid = BROKER.ask(dict(info, mode=mode))
-    yield _sse(dict(info, type="permission", id=pid, mode=mode))
-    answer = yield from _wait_for(lambda: BROKER.wait(pid, 0), 600)
-    if not answer:
-        BROKER.resolve(pid, "deny")
-        BROKER.wait(pid, 0)
-        answer = "deny"
+    answer = None
+    try:
+        yield _sse(dict(info, type="permission", id=pid, mode=mode))
+        answer = yield from _wait_for(lambda: BROKER.wait(pid, 0), 600)
+    finally:
+        if not answer:
+            BROKER.resolve(pid, "deny")
+            BROKER.wait(pid, 0)
+            answer = "deny"
     yield _sse({"type": "permission_done", "id": pid, "decision": answer})
     return answer
 
@@ -8115,11 +8139,21 @@ def _agent_run(client: ArenaClient, message: str, conv: dict):
                     else:
                         paths = [str(rparams.get("path") or "").strip()]
                     ranged = {k: rparams[k] for k in ("start_line", "end_line") if rparams.get(k)}
-                    info = dict(tools[l].describe(
-                        {"name": "read_file", "params": {"path": paths[0] if paths and paths[0] else "."}}), model=l)
+                    described = [
+                        tools[l].describe({"name": "read_file", "params": {"path": p or "."}})
+                        for p in (paths or ["."])
+                    ]
+                    info = dict(described[0], model=l)
                     info["tool"] = call["name"]
+                    all_inside = all(bool(d.get("inside", False)) for d in described)
+                    info["inside"] = all_inside
                     if len(paths) > 1:
-                        info["summary"] = "Read " + ", ".join(paths)[:160]
+                        outside = [p for p, d in zip(paths, described) if not d.get("inside", False)]
+                        if outside:
+                            info["summary"] = "Read (outside workspace: " + ", ".join(outside)[:120] + ")"
+                            info["path"] = "\n".join(str(d.get("path") or p) for p, d in zip(paths, described))[:800]
+                        else:
+                            info["summary"] = "Read " + ", ".join(paths)[:160]
                     yield _sse(dict(info, type="tool_call"))
                     if not paths or not paths[0]:
                         ok, status, output = False, "error", (
@@ -8194,14 +8228,16 @@ def _agent_run(client: ArenaClient, message: str, conv: dict):
                                 "options": options, "custom": custom, "lane": l,
                                 "subagent": (conv.get("chat_id") if conv.get("chat_id") != parent_chat else None),
                                 "answer": None}
-                        yield _sse({"type": "question", "id": qid, "lane": l, "model": l,
-                                    "question": question, "options": options, "custom": custom,
-                                    "chat_id": parent_chat,
-                                    "subagent": _QUESTIONS[qid]["subagent"]})
-                        _notify("Arena Desktop", "The model is waiting for your answer.", "question")
-                        answer_text = yield from _wait_for(lambda: _question_answer(qid), QUESTION_TIMEOUT)
-                        with _questions_lock:
-                            _QUESTIONS.pop(qid, None)
+                        try:
+                            yield _sse({"type": "question", "id": qid, "lane": l, "model": l,
+                                        "question": question, "options": options, "custom": custom,
+                                        "chat_id": parent_chat,
+                                        "subagent": _QUESTIONS[qid]["subagent"]})
+                            _notify("Arena Desktop", "The model is waiting for your answer.", "question")
+                            answer_text = yield from _wait_for(lambda: _question_answer(qid), QUESTION_TIMEOUT)
+                        finally:
+                            with _questions_lock:
+                                _QUESTIONS.pop(qid, None)
                         yield _sse({"type": "question_done", "id": qid, "lane": l,
                                     "answer": answer_text or ""})
                         if answer_text:
@@ -8241,15 +8277,17 @@ def _agent_run(client: ArenaClient, message: str, conv: dict):
                                 "options": plan_options, "custom": True, "lane": l,
                                 "subagent": (conv.get("chat_id") if conv.get("chat_id") != parent_chat else None),
                                 "answer": None}
-                        yield _sse({"type": "question", "id": qid, "lane": l, "model": l,
-                                    "kind": "plan", "question": "Proposed plan", "plan": plan_text[:4000],
-                                    "options": plan_options, "custom": True,
-                                    "chat_id": parent_chat,
-                                    "subagent": _QUESTIONS[qid]["subagent"]})
-                        _notify("Arena Desktop", "The model proposed a plan for your review.", "question")
-                        answer_text = yield from _wait_for(lambda: _question_answer(qid), QUESTION_TIMEOUT)
-                        with _questions_lock:
-                            _QUESTIONS.pop(qid, None)
+                        try:
+                            yield _sse({"type": "question", "id": qid, "lane": l, "model": l,
+                                        "kind": "plan", "question": "Proposed plan", "plan": plan_text[:4000],
+                                        "options": plan_options, "custom": True,
+                                        "chat_id": parent_chat,
+                                        "subagent": _QUESTIONS[qid]["subagent"]})
+                            _notify("Arena Desktop", "The model proposed a plan for your review.", "question")
+                            answer_text = yield from _wait_for(lambda: _question_answer(qid), QUESTION_TIMEOUT)
+                        finally:
+                            with _questions_lock:
+                                _QUESTIONS.pop(qid, None)
                         yield _sse({"type": "question_done", "id": qid, "lane": l,
                                     "answer": answer_text or ""})
                         low = (answer_text or "").strip().lower()
@@ -10374,6 +10412,128 @@ def api_provider_models(provider_id):
     return jsonify(data)
 
 
+@app.route("/api/providers/<provider_id>/model", methods=["POST"])
+def api_provider_select_model(provider_id):
+    prov = providers.get_provider(provider_id)
+    if prov is None:
+        return jsonify({"ok": False, "error": f"Unknown provider: {provider_id}"}), 404
+    data = request.get_json(silent=True) or {}
+    model_id = str(data.get("model_id") or "").strip()
+    fn = getattr(prov, "select_model", None)
+    if callable(fn):
+        res = fn(model_id)
+        payload = {"ok": True, "provider": provider_id, **(res if isinstance(res, dict) else {})}
+        return jsonify(payload), (200 if payload.get("ok", True) else 500)
+    return jsonify({"ok": True, "provider": provider_id, "applied": False, "model_id": model_id})
+
+
+# ---------- Built-in Linux PTY Terminal Emulator ----------
+
+_TERM_ID_RE = re.compile(r"^[a-f0-9]{8,32}$")
+
+
+@app.route("/api/terminal/sessions", methods=["GET"])
+def api_terminal_list():
+    return jsonify({"ok": True, "sessions": TERMINAL_MANAGER.list()})
+
+
+@app.route("/api/terminal/sessions", methods=["POST"])
+def api_terminal_create():
+    data = request.get_json(silent=True) or {}
+    explicit_cwd = str(data.get("cwd") or data.get("workspace") or "").strip()
+    if explicit_cwd:
+        try:
+            cand = Path(explicit_cwd).expanduser().resolve()
+        except OSError:
+            return jsonify({"ok": False, "error": "Invalid working directory path"}), 400
+        if not cand.is_dir():
+            return jsonify({"ok": False, "error": f"Directory does not exist: {explicit_cwd}"}), 400
+        raw_cwd = str(cand)
+    else:
+        chosen = _chosen_ws()
+        raw_cwd = str(chosen) if chosen else ""
+    try:
+        cols = int(data.get("cols") or 100)
+        rows = int(data.get("rows") or 24)
+    except (TypeError, ValueError):
+        cols, rows = 100, 24
+    title = str(data.get("title") or "").strip()[:64]
+    try:
+        sess = TERMINAL_MANAGER.create(cwd=raw_cwd, cols=cols, rows=rows, title=title)
+    except RuntimeError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 429
+    except Exception as exc:
+        LOG.exception("terminal session spawn failed")
+        return jsonify({"ok": False, "error": f"Could not start terminal: {exc}"}), 500
+    return jsonify({"ok": True, "session": sess.to_public()})
+
+
+@app.route("/api/terminal/sessions/<sid>/stream", methods=["GET"])
+def api_terminal_stream(sid):
+    if not _TERM_ID_RE.match(sid or ""):
+        return jsonify({"ok": False, "error": "Invalid terminal session ID"}), 400
+    sess = TERMINAL_MANAGER.get(sid)
+    if sess is None:
+        return jsonify({"ok": False, "error": "Terminal session not found"}), 404
+
+    def generate():
+        for ev in sess.subscribe():
+            yield _sse(ev)
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.route("/api/terminal/sessions/<sid>/input", methods=["POST"])
+def api_terminal_input(sid):
+    if not _TERM_ID_RE.match(sid or ""):
+        return jsonify({"ok": False, "error": "Invalid terminal session ID"}), 400
+    sess = TERMINAL_MANAGER.get(sid)
+    if sess is None:
+        return jsonify({"ok": False, "error": "Terminal session not found"}), 404
+    data = request.get_json(silent=True) or {}
+    if isinstance(data.get("b64"), str):
+        try:
+            raw = base64.b64decode(data["b64"])
+        except Exception:
+            return jsonify({"ok": False, "error": "Invalid base64 payload"}), 400
+    else:
+        text = data.get("data")
+        if not isinstance(text, str):
+            return jsonify({"ok": False, "error": "Missing input data"}), 400
+        raw = text.encode("utf-8", errors="replace")
+    ok = sess.write(raw)
+    return jsonify({"ok": bool(ok), "alive": sess.alive})
+
+
+@app.route("/api/terminal/sessions/<sid>/resize", methods=["POST"])
+def api_terminal_resize(sid):
+    if not _TERM_ID_RE.match(sid or ""):
+        return jsonify({"ok": False, "error": "Invalid terminal session ID"}), 400
+    sess = TERMINAL_MANAGER.get(sid)
+    if sess is None:
+        return jsonify({"ok": False, "error": "Terminal session not found"}), 404
+    data = request.get_json(silent=True) or {}
+    try:
+        cols = int(data.get("cols") or sess.cols)
+        rows = int(data.get("rows") or sess.rows)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Invalid cols/rows"}), 400
+    ok = sess.resize(cols, rows)
+    return jsonify({"ok": bool(ok), "cols": sess.cols, "rows": sess.rows})
+
+
+@app.route("/api/terminal/sessions/<sid>", methods=["DELETE"])
+def api_terminal_close(sid):
+    if not _TERM_ID_RE.match(sid or ""):
+        return jsonify({"ok": False, "error": "Invalid terminal session ID"}), 400
+    closed = TERMINAL_MANAGER.close(sid)
+    return jsonify({"ok": True, "closed": bool(closed)})
+
+
 def _provider_track_stream(
     prov,
     chat_id: str,
@@ -10397,12 +10557,22 @@ def _provider_track_stream(
     title = existing.get("title")
     if not title or title in ("New chat", f"New {prov.name} tab"):
         title = " ".join(str(message).split())[:52] or f"{prov.name} chat"
-    ws_path = (
+    raw_ws = (
         _norm_workspace_path(workspace_hint)
         if workspace_hint
         else (_norm_workspace_path(existing.get("workspace")) or _norm_workspace_path(_chosen_ws()) or "")
     )
-    ws_root = Path(ws_path) if (ws_path and Path(ws_path).is_dir()) else None
+    ws_path = ""
+    ws_root = None
+    if raw_ws:
+        try:
+            cand_ws = Path(raw_ws).expanduser().resolve()
+            # Reject filesystem root and $HOME as workspace roots (same boundary guard as /api/workspaces).
+            if cand_ws.is_dir() and cand_ws != cand_ws.parent and cand_ws != Path.home().resolve():
+                ws_root = cand_ws
+                ws_path = str(cand_ws)
+        except OSError:
+            pass
     conv_url = str(existing.get("external_url") or "")
     chosen_model = str(model_id or existing.get("model_a") or "").strip()
     display_name = prov.name
@@ -10421,10 +10591,12 @@ def _provider_track_stream(
         and (tools_enabled is not False)
     )
     guide_already_sent = bool(existing.get("tools_guide"))
+    _stop.clear()
+    _chat_stop_event(chat_id).clear()
     _save_chat(chat_id, title=title, messages=messages, mode="direct",
                modality="text", model_a=chosen_model or None,
-               source=prov.id, tools_guide=guide_already_sent or use_local_tools,
-               workspace_dir=ws_path or None, external_url=conv_url or None)
+               source=prov.id, tools_guide=guide_already_sent,
+               workspace_dir=ws_path, external_url=conv_url or None)
 
     def generate():
         yield _sse({"type": "meta", "dual": False, "mode": "direct", "modality": "text",
@@ -10466,6 +10638,45 @@ def _provider_track_stream(
             )
 
         max_rounds = agent.MAX_ROUNDS if local_tools is not None else 1
+        saved = False
+
+        def _persist_turn() -> tuple[str, Optional[dict]]:
+            nonlocal saved
+            clean_ans = agent.strip_tool_calls(answer).strip() if local_tools is not None else answer
+            ck_id = (conv_ctx.get("_checkpoint_a") or {}).get("id")
+            cks = {"a": ck_id} if ck_id else None
+            if saved:
+                return clean_ans, cks
+            saved = True
+            turn_succeeded = bool((clean_ans or reasoning or tools_log) and not error_msg)
+            if clean_ans or answer or reasoning or tools_log or error_msg:
+                assistant = {
+                    "role": "assistant",
+                    "text": clean_ans,
+                    "text_b": "",
+                    "names": {"a": display_name, "b": None},
+                }
+                if reasoning:
+                    assistant["reasoning"] = reasoning
+                if tools_log:
+                    assistant["tools"] = tools_log
+                if cks:
+                    assistant["checkpoints"] = cks
+                if error_msg and not clean_ans:
+                    assistant["error"] = error_msg
+                messages.append(assistant)
+            if clean_ans or answer or reasoning or tools_log or error_msg or (external_url and external_url != conv_url):
+                try:
+                    _save_chat(chat_id, title=title, messages=messages, mode="direct",
+                               modality="text", model_a=chosen_model or None,
+                               source=prov.id,
+                               tools_guide=guide_already_sent or (use_local_tools and turn_succeeded),
+                               memory_hash=mem_hash, workspace_dir=ws_path,
+                               external_url=external_url or None)
+                except Exception:
+                    LOG.exception("provider %s chat save failed", prov.id)
+            return clean_ans, cks
+
         try:
             for rnd in range(1, max_rounds + 1):
                 if _stopped() or (stop_evt is not None and stop_evt.is_set()):
@@ -10481,6 +10692,7 @@ def _provider_track_stream(
                     conversation_url=external_url,
                     model=chosen_model,
                     permission_mode=perm_mode,
+                    is_followup_round=(rnd > 1),
                     stop_event=stop_evt,
                 ):
                     etype = ev.get("type")
@@ -10509,6 +10721,11 @@ def _provider_track_stream(
                         if chunk:
                             reasoning += chunk
                             yield _sse({"type": "reasoning", "text": chunk, "model": "a"})
+                    elif etype == "reasoning_replace":
+                        full_r = str(ev.get("text") or "")
+                        if full_r:
+                            reasoning = full_r
+                            yield _sse({"type": "reasoning", "text": reasoning, "replace": True, "model": "a"})
                     elif etype == "agent":
                         yield _sse({"type": "agent", "stage": str(ev.get("stage") or "")})
                     elif etype == "tool":
@@ -10565,6 +10782,111 @@ def _provider_track_stream(
                                     "ok": ok, "status": status, "output": output})
                         continue
 
+                    if cname == "ask_user":
+                        qparams = call.get("params") or {}
+                        question = str(qparams.get("question") or "").strip()
+                        options = [str(qparams.get(f"option{i}") or "").strip() for i in range(1, 5)]
+                        options = [o for o in options if o][:4]
+                        custom = str(qparams.get("custom") or "true").strip().lower() not in ("false", "no", "0")
+                        info = {"tool": "ask_user", "model": "a", "name": "Question",
+                                "summary": "Question: " + (" ".join(question.split())[:120] or "..."),
+                                "inside": True, "path": question[:400]}
+                        yield _sse(dict(info, type="tool_call"))
+                        answer_text = ""
+                        if not question:
+                            ok, status, output = False, "error", "ask_user needs a <question>."
+                        else:
+                            qid = generate_uuidv7()
+                            with _questions_lock:
+                                _QUESTIONS[qid] = {
+                                    "id": qid, "chat_id": chat_id, "question": question,
+                                    "options": options, "custom": custom, "lane": "a",
+                                    "subagent": None, "answer": None}
+                            try:
+                                yield _sse({"type": "question", "id": qid, "lane": "a", "model": "a",
+                                            "question": question, "options": options, "custom": custom,
+                                            "chat_id": chat_id, "subagent": None})
+                                _notify("Arena Desktop", "The model is waiting for your answer.", "question")
+                                answer_text = yield from _wait_for(lambda: _question_answer(qid), QUESTION_TIMEOUT)
+                            finally:
+                                with _questions_lock:
+                                    _QUESTIONS.pop(qid, None)
+                            yield _sse({"type": "question_done", "id": qid, "lane": "a",
+                                        "answer": answer_text or ""})
+                            if answer_text:
+                                ok, status, output = True, "ok", f'The user answered: "{answer_text}"'
+                            else:
+                                ok, status = False, "timeout"
+                                output = ("The user did not answer in time. Proceed with your best "
+                                          "judgment and state the assumption you made.")
+                                answer_text = ""
+                        outcomes.append((call, status, output))
+                        tools_log.append({"tool": "ask_user", "summary": info["summary"], "lane": "a",
+                                          "diff": None, "ok": ok, "status": status, "question": question,
+                                          "options": options, "answer": answer_text})
+                        yield _sse({"type": "tool_result", "model": "a", "tool": "ask_user",
+                                    "ok": ok, "status": status, "output": (output or "")[:4000]})
+                        continue
+
+                    if cname == "propose_plan":
+                        pparams = call.get("params") or {}
+                        plan_text = str(pparams.get("plan") or pparams.get("content") or pparams.get("text") or "").strip()
+                        first_line = " ".join((plan_text.splitlines() or [""])[0].split())[:120]
+                        info = {"tool": "propose_plan", "model": "a", "name": "Plan",
+                                "summary": "Plan: " + (first_line or "..."),
+                                "inside": True, "path": plan_text[:400]}
+                        yield _sse(dict(info, type="tool_call"))
+                        answer_text = ""
+                        if not plan_text:
+                            ok, status, output = False, "error", "propose_plan needs a <plan> with the steps."
+                        else:
+                            qid = generate_uuidv7()
+                            plan_options = ["Approve plan", "Cancel"]
+                            with _questions_lock:
+                                _QUESTIONS[qid] = {
+                                    "id": qid, "chat_id": chat_id, "kind": "plan",
+                                    "question": "Proposed plan", "plan": plan_text[:4000],
+                                    "options": plan_options, "custom": True, "lane": "a",
+                                    "subagent": None, "answer": None}
+                            try:
+                                yield _sse({"type": "question", "id": qid, "lane": "a", "model": "a",
+                                            "kind": "plan", "question": "Proposed plan", "plan": plan_text[:4000],
+                                            "options": plan_options, "custom": True,
+                                            "chat_id": chat_id, "subagent": None})
+                                _notify("Arena Desktop", "The model proposed a plan for your review.", "question")
+                                answer_text = yield from _wait_for(lambda: _question_answer(qid), QUESTION_TIMEOUT)
+                            finally:
+                                with _questions_lock:
+                                    _QUESTIONS.pop(qid, None)
+                            yield _sse({"type": "question_done", "id": qid, "lane": "a",
+                                        "answer": answer_text or ""})
+                            low = (answer_text or "").strip().lower()
+                            if low == "approve plan":
+                                ok, status = True, "approved"
+                                output = ("The user approved your plan. Execute it now, step by step, "
+                                          "keeping the set_todos checklist updated as you go.")
+                            elif low == "cancel":
+                                ok, status = False, "cancelled"
+                                output = ("The user cancelled the plan. Make no changes; reply briefly "
+                                          "and ask how they would like to proceed.")
+                            elif answer_text:
+                                ok, status = True, "revise"
+                                output = (f'The user wants changes to the plan: "{answer_text}". '
+                                          "Revise the plan accordingly and present it again with "
+                                          "propose_plan - do not start editing yet.")
+                            else:
+                                ok, status = False, "timeout"
+                                output = ("The user did not review the plan in time. Do not make changes; "
+                                          "reply with the plan as plain text and finish.")
+                                answer_text = ""
+                        outcomes.append((call, status, output))
+                        tools_log.append({"tool": "propose_plan", "summary": info["summary"], "lane": "a",
+                                          "diff": None, "ok": ok, "status": status, "plan": plan_text[:4000],
+                                          "answer": answer_text})
+                        yield _sse({"type": "tool_result", "model": "a", "tool": "propose_plan",
+                                    "ok": ok, "status": status, "output": (output or "")[:4000]})
+                        continue
+
                     if cname == "read_files":
                         rparams = call.get("params") or {}
                         raw_paths = []
@@ -10572,9 +10894,20 @@ def _provider_track_stream(
                             chunk = str(rparams.get(key) or "")
                             raw_paths += [ln.strip() for ln in chunk.replace(",", "\n").splitlines() if ln.strip()]
                         paths = list(dict.fromkeys(raw_paths))[:8] or ["."]
-                        info = dict(local_tools.describe({"name": "read_file", "params": {"path": paths[0]}}), model="a")
+                        described = [
+                            local_tools.describe({"name": "read_file", "params": {"path": p}})
+                            for p in paths
+                        ]
+                        info = dict(described[0], model="a")
                         info["tool"] = "read_files"
-                        info["summary"] = f"Read {len(paths)} file(s)"
+                        all_inside = all(bool(d.get("inside", False)) for d in described)
+                        info["inside"] = all_inside
+                        outside = [p for p, d in zip(paths, described) if not d.get("inside", False)]
+                        if outside:
+                            info["summary"] = "Read (outside workspace: " + ", ".join(outside)[:120] + ")"
+                            info["path"] = "\n".join(str(d.get("path") or p) for p, d in zip(paths, described))[:800]
+                        else:
+                            info["summary"] = f"Read {len(paths)} file(s)"
                         yield _sse(dict(info, type="tool_call"))
                         verdict = yield from _permit(perm_mode, "read_file", info)
                         if verdict == "allow":
@@ -10664,32 +10997,28 @@ def _provider_track_stream(
                     turn_prompt += ("\n[Arena Desktop] You are near the tool-round limit for this reply. "
                                     "Finish the current step now and answer with your final summary; do not start new tool work.")
                 answer += "\n\n"
+                yield _sse({"type": "text", "text": "\n\n", "model": "a"})
                 yield _sse({"type": "round", "n": rnd + 1})
         except Exception as exc:
             LOG.exception("provider %s turn failed", prov.id)
             error_msg = f"{prov.name} error: {exc}"
             yield _sse({"type": "error", "code": prov.id, "message": error_msg,
                         "provider": prov.id})
-        if answer or reasoning or tools_log or error_msg:
-            assistant = {"role": "assistant", "text": answer, "names": {"a": display_name, "b": None}}
-            if reasoning:
-                assistant["reasoning"] = reasoning
-            if tools_log:
-                assistant["tools"] = tools_log
-            if error_msg and not answer:
-                assistant["error"] = error_msg
-            messages.append(assistant)
-            try:
-                _save_chat(chat_id, title=title, messages=messages, mode="direct",
-                           modality="text", model_a=chosen_model or None,
-                           source=prov.id, tools_guide=guide_already_sent or use_local_tools,
-                           memory_hash=mem_hash, workspace_dir=ws_path or None,
-                           external_url=external_url or None)
-            except Exception:
-                LOG.exception("provider %s chat save failed", prov.id)
-        yield _sse({"type": "done", "text_a": answer, "text_b": "", "dual": False,
-                    "chat_id": chat_id, "provider": prov.id,
-                    "history_chars": _history_chars(messages)})
+        finally:
+            clean_answer, checkpoints = _persist_turn()
+        done_ev = {
+            "type": "done",
+            "text_a": clean_answer,
+            "text_b": "",
+            "dual": False,
+            "chat_id": chat_id,
+            "provider": prov.id,
+            "msg_index": max(0, len(messages) - 1),
+            "history_chars": _history_chars(messages),
+        }
+        if checkpoints:
+            done_ev["checkpoints"] = checkpoints
+        yield _sse(done_ev)
 
     return Response(
         stream_with_context(_sse_wrap(generate(), chat_id=chat_id)),
@@ -11348,6 +11677,9 @@ def api_stop():
         cancelled = _NATIVE_SUBAGENTS.cancel_parent(str(chat_id))
     else:
         _stop.set()
+        with _generation_lock:
+            for ev in _chat_stops.values():
+                ev.set()
         cancelled = BROKER.cancel_all()
     if _engine_on() and ENGINE.challenge == "recaptcha":
         ENGINE.cancel_check()
@@ -12499,6 +12831,10 @@ def shutdown_runtime() -> dict:
         report["providers_shutdown"] = True
     except Exception:
         LOG.exception("shutdown: providers shutdown failed")
+    try:
+        report["terminals_closed"] = TERMINAL_MANAGER.shutdown_all()
+    except Exception:
+        LOG.exception("shutdown: terminal shutdown failed")
     try:
         with _preview_lock:
             srv = _preview.get("server")

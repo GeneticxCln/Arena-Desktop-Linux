@@ -1,4 +1,4 @@
-# Arena Desktop v7.3.0 - Start Here
+# Arena Desktop v7.4.0 - Start Here
 
 Arena Desktop is an unofficial native Linux desktop client for arena.ai. It is not affiliated with or endorsed by Arena AI Inc.
 
@@ -40,7 +40,7 @@ The local session in `~/.arena-personal/cookies.txt` is encrypted via your Linux
 - Arena Agent inside the app through direct API calls; a separate Local Agent remains available and its default for new chats is selected in Settings -> Permissions.
 - **Workspace Sync** switch (right of the permission selector, shown in every mode): when on, models can run commands and use tools in the folder selected on this computer, with results returned to them automatically — in Direct, Side by Side, Battle (Text/Web Search) and the Local Agent; files the native Arena Agent creates in its cloud workspace are downloaded into the selected folder too. When off, models only chat, Code files are not mirrored and Arena Agent files stay in Arena's workspace.
 - Local and cloud Arena history, continuation of existing Arena sessions, Workspace files, media, and permissions. Deleting a chat here also archives it on arena.ai.
-- Multiple Arena accounts: click the profile to switch between saved accounts or add another one (sign-in window or cookies). Each account keeps its own chat list; an account whose session Arena no longer accepts is marked "Session expired: sign in". Saved sessions live in `%USERPROFILE%\.arena-personal\accounts.json`; cookie values there are also protected with Windows DPAPI for the current Windows user. Switching is blocked while a generation is running.
+- Multiple Arena accounts: click the profile to switch between saved accounts or add another one (sign-in window or cookies). Each account keeps its own chat list; an account whose session Arena no longer accepts is marked "Session expired: sign in". Saved sessions live in `~/.arena-personal/accounts.json`; cookie values there are protected via the Linux Secret Service keyring (`secret-tool`) when available, or owner-only `0600` files in headless setups. Switching is blocked while a generation is running.
 - Parallel chats: a chat appears in the sidebar as soon as you send the prompt, and other chats stay fully usable while one is generating. A spinning circle marks a working chat; a green check marks a chat that finished while you were elsewhere. Stop acts on the open chat only.
 - Ctrl+K opens a command palette for chats, message search, Compact, Markdown/HTML export, models and panels. The Workspace panel also has a Git tab for status, diff, stage/unstage and local commits (no push).
 - File attachments with the **+** button, drag and drop onto the message box, or paste from the clipboard. Battle/Direct/Side by Side accept PNG/JPEG/WebP/PDF (15 MB, Video 10 MB); Agent Mode also accepts GIF/TXT/MD/CSV/HTML/XML/CSS/JS/JSON (25 MB per file, PDF 10 MB, 50 MB per message).
@@ -55,7 +55,7 @@ The local session in `~/.arena-personal/cookies.txt` is encrypted via your Linux
 - Human checks are never solved automatically. Complete them manually in the Arena window.
 - A started chat keeps the mode, work type, and models it began with. Create a new chat to change them.
 - A local folder is not uploaded wholesale to Arena's remote sandbox; files and previews come from actual server events.
-- Existing local data remains under `%USERPROFILE%\.arena-personal` for compatibility with earlier versions.
+- Existing local data remains under `~/.arena-personal` for compatibility with earlier versions.
 
 ## Build and test
 

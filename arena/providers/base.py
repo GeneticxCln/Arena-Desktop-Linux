@@ -71,6 +71,7 @@ class Provider:
         conversation_url: str = "",
         model: str = "",
         permission_mode: str = "",
+        is_followup_round: bool = False,
         stop_event=None,
     ) -> Iterator[dict]:
         yield {

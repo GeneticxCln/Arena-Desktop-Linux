@@ -57,7 +57,7 @@ def _where(skip: int = 3) -> str:
     """``file:line in function`` of the caller, for pointing at the real code."""
     try:
         frame = sys._getframe(skip)
-        return f"{os.path.basename(frame.f_code.co_filename)}:{frame.f_lineno} в {frame.f_code.co_name}"
+        return f"{os.path.basename(frame.f_code.co_filename)}:{frame.f_lineno} in {frame.f_code.co_name}"
     except Exception:
         return "?"
 
@@ -216,10 +216,11 @@ def make_window_calls_non_blocking(window) -> None:
 
     ``pywebview.platforms.gtk`` calls ``show_all()``, ``move()``, and
     ``resize()`` directly on the calling thread instead of via ``GLib.idle_add``.
-    Wrapping these methods guarantees thread safety on GTK/Wayland while always
-    calling through to the real method (never silently dropping calls).
+    Wrapping these methods guarantees thread safety on GTK/Wayland (even when
+    ``ARENA_DIAG=0``) and waits for ``window.events.shown`` *off* the GTK main
+    thread so pywebview's ``@_shown_call`` never blocks the GTK main loop.
     """
-    if not enabled() or window is None:
+    if window is None:
         return
     if any(win is window for win in _wrapped_windows):
         return
@@ -240,9 +241,24 @@ def make_window_calls_non_blocking(window) -> None:
 
         def _make_wrapper(fn, method_name):
             def _wrapped(*args, **kwargs):
+                shown_evt = getattr(getattr(window, "events", None), "shown", None)
+                is_set = getattr(shown_evt, "is_set", None)
+                wait_fn = getattr(shown_evt, "wait", None)
                 if threading.current_thread() is not threading.main_thread():
+                    # Wait off the GTK main thread so @_shown_call never deadlocks GTK.
+                    if callable(is_set) and not is_set() and callable(wait_fn):
+                        try:
+                            wait_fn(4.0)
+                        except Exception:
+                            pass
+                        if not is_set():
+                            LOG.info("[window] skipping %s: window not shown yet", method_name)
+                            return None
                     if _glib_idle_add(lambda: fn(*args, **kwargs)):
                         return None
+                elif callable(is_set) and not is_set():
+                    LOG.info("[window] skipping main-thread %s before shown", method_name)
+                    return None
                 return fn(*args, **kwargs)
             return _wrapped
 
@@ -317,8 +333,8 @@ def _heartbeat() -> None:
                 lines.append(f"  [{name}] " + " <- ".join(where))
             with _lock:
                 pending = {k: (v[0], round(time.time() - v[1], 1)) for k, v in _inflight.items()}
-            LOG.info("[heartbeat] потоков=%d, вызовов в работе=%s\n%s",
-                     len(lines), pending or "нет", "\n".join(sorted(lines)))
+            LOG.info("[heartbeat] threads=%d, inflight=%s\n%s",
+                     len(lines), pending or "none", "\n".join(sorted(lines)))
         except Exception:
             LOG.exception("heartbeat failed")
 

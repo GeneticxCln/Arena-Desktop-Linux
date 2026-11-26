@@ -224,10 +224,12 @@ class DeepSeekProvider(WebChatEngine):
         if isinstance(res, dict) and res.get("changed"):
             time.sleep(0.15)
 
-    def _parse_observed_sse_chunk(self, raw_chunk: str, state: dict) -> list[dict]:
+    def _parse_observed_sse_chunk(self, raw_chunk: str, state: dict, *, flush: bool = False) -> list[dict]:
         """Parse DeepSeek's live SSE response stream (observation-only)."""
         events: list[dict] = []
         buf = str(state.get("buf") or "") + (raw_chunk or "")
+        if flush and buf.strip():
+            buf += "\n"
         cur_path = str(state.get("path") or "")
         while "\n" in buf:
             line, buf = buf.split("\n", 1)
@@ -262,7 +264,7 @@ class DeepSeekProvider(WebChatEngine):
             if isinstance(val, str) and val:
                 if "thinking" in cur_path or "reason" in cur_path:
                     events.append({"type": "reasoning", "text": val})
-                elif "content" in cur_path or not cur_path:
+                elif "content" in cur_path:
                     events.append({"type": "text", "text": val})
             elif isinstance(val, list):
                 for item in val:

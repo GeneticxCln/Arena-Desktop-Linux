@@ -177,8 +177,10 @@ class ChatGPTProvider(WebChatEngine):
 
     def _apply_model_selection(self, model_id: str) -> None:
         want = (model_id or "").strip()
+    def _apply_model_selection(self, model_id: str) -> Optional[bool]:
+        want = (model_id or "").strip()
         if not want or want in ("auto", "default"):
-            return
+            return True
         if "think" in want.lower():
             script = r"""(() => {
               const btn = Array.from(document.querySelectorAll('button')).find((b) => {
@@ -193,14 +195,26 @@ class ChatGPTProvider(WebChatEngine):
             })()"""
             self.eval_js(script, timeout=3.0)
             time.sleep(0.15)
-            return
-        script = f"""(() => {{
+            if want.lower() in ("think", "reason"):
+                return True
+        open_script = f"""(() => {{
           const want = {json.dumps(want.lower())};
           const btn = document.querySelector('[data-testid="model-switcher-dropdown-button"]');
           if (!btn) return JSON.stringify({{ ok: false }});
           const cur = (btn.innerText || btn.textContent || '').toLowerCase();
           if (cur.includes(want)) return JSON.stringify({{ ok: true, already: true }});
+          btn.dispatchEvent(new PointerEvent('pointerdown', {{ bubbles: true, cancelable: true, button: 0, pointerType: 'mouse' }}));
           btn.click();
+          return JSON.stringify({{ ok: true, opened: true }});
+        }})()"""
+        step1 = self.eval_js(open_script, timeout=3.0)
+        if not isinstance(step1, dict) or not step1.get("ok"):
+            return False
+        if step1.get("already"):
+            return True
+        time.sleep(0.3)
+        click_script = f"""(() => {{
+          const want = {json.dumps(want.lower())};
           const items = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"]'));
           for (const item of items) {{
             const txt = (item.innerText || item.textContent || '').toLowerCase();
@@ -213,14 +227,18 @@ class ChatGPTProvider(WebChatEngine):
           document.dispatchEvent(new KeyboardEvent('keydown', {{ key: 'Escape', code: 'Escape', bubbles: true }}));
           return JSON.stringify({{ ok: false }});
         }})()"""
-        res = self.eval_js(script, timeout=3.0)
+        res = self.eval_js(click_script, timeout=3.0)
         if isinstance(res, dict) and res.get("clicked"):
             time.sleep(0.2)
+            return True
+        return False
 
-    def _parse_observed_sse_chunk(self, raw_chunk: str, state: dict) -> list[dict]:
+    def _parse_observed_sse_chunk(self, raw_chunk: str, state: dict, *, flush: bool = False) -> list[dict]:
         """Parse ChatGPT's live SSE response stream (observation-only)."""
         events: list[dict] = []
         buf = str(state.get("buf") or "") + (raw_chunk or "")
+        if flush and buf.strip():
+            buf += "\n"
         last_full = str(state.get("last_full") or "")
         cur_p = str(state.get("p") or "")
         while "\n" in buf:
@@ -243,13 +261,18 @@ class ChatGPTProvider(WebChatEngine):
                 state["conv_emitted"] = True
                 events.append({"type": "meta_update", "external_url": f"https://chatgpt.com/c/{conv_id}"})
 
-            # Format A: ChatGPT v1 delta-encoding patches ({"p": "/message/content/parts/0", "o": "append", "v": "..."})
+            # Format A: ChatGPT v1 delta-encoding patches
             if isinstance(pkt.get("p"), str):
                 cur_p = pkt["p"]
                 state["p"] = cur_p
             op = str(pkt.get("o") or "").lower()
             val = pkt.get("v")
-            if isinstance(val, str) and val and (op == "append" or (not op and "/message/content/parts" in cur_p)):
+            is_content_path = (
+                "/message/content/parts" in cur_p
+                or "thoughts" in cur_p
+                or "reasoning" in cur_p
+            )
+            if isinstance(val, str) and val and is_content_path and op in ("", "append"):
                 if "thoughts" in cur_p or "reasoning" in cur_p:
                     events.append({"type": "reasoning", "text": val})
                 else:
@@ -260,9 +283,12 @@ class ChatGPTProvider(WebChatEngine):
                 for sub in val:
                     if not isinstance(sub, dict):
                         continue
+                    sub_op = str(sub.get("o") or "").lower()
+                    if sub_op in ("remove", "delete"):
+                        continue
                     sp = str(sub.get("p") or cur_p)
                     sv = sub.get("v")
-                    if isinstance(sv, str) and sv and "/message/content/parts" in sp:
+                    if isinstance(sv, str) and sv and ("/message/content/parts" in sp or "thoughts" in sp or "reasoning" in sp):
                         if "thoughts" in sp or "reasoning" in sp:
                             events.append({"type": "reasoning", "text": sv})
                         else:

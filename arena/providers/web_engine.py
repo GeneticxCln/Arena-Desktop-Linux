@@ -47,6 +47,49 @@ def get_window_factory() -> Optional[Callable[[str, str, bool], object]]:
     return _WINDOW_FACTORY
 
 
+_HIDDEN_RAF_SHIM_JS = r"""(() => {
+  if (window.__apRafPatched) return;
+  window.__apRafPatched = true;
+  window.__apRafActive = false;
+  const origRAF = window.requestAnimationFrame.bind(window);
+  const origCAF = window.cancelAnimationFrame.bind(window);
+  const timers = new Map();
+  let nextId = 900000000;
+  window.requestAnimationFrame = function(cb) {
+    if (!document.hidden) return origRAF(cb);
+    const id = ++nextId;
+    const delay = window.__apRafActive ? 16 : 250;
+    const t = setTimeout(() => {
+      timers.delete(id);
+      try { cb(performance.now()); } catch (e) {}
+    }, delay);
+    timers.set(id, t);
+    return id;
+  };
+  window.cancelAnimationFrame = function(id) {
+    if (timers.has(id)) {
+      clearTimeout(timers.get(id));
+      timers.delete(id);
+      return;
+    }
+    return origCAF(id);
+  };
+})();"""
+
+_OAUTH_HOST_HINTS = (
+    "accounts.google.",
+    "auth.openai.com",
+    "appleid.apple.com",
+    "github.com/login",
+    "login.microsoftonline.com",
+    "auth.qwen.ai",
+)
+
+
+def _norm_url(u: str) -> str:
+    return (u or "").strip().rstrip("/")
+
+
 def _looks_like_human_check(title: str, body: str) -> bool:
     t = (title or "").lower()
     b = (body or "").lower()
@@ -80,6 +123,7 @@ class WebChatEngine(Provider):
     conversation_url_hint: str = ""
     observed_fetch_patterns: tuple[str, ...] = ()
     prefer_enter_submit: bool = False
+    api_nav_not_needed: bool = False
     default_models: tuple[dict, ...] = ()
     poll_interval: float = 0.30
     turn_timeout: float = 180.0
@@ -90,10 +134,122 @@ class WebChatEngine(Provider):
         self.last_url: str = ""
         self.last_error: str = ""
         self._lock = threading.Lock()
+        self._turn_lock = threading.Lock()
         self._signed_in_cache: Optional[bool] = None
         self._signed_in_at: float = 0.0
         self._models_cache: Optional[dict] = None
         self._models_at: float = 0.0
+        self._popup_windows: list = []
+        self._webkit_configured_uid: str = ""
+
+    def _configure_webkit_view(self, win) -> None:
+        """Install OAuth popup support ('create' signal) and hidden-window rAF UserScript."""
+        uid = getattr(win, "uid", None)
+        if not uid or uid == self._webkit_configured_uid:
+            return
+        try:
+            import gi  # type: ignore
+
+            gi.require_version("Gtk", "3.0")
+            from gi.repository import GLib, Gtk, WebKit2  # type: ignore
+            from webview.platforms import gtk as gtk_backend  # type: ignore
+        except Exception:
+            return
+
+        attempts = {"n": 0}
+
+        def _attach() -> bool:
+            view = gtk_backend.BrowserView.instances.get(uid)
+            wv = getattr(view, "webview", None) if view is not None else None
+            if wv is None:
+                attempts["n"] += 1
+                if attempts["n"] < 25:
+                    GLib.timeout_add(150, _attach)
+                return False
+            if self._webkit_configured_uid == uid:
+                return False
+            self._webkit_configured_uid = uid
+
+            # 1. Inject hidden-window rAF shim at DOCUMENT_START so Svelte/Vue/Lexical/React
+            #    submit handlers never stall when this GTK window is hidden.
+            try:
+                ucm = wv.get_user_content_manager()
+                if ucm is not None:
+                    ucm.add_script(WebKit2.UserScript(
+                        _HIDDEN_RAF_SHIM_JS,
+                        WebKit2.UserContentInjectedFrames.ALL_FRAMES,
+                        WebKit2.UserScriptInjectionTime.START,
+                        None,
+                        None,
+                    ))
+            except Exception as exc:
+                LOG.debug("%s: could not install hidden rAF UserScript: %s", self.id, exc)
+
+            # 2. Enable JS popup windows (e.g. Google/Apple/GitHub OAuth via window.open)
+            #    sharing the exact same WebContext, cookies, and JS window.opener link.
+            def _wire_popups(target_wv) -> None:
+                try:
+                    settings = target_wv.get_settings()
+                    if settings is not None:
+                        settings.set_javascript_can_open_windows_automatically(True)
+                except Exception:
+                    pass
+
+                def _on_create(parent_wv, _nav_action):
+                    # Only allow user-initiated OAuth popups while this provider window is visible,
+                    # and cap concurrent popups to avoid unsolicited background windows.
+                    if not self.visible or len(self._popup_windows) >= 2:
+                        return None
+                    try:
+                        popup_wv = WebKit2.WebView.new_with_related_view(parent_wv)
+                    except Exception:
+                        return None
+                    popup_win = Gtk.Window(title=f"{self.name} Sign in - Arena Desktop")
+                    popup_win.set_default_size(540, 720)
+                    popup_win.set_position(Gtk.WindowPosition.CENTER)
+                    popup_win.add(popup_wv)
+                    self._popup_windows.append(popup_win)
+
+                    def _on_ready(p_wv):
+                        popup_win.show_all()
+                        popup_win.present()
+
+                    def _on_title(p_wv, _pspec):
+                        t = p_wv.get_title() or ""
+                        if t:
+                            popup_win.set_title(f"{t} - Arena Desktop")
+
+                    def _on_close(_p_wv):
+                        try:
+                            popup_win.destroy()
+                        except Exception:
+                            pass
+
+                    def _on_destroy(_w):
+                        try:
+                            self._popup_windows.remove(popup_win)
+                        except ValueError:
+                            pass
+
+                    popup_wv.connect("ready-to-show", _on_ready)
+                    popup_wv.connect("notify::title", _on_title)
+                    popup_wv.connect("close", _on_close)
+                    popup_win.connect("destroy", _on_destroy)
+                    _wire_popups(popup_wv)
+                    return popup_wv
+
+                target_wv.connect("create", _on_create)
+
+            try:
+                _wire_popups(wv)
+            except Exception as exc:
+                LOG.debug("%s: could not connect WebKit2 create popup handler: %s", self.id, exc)
+            return False
+
+        try:
+            GLib.idle_add(_attach)
+        except Exception:
+            pass
 
     # -- window lifecycle ------------------------------------------------
 
@@ -135,23 +291,52 @@ class WebChatEngine(Provider):
                     wait_fn(2.0)
                 except Exception:
                     pass
+            self._configure_webkit_view(win)
             return True
+
+    def _close_popups(self) -> None:
+        if not self._popup_windows:
+            return
+        wins = list(self._popup_windows)
+        self._popup_windows.clear()
+        try:
+            from gi.repository import GLib  # type: ignore
+
+            def _destroy_all():
+                for w in wins:
+                    try:
+                        w.destroy()
+                    except Exception:
+                        pass
+                return False
+
+            GLib.idle_add(_destroy_all)
+        except Exception:
+            for w in wins:
+                try:
+                    w.destroy()
+                except Exception:
+                    pass
 
     def _on_closing(self, *_args):
         """Close-to-hide so the signed-in session stays alive in the background."""
         self.visible = False
+        self._close_popups()
         if self.window is not None:
             diag.run_on_ui_nonblocking(self.window, self.window.hide, f"{self.id}-hide")
         return False
 
     def _on_closed(self, *_args):
         self.visible = False
+        self._close_popups()
+        self._webkit_configured_uid = ""
         self.window = None
 
     def show(self) -> bool:
         if not self.ensure_window(hidden=False):
             return False
         w = self.window
+        self._configure_webkit_view(w)
         self.visible = True
         try:
             w.show()
@@ -172,6 +357,7 @@ class WebChatEngine(Provider):
 
     def hide(self) -> bool:
         self.visible = False
+        self._close_popups()
         if self.window is None:
             return False
         try:
@@ -192,18 +378,23 @@ class WebChatEngine(Provider):
             return False
 
     def open_sign_in(self) -> dict:
+        was_missing = self.window is None
         if not self.ensure_window(hidden=False):
             return {
                 "ok": False,
                 "error": f"The {self.name} window is only available inside the desktop app.",
             }
         self.show()
-        current = self.page_url()
-        if not current or current == "about:blank" or self.origin.split("/")[2] not in current:
-            self.load_url(self.origin)
+        if not was_missing:
+            current = self.page_url()
+            cur_low = (current or "").lower()
+            in_oauth = any(h in cur_low for h in _OAUTH_HOST_HINTS)
+            if not in_oauth and (not current or current == "about:blank" or self.origin.split("/")[2] not in current):
+                self.load_url(self.origin)
         return {"ok": True, "open": True, "url": self.origin}
 
     def shutdown(self) -> None:
+        self._close_popups()
         try:
             self.hide()
         except Exception:
@@ -260,8 +451,8 @@ class WebChatEngine(Provider):
                         callback=_on_finish,
                     )
                 else:
-                    # Fallback for older WebKit2GTK bindings
-                    box["value"] = view.evaluate_js(script, False)
+                    # Do NOT call view.evaluate_js() on the GTK main thread (would self-deadlock).
+                    box["fallback"] = True
                     done.set()
             except BaseException as exc:
                 box["error"] = exc
@@ -271,6 +462,8 @@ class WebChatEngine(Provider):
         GLib.idle_add(_dispatch)
         if not done.wait(timeout):
             return True, None
+        if box.get("fallback"):
+            return False, None
         if "error" in box:
             LOG.debug("%s: webkit direct eval_js error: %s", self.id, box["error"])
             return True, None
@@ -319,9 +512,28 @@ class WebChatEngine(Provider):
         names: set[str] = set()
         if self.window is None:
             return names
+        # Always prefer bounded WebKit2 CookieManager directly on GTK to avoid
+        # pywebview.platforms.gtk.BrowserView.get_cookies() unbounded semaphore hangs.
         try:
-            raw = self.window.get_cookies()
-            for item in raw or []:
+            names.update(self._read_webkit_cookie_names())
+        except Exception:
+            pass
+        if names or getattr(self.window, "uid", None):
+            return names
+        box: dict = {}
+        done = threading.Event()
+
+        def _fetch():
+            try:
+                box["raw"] = self.window.get_cookies()
+            except Exception:
+                box["raw"] = []
+            finally:
+                done.set()
+
+        threading.Thread(target=_fetch, daemon=True, name=f"{self.id}-cookies").start()
+        if done.wait(2.5):
+            for item in box.get("raw") or []:
                 if isinstance(item, dict):
                     n = item.get("name") or item.get("Name")
                     if n:
@@ -332,14 +544,6 @@ class WebChatEngine(Provider):
                 elif hasattr(item, "keys"):
                     for k in item.keys():
                         names.add(str(k))
-        except Exception:
-            pass
-        if names:
-            return names
-        try:
-            names.update(self._read_webkit_cookie_names())
-        except Exception:
-            pass
         return names
 
     def _read_webkit_cookie_names(self) -> set[str]:
@@ -459,6 +663,11 @@ class WebChatEngine(Provider):
             res = self.eval_js(poll_js, timeout=2.5)
             if isinstance(res, dict) and res.get("done"):
                 return res
+        # Clean up timed-out fetch entry in page JS so __apFetches never leaks.
+        self.eval_js(
+            f"(() => {{ if (window.__apFetches) delete window.__apFetches[{json.dumps(rid)}]; return 1; }})()",
+            timeout=1.5,
+        )
         return {"ok": False, "status": 0, "data": None, "text": "", "error": "timeout"}
 
     def iter_fetch_stream(
@@ -471,25 +680,23 @@ class WebChatEngine(Provider):
         timeout: float = 180.0,
         stop_event=None,
     ) -> Iterator[dict]:
-        """Stream a same-origin fetch() response chunk-by-chunk from the hidden WebView.
-
-        Yields dicts:
-        - ``{"event": "status", "status": int, "ok": bool}``
-        - ``{"event": "chunk", "data": str}``
-        - ``{"event": "error", "error": str}``
-        - ``{"event": "end"}``
-        """
+        """Stream a same-origin fetch() response chunk-by-chunk from the hidden WebView."""
         rid = uuid.uuid4().hex
         script = f"""(() => {{
           window.__apStreams = window.__apStreams || {{}};
           const rid = {json.dumps(rid)};
-          const st = {{ status: 0, ok: false, statusSent: false, chunks: [], done: false, error: '' }};
+          const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+          const st = {{
+            status: 0, ok: false, statusReady: false, chunks: [], done: false, error: '',
+            abort: () => {{ try {{ if (ctrl) ctrl.abort(); }} catch (e) {{}} }}
+          }};
           window.__apStreams[rid] = st;
           (async () => {{
             try {{
               const opts = {{
                 method: {json.dumps(method)},
                 credentials: 'include',
+                signal: ctrl ? ctrl.signal : undefined,
                 headers: Object.assign(
                   {{ 'Accept': 'text/event-stream, application/json' }},
                   {json.dumps(headers or {})},
@@ -523,7 +730,7 @@ class WebChatEngine(Provider):
           }})();
           return 'started';
         }})()"""
-        if not self.eval_js(script, timeout=3.5):
+        if self.eval_js(script, timeout=3.5) != "started":
             yield {"event": "error", "error": "eval_failed"}
             return
 
@@ -541,32 +748,43 @@ class WebChatEngine(Provider):
           if (st.done && !st.chunks.length) delete window.__apStreams[{json.dumps(rid)}];
           return JSON.stringify(out);
         }})()"""
+        cleanup_js = f"""(() => {{
+          const st = window.__apStreams && window.__apStreams[{json.dumps(rid)}];
+          if (st) {{
+            try {{ if (typeof st.abort === 'function') st.abort(); }} catch (e) {{}}
+            delete window.__apStreams[{json.dumps(rid)}];
+          }}
+          return 1;
+        }})()"""
 
         deadline = time.time() + timeout
         emitted_status = False
-        while time.time() < deadline:
-            if stop_event is not None and stop_event.is_set():
-                return
-            time.sleep(0.08)
-            snap = self.eval_js(drain_js, timeout=3.0)
-            if not isinstance(snap, dict):
-                continue
-            if snap.get("missing"):
-                yield {"event": "error", "error": "stream_missing"}
-                return
-            if snap.get("statusReady") and not emitted_status:
-                emitted_status = True
-                yield {"event": "status", "status": int(snap.get("status") or 0), "ok": bool(snap.get("ok"))}
-            for chunk in snap.get("chunks") or []:
-                if chunk:
-                    yield {"event": "chunk", "data": str(chunk)}
-            if snap.get("error"):
-                yield {"event": "error", "error": str(snap["error"])}
-                return
-            if snap.get("done"):
-                yield {"event": "end"}
-                return
-        yield {"event": "error", "error": "stream_timeout"}
+        try:
+            while time.time() < deadline:
+                if stop_event is not None and stop_event.is_set():
+                    return
+                time.sleep(0.08)
+                snap = self.eval_js(drain_js, timeout=3.0)
+                if not isinstance(snap, dict):
+                    continue
+                if snap.get("missing"):
+                    yield {"event": "error", "error": "stream_missing"}
+                    return
+                if snap.get("statusReady") and not emitted_status:
+                    emitted_status = True
+                    yield {"event": "status", "status": int(snap.get("status") or 0), "ok": bool(snap.get("ok"))}
+                for chunk in snap.get("chunks") or []:
+                    if chunk:
+                        yield {"event": "chunk", "data": str(chunk)}
+                if snap.get("error"):
+                    yield {"event": "error", "error": str(snap["error"])}
+                    return
+                if snap.get("done"):
+                    yield {"event": "end"}
+                    return
+            yield {"event": "error", "error": "stream_timeout"}
+        finally:
+            self.eval_js(cleanup_js, timeout=1.5)
 
     # -- Observation-only fetch stream hook (like arena/engine.py:_DRIVE_HOOK_JS)
 
@@ -590,12 +808,23 @@ class WebChatEngine(Provider):
             const matched = method === 'POST' && pats.some((p) => url.indexOf(p) !== -1);
             return origFetch(input, init).then((res) => {{
               if (matched) {{
-                const obs = window.__apObs || {{}};
-                obs.active = true;
-                obs.status = res.status;
-                obs.url = url.slice(0, 200);
-                obs.done = false;
-                obs.error = '';
+                const ct = String((res.headers && res.headers.get && res.headers.get('content-type')) || '').toLowerCase();
+                const isStream = ct.includes('event-stream') || ct.includes('grpc') || ct.includes('connect') || ct.includes('octet-stream');
+                const cur = window.__apObs;
+                // Do not let a non-streaming metadata POST overwrite an active streaming reply!
+                if (cur && cur.active && !cur.done && cur.isStream && !isStream) {{
+                  return res;
+                }}
+                const obs = {{
+                  active: true,
+                  isStream,
+                  status: res.status,
+                  url: url.slice(0, 200),
+                  chunks: [],
+                  done: false,
+                  error: '',
+                  seq: (cur && cur.seq ? cur.seq + 1 : 1)
+                }};
                 window.__apObs = obs;
                 try {{
                   const cloned = res.clone();
@@ -652,7 +881,7 @@ class WebChatEngine(Provider):
         )
         return res if isinstance(res, dict) else {"active": False, "chunks": [], "done": False}
 
-    def _parse_observed_sse_chunk(self, raw_chunk: str, state: dict) -> list[dict]:
+    def _parse_observed_sse_chunk(self, raw_chunk: str, state: dict, *, flush: bool = False) -> list[dict]:
         """Override in subclasses to parse observed SSE lines into text/reasoning/meta events."""
         return []
 
@@ -691,6 +920,10 @@ class WebChatEngine(Provider):
     def _is_login_url(self, href: str) -> bool:
         low = (href or "").lower()
         return any(h in low for h in self.login_url_hints)
+
+    def _is_non_chat_url(self, href: str) -> bool:
+        """Override in subclasses to force navigating back to origin from tool/landing subpages."""
+        return False
 
     def verify(self) -> dict:
         if self.window is None:
@@ -767,9 +1000,29 @@ class WebChatEngine(Provider):
         """Override in subclasses to query live models from the signed-in session."""
         return None
 
-    def _apply_model_selection(self, model_id: str) -> None:
+    def _apply_model_selection(self, model_id: str) -> Optional[bool]:
         """Override in subclasses to apply a selected model before submitting."""
         return None
+
+    def select_model(self, model_id: str) -> dict:
+        """Immediately apply a model selection in the live provider window when open."""
+        want = (model_id or "").strip()
+        if not want or self.window is None:
+            return {"ok": True, "applied": False, "model_id": want}
+        if not self._turn_lock.acquire(blocking=False):
+            return {"ok": True, "applied": False, "busy": True, "model_id": want}
+        try:
+            res = self._apply_model_selection(want)
+            applied = True if res is None else bool(res)
+            if applied:
+                self._models_cache = None
+                self._models_at = 0.0
+            return {"ok": True, "applied": applied, "model_id": want}
+        except Exception as exc:
+            LOG.debug("provider %s select_model(%s) failed: %s", self.id, want, exc)
+            return {"ok": False, "applied": False, "error": str(exc), "model_id": want}
+        finally:
+            self._turn_lock.release()
 
     def _target_url_for_model(self, conversation_url: str, model_id: str) -> str:
         return conversation_url or self.origin
@@ -783,10 +1036,16 @@ class WebChatEngine(Provider):
                 self._wait_for_composer(timeout=6.0 if force else 3.5)
         live_res = None
         if self.window is not None:
-            try:
-                live_res = self._probe_live_models()
-            except Exception as exc:
-                LOG.debug("provider %s live model probe failed: %s", self.id, exc)
+            # Never touch the live provider DOM (e.g. clicking dropdowns / Escape) while a turn is running.
+            if self._turn_lock.acquire(blocking=False):
+                try:
+                    live_res = self._probe_live_models()
+                except Exception as exc:
+                    LOG.debug("provider %s live model probe failed: %s", self.id, exc)
+                finally:
+                    self._turn_lock.release()
+            elif self._models_cache:
+                return dict(self._models_cache)
         if isinstance(live_res, dict) and live_res.get("models"):
             out = {
                 "ok": True,
@@ -900,6 +1159,8 @@ class WebChatEngine(Provider):
 
     def _submit_prompt_dom(self, full_prompt: str) -> dict:
         """Type into the composer and submit strictly inside the composer's own scope."""
+        # Ensure hidden-window rAF shim is active even if the page loaded before UserScript attached.
+        self.eval_js(_HIDDEN_RAF_SHIM_JS, timeout=1.5)
         script = f"""(() => {{
           const promptText = {json.dumps(full_prompt)};
           const compSels = {json.dumps(list(self.composer_selectors))};
@@ -928,15 +1189,34 @@ class WebChatEngine(Provider):
             box.dispatchEvent(new Event('change', {{ bubbles: true }}));
             method = 'value_setter';
           }} else {{
+            const isLexical = box.getAttribute('data-lexical-editor') === 'true' || Boolean(box.__lexicalEditor);
             try {{
+              box.click();
+              box.focus();
               const sel = window.getSelection();
               if (sel) {{
+                const target = box.querySelector('p') || box;
                 const range = document.createRange();
-                range.selectNodeContents(box);
-                sel.removeAllRanges();
-                sel.addRange(range);
+                range.selectNodeContents(target);
+                if (isLexical) {{
+                  // Clear any leftover draft inside Lexical before inserting fresh text
+                  if ((box.innerText || box.textContent || '').trim()) {{
+                    sel.removeAllRanges();
+                    sel.addRange(range);
+                    try {{ document.execCommand('selectAll', false, null); document.execCommand('delete', false, null); }} catch (e) {{}}
+                  }}
+                  const t2 = box.querySelector('p') || box;
+                  const r2 = document.createRange();
+                  r2.selectNodeContents(t2);
+                  r2.collapse(false);
+                  sel.removeAllRanges();
+                  sel.addRange(r2);
+                }} else {{
+                  sel.removeAllRanges();
+                  sel.addRange(range);
+                }}
               }}
-              if (document.execCommand('insertText', false, promptText)) {{
+              if (document.execCommand('insertText', false, promptText) && (box.innerText || box.textContent || '').trim()) {{
                 method = 'execCommand';
               }}
             }} catch (e) {{}}
@@ -951,6 +1231,16 @@ class WebChatEngine(Provider):
               }} catch (e) {{}}
             }}
             if (!(box.innerText || box.textContent || '').trim()) {{
+              try {{
+                const dt2 = new DataTransfer();
+                dt2.setData('text/plain', promptText);
+                box.dispatchEvent(new InputEvent('beforeinput', {{
+                  bubbles: true, cancelable: true, data: promptText, dataTransfer: dt2, inputType: 'insertFromPaste'
+                }}));
+                if ((box.innerText || box.textContent || '').trim()) method = 'beforeinput_paste';
+              }} catch (e) {{}}
+            }}
+            if (!(box.innerText || box.textContent || '').trim() && !isLexical) {{
               try {{
                 box.innerHTML = '';
                 for (const line of String(promptText).split('\\n')) {{
@@ -972,7 +1262,7 @@ class WebChatEngine(Provider):
                 }}));
                 method = 'textContent';
               }}
-            }} else {{
+            }} else if (!isLexical) {{
               // Ensure React/ProseMirror listeners observe an input event even in hidden WebKitGTK.
               box.dispatchEvent(new InputEvent('input', {{
                 bubbles: true, data: promptText, inputType: 'insertText'
@@ -985,7 +1275,7 @@ class WebChatEngine(Provider):
             const form = box.closest ? box.closest('form') : null;
             if (form) scopes.push(form);
             let cur = box.parentElement;
-            for (let depth = 0; depth < 5 && cur; depth++) {{
+            for (let depth = 0; depth < 6 && cur; depth++) {{
               if (cur.tagName === 'BODY' || cur.tagName === 'MAIN') break;
               scopes.push(cur);
               cur = cur.parentElement;
@@ -995,6 +1285,7 @@ class WebChatEngine(Provider):
                 try {{
                   const found = Array.from(scope.querySelectorAll(s)).filter((btn) => {{
                     if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') return false;
+                    if (btn.classList && btn.classList.contains('disabled')) return false;
                     const txt = (btn.innerText || btn.textContent || '').trim().toLowerCase();
                     // Never click mode toggles (DeepThink/Search/Think/Attach)
                     if (txt && /(deepthink|search|think|attach|voice|upload|new chat)/.test(txt)) return false;
@@ -1014,6 +1305,7 @@ class WebChatEngine(Provider):
             box.dispatchEvent(new KeyboardEvent('keyup', opts));
           }};
           const trySend = (attempt) => {{
+            if (window.__apObs && window.__apObs.active) return true;
             if (preferEnter && attempt === 0) {{
               fireEnter();
               return false; // still check button on attempt 1 if Enter didn't clear the box
@@ -1028,7 +1320,7 @@ class WebChatEngine(Provider):
             if (attempt >= 1) fireEnter();
             return false;
           }};
-          const delays = [140, 420, 820, 1300];
+          const delays = preferEnter ? [140, 750, 1250, 1800] : [140, 420, 820, 1300];
           let idx = 0;
           const step = () => {{
             if (trySend(idx)) return;
@@ -1080,7 +1372,15 @@ class WebChatEngine(Provider):
         """
         return None
 
-    def _wait_for_origin(self, origin_host: str, timeout: float = 10.0) -> dict:
+    def _wait_for_origin(
+        self,
+        origin_host: str,
+        timeout: float = 10.0,
+        *,
+        avoid_stale_hint: bool = False,
+        expected_url: str = "",
+        previous_url: str = "",
+    ) -> dict:
         deadline = time.time() + timeout
         last = {"href": "", "title": "", "has_composer": False, "body_sample": ""}
         while time.time() < deadline:
@@ -1091,6 +1391,12 @@ class WebChatEngine(Provider):
             if self._is_login_url(href):
                 return last
             if origin_host in href:
+                if avoid_stale_hint and self.conversation_url_hint and self.conversation_url_hint in href:
+                    time.sleep(0.25)
+                    continue
+                if expected_url and previous_url and href == previous_url and expected_url != previous_url:
+                    time.sleep(0.25)
+                    continue
                 return last
             time.sleep(0.25)
         return last
@@ -1106,6 +1412,49 @@ class WebChatEngine(Provider):
         conversation_url: str = "",
         model: str = "",
         permission_mode: str = "",
+        is_followup_round: bool = False,
+        stop_event=None,
+    ) -> Iterator[dict]:
+        # Serialize concurrent turns on the same web provider so two tabs never
+        # clobber self.window navigation or window.__apObs.
+        if not self._turn_lock.acquire(timeout=2.0):
+            yield {"type": "agent", "stage": f"Waiting for another {self.name} tab to finish..."}
+            while not self._turn_lock.acquire(timeout=0.3):
+                if stop_event is not None and stop_event.is_set():
+                    return
+        try:
+            self.eval_js("window.__apRafActive = true; 1;", timeout=1.0)
+            yield from self._stream_turn_locked(
+                chat_id,
+                message,
+                history,
+                memory_block=memory_block,
+                workspace=workspace,
+                conversation_url=conversation_url,
+                model=model,
+                permission_mode=permission_mode,
+                is_followup_round=is_followup_round,
+                stop_event=stop_event,
+            )
+        finally:
+            try:
+                self.eval_js("window.__apRafActive = false; 1;", timeout=1.0)
+            except Exception:
+                pass
+            self._turn_lock.release()
+
+    def _stream_turn_locked(
+        self,
+        chat_id: str,
+        message: str,
+        history: list,
+        *,
+        memory_block: str = "",
+        workspace: str = "",
+        conversation_url: str = "",
+        model: str = "",
+        permission_mode: str = "",
+        is_followup_round: bool = False,
         stop_event=None,
     ) -> Iterator[dict]:
         if not self.ensure_window(hidden=True):
@@ -1120,18 +1469,27 @@ class WebChatEngine(Provider):
         current = self.page_url()
         origin_host = self.origin.split("/")[2]
         stale_conversation = bool(
-            not conversation_url
-            and self.conversation_url_hint
-            and self.conversation_url_hint in (current or "")
+            not is_followup_round
+            and not conversation_url
+            and (
+                (self.conversation_url_hint and self.conversation_url_hint in (current or ""))
+                or self._is_non_chat_url(current or "")
+            )
         )
-        need_nav = (
-            not current
-            or current == "about:blank"
-            or origin_host not in current
-            or stale_conversation
-            or (conversation_url and conversation_url != current)
-            or (not conversation_url and target_url != self.origin and target_url != current)
-        )
+        # API-first providers (Claude) execute same-origin fetch() from any page
+        # on origin_host — reloading on conversation_url would race with fetch()
+        # and wipe window.__apStreams mid-stream!
+        if self.api_nav_not_needed and current and origin_host in current:
+            need_nav = False
+        else:
+            need_nav = (
+                not current
+                or current == "about:blank"
+                or origin_host not in current
+                or stale_conversation
+                or (conversation_url and _norm_url(conversation_url) != _norm_url(current))
+                or (not is_followup_round and not conversation_url and _norm_url(target_url) != _norm_url(self.origin) and _norm_url(target_url) != _norm_url(current))
+            )
         if need_nav:
             yield {"type": "agent", "stage": f"Opening {self.name}..."}
             self.load_url(target_url)
@@ -1140,7 +1498,13 @@ class WebChatEngine(Provider):
 
         # 1. Direct same-origin API streaming FIRST (identical to arena/engine.py):
         #    never blocks on hidden-window DOM composer visibility!
-        origin_probe = self._wait_for_origin(origin_host, timeout=10.0)
+        origin_probe = self._wait_for_origin(
+            origin_host,
+            timeout=10.0,
+            avoid_stale_hint=bool(need_nav and stale_conversation),
+            expected_url=target_url if need_nav else "",
+            previous_url=current if need_nav else "",
+        )
         if _looks_like_human_check(origin_probe.get("title", ""), origin_probe.get("body_sample", "")):
             self.show()
             yield {
@@ -1166,6 +1530,24 @@ class WebChatEngine(Provider):
                 self._signed_in_at = time.time()
                 yield from api_iter
                 return
+
+        # If API streaming was not used (DOM fallback), ensure stale conversations
+        # or mismatched URLs are navigated before typing into the composer.
+        if self.api_nav_not_needed and not need_nav:
+            cur_after = self.page_url()
+            dom_need_nav = bool(
+                (not is_followup_round and not conversation_url and self.conversation_url_hint and self.conversation_url_hint in (cur_after or ""))
+                or (conversation_url and conversation_url != cur_after)
+            )
+            if dom_need_nav:
+                self.load_url(target_url)
+                origin_probe = self._wait_for_origin(
+                    origin_host,
+                    timeout=10.0,
+                    avoid_stale_hint=bool(not conversation_url),
+                    expected_url=target_url,
+                    previous_url=cur_after,
+                )
 
         probe = origin_probe if origin_probe.get("has_composer") else self._wait_for_composer(timeout=12.0)
         if _looks_like_human_check(probe.get("title", ""), probe.get("body_sample", "")):
@@ -1210,11 +1592,11 @@ class WebChatEngine(Provider):
         before = self._read_messages_snapshot()
         before_count = int(before.get("count") or 0)
         before_text = str(before.get("text") or "")
-        before_api_count = before_count
+        before_api_count = 0
         if conversation_url:
             api_before = self._poll_conversation_api(conversation_url)
             if isinstance(api_before, dict):
-                before_api_count = max(before_api_count, int(api_before.get("count") or 0))
+                before_api_count = int(api_before.get("count") or 0)
 
         yield {"type": "agent", "stage": f"Sending to {self.name}..."}
         submitted = self._submit_prompt_dom(full_prompt)
@@ -1276,16 +1658,42 @@ class WebChatEngine(Provider):
                                 if ev["external_url"] != saved_href:
                                     saved_href = str(ev["external_url"])
                                     yield ev
-                    if obs.get("done") and obs_used:
-                        cur_href = self.page_url()
-                        if (
-                            cur_href
-                            and cur_href != saved_href
-                            and self.conversation_url_hint
-                            and self.conversation_url_hint in cur_href
-                        ):
-                            yield {"type": "meta_update", "external_url": cur_href}
-                        return
+                    if obs.get("done"):
+                        for ev in self._parse_observed_sse_chunk("", obs_state, flush=True):
+                            et = ev.get("type")
+                            if et == "text" and ev.get("text"):
+                                obs_used = True
+                                emitted_text += str(ev["text"])
+                                yield ev
+                            elif et == "reasoning" and ev.get("text"):
+                                obs_used = True
+                                emitted_reasoning += str(ev["text"])
+                                yield ev
+                            elif et == "meta_update" and ev.get("external_url"):
+                                if ev["external_url"] != saved_href:
+                                    saved_href = str(ev["external_url"])
+                                    yield ev
+                        if obs_used:
+                            cur_href = self.page_url()
+                            if (
+                                cur_href
+                                and cur_href != saved_href
+                                and self.conversation_url_hint
+                                and self.conversation_url_hint in cur_href
+                            ):
+                                yield {"type": "meta_update", "external_url": cur_href}
+                            return
+                        obs_status = int(obs.get("status") or 0)
+                        if obs_status >= 400 and not emitted_text and not emitted_reasoning:
+                            if obs_status in (401, 403):
+                                self.show()
+                            yield {
+                                "type": "error",
+                                "code": "auth" if obs_status in (401, 403) else "provider_http",
+                                "message": f"{self.name} returned HTTP {obs_status}. Check the {self.name} window and try again.",
+                                "open_window": True,
+                            }
+                            return
                     if obs_used:
                         continue
 
@@ -1304,6 +1712,7 @@ class WebChatEngine(Provider):
             streaming = bool(snap.get("streaming"))
             cur_text = str(snap.get("text") or "")
             cur_reason = str(snap.get("reasoning") or "")
+            using_api_snap = False
 
             # Hidden-window fallback: if the conversation URL exists on the server
             # but hidden GTK DOM hasn't rendered assistant nodes yet, poll the
@@ -1318,13 +1727,13 @@ class WebChatEngine(Provider):
                 last_api_poll = time.time()
                 api_snap = self._poll_conversation_api(href)
                 if isinstance(api_snap, dict) and int(api_snap.get("count") or 0) > before_api_count:
+                    using_api_snap = True
                     count = int(api_snap["count"])
                     cur_text = str(api_snap.get("text") or "")
                     cur_reason = str(api_snap.get("reasoning") or "")
                     streaming = bool(api_snap.get("streaming"))
-                    before_count = before_api_count
 
-            new_turn = count > before_count or (count == before_count and cur_text != before_text)
+            new_turn = using_api_snap or count > before_count or (count == before_count and cur_text != before_text)
             if streaming or new_turn:
                 saw_activity = True
 
@@ -1337,7 +1746,7 @@ class WebChatEngine(Provider):
                 elif cur_reason and cur_reason != emitted_reasoning:
                     emitted_reasoning = cur_reason
                     last_growth_at = time.time()
-                    yield {"type": "reasoning", "text": cur_reason}
+                    yield {"type": "reasoning_replace", "text": cur_reason}
 
                 if cur_text and len(cur_text) > len(emitted_text) and cur_text.startswith(emitted_text):
                     delta = cur_text[len(emitted_text):]
@@ -1354,7 +1763,7 @@ class WebChatEngine(Provider):
                     stable_ticks += 1
                     if stable_ticks >= 3:
                         return
-                elif streaming and (emitted_text or emitted_reasoning) and (time.time() - last_growth_at) > 12.0:
+                elif streaming and (emitted_text or emitted_reasoning) and (time.time() - last_growth_at) > 45.0:
                     return
             elif (
                 not emitted_text

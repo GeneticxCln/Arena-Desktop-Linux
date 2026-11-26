@@ -60,6 +60,7 @@ class ClaudeProvider(WebChatEngine):
     auth_cookie_names = ("sessionKey", "lastActiveOrg")
     login_url_hints = ("/login", "/signup")
     conversation_url_hint = "/chat/"
+    api_nav_not_needed = True
 
     # Never include bare "textarea" here: claude.ai has hidden textarea nodes
     # that are NOT the ProseMirror composer.
@@ -195,43 +196,63 @@ class ClaudeProvider(WebChatEngine):
           if (activeLabel) push(activeLabel, 'Currently active in claude.ai', true);
           let opened = false;
           if (trigger && trigger.getAttribute('aria-expanded') !== 'true') {
-            try { trigger.click(); opened = true; } catch (e) {}
-          }
-          const items = Array.from(document.querySelectorAll(
-            '[role="menuitem"], [role="menuitemradio"], [role="option"], [data-radix-collection-item]'
-          ));
-          for (const item of items) {
-            const lines = (item.innerText || item.textContent || '').split('\n').map((s) => s.trim()).filter(Boolean);
-            if (!lines.length) continue;
-            const label = lines[0];
-            const desc = lines.slice(1).join(' - ').slice(0, 100);
-            const isChecked = item.getAttribute('aria-checked') === 'true'
-              || item.getAttribute('data-state') === 'checked'
-              || (activeLabel && label.toLowerCase() === activeLabel.toLowerCase());
-            push(label, desc, isChecked);
-          }
-          if (opened) {
             try {
-              document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+              trigger.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerType: 'mouse' }));
               trigger.click();
+              opened = true;
             } catch (e) {}
           }
-          return JSON.stringify({ active: activeLabel, models: out });
+          return JSON.stringify({ active: activeLabel, opened, models: out });
         })()"""
         dom_res = self.eval_js(script, timeout=4.0)
         dom_active = ""
+        dom_models = list(dom_res.get("models") or []) if isinstance(dom_res, dict) else []
         if isinstance(dom_res, dict):
             dom_active = str(dom_res.get("active") or "")
-            for m in dom_res.get("models") or []:
+            if dom_res.get("opened"):
+                time.sleep(0.3)
+                scrape_script = r"""(() => {
+                  const isModelLabel = (t) => (
+                    /\b(Claude|Sonnet|Opus|Haiku)\b/i.test(t)
+                    && !/\b(try|get|upgrade|new|sign|log|download|about|meet|pricing|pro|max plan)\b/i.test(t)
+                  );
+                  const activeLabel = (() => {
+                    const tr = document.querySelector('[data-testid="model-selector-dropdown"]');
+                    return tr ? (tr.innerText || tr.textContent || '').replace(/\s+/g, ' ').trim() : '';
+                  })();
+                  const out = [];
+                  const items = Array.from(document.querySelectorAll(
+                    '[role="menuitem"], [role="menuitemradio"], [role="option"], [data-radix-collection-item]'
+                  ));
+                  for (const item of items) {
+                    const lines = (item.innerText || item.textContent || '').split('\n').map((s) => s.trim()).filter(Boolean);
+                    if (!lines.length) continue;
+                    const label = lines[0];
+                    if (!isModelLabel(label)) continue;
+                    const desc = lines.slice(1).join(' - ').slice(0, 100);
+                    const isChecked = item.getAttribute('aria-checked') === 'true'
+                      || item.getAttribute('data-state') === 'checked'
+                      || (activeLabel && label.toLowerCase() === activeLabel.toLowerCase());
+                    out.push({ id: label, name: label, description: desc, active: isChecked });
+                  }
+                  try {
+                    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+                  } catch (e) {}
+                  return JSON.stringify({ models: out });
+                })()"""
+                scraped = self.eval_js(scrape_script, timeout=3.5)
+                if isinstance(scraped, dict):
+                    dom_models.extend(scraped.get("models") or [])
+            for m in dom_models:
                 name = str(m.get("name") or "").strip()
                 if not name:
                     continue
-                # If we already discovered a real claude-* API slug matching this UI label, mark it active
+                # Match ALL significant tokens (including minor version digits like 4.5 vs 4.6)
                 matched_existing = False
+                toks = [t for t in re.split(r"[\s\-_.]+", name.lower()) if t and t not in ("claude", "extended", "medium", "low", "high")]
                 for existing in models:
-                    ex_low = f"{existing['id']} {existing['name']}".lower()
-                    toks = [t for t in re.split(r"[\s\-_.]+", name.lower()) if t and t not in ("claude", "extended", "medium", "low", "high")]
-                    if toks and all(t in ex_low for t in toks[:2]):
+                    ex_toks = set(re.split(r"[\s\-_.]+", f"{existing['id']} {existing['name']}".lower()))
+                    if toks and all(t in ex_toks for t in toks):
                         if m.get("active"):
                             existing["active"] = True
                         matched_existing = True
@@ -284,7 +305,17 @@ class ClaudeProvider(WebChatEngine):
             return ""
         if want.lower().startswith("claude-"):
             return want
-        return self._model_label_to_slug.get(want.lower(), "")
+        slug = self._model_label_to_slug.get(want.lower(), "")
+        if not slug and not self._model_label_to_slug:
+            # Populate label->slug map lazily if user persisted a UI label from a prior session
+            try:
+                _, org_obj = self._get_org_info()
+                if org_obj:
+                    self._collect_claude_models_from_json(org_obj, lambda *_: None)
+                slug = self._model_label_to_slug.get(want.lower(), "")
+            except Exception:
+                pass
+        return slug
 
     def _stream_turn_api(
         self,
@@ -315,6 +346,8 @@ class ClaudeProvider(WebChatEngine):
                 timeout=8.0,
             )
             if not cr.get("ok"):
+                if int(cr.get("status") or 0) in (401, 403, 404):
+                    self._org_id = ""
                 diag.note(f"claude create_conversation failed status={cr.get('status')} err={cr.get('error')}")
                 return None
             if isinstance(cr.get("data"), dict) and cr["data"].get("uuid"):
@@ -350,6 +383,7 @@ class ClaudeProvider(WebChatEngine):
                     status_code = int(item.get("status") or 0)
                     diag.note(f"claude api completion status={status_code} model={api_model or 'default'}")
                     if status_code in (401, 403):
+                        self._org_id = ""
                         self.show()
                         yield {
                             "type": "error",
@@ -415,16 +449,34 @@ class ClaudeProvider(WebChatEngine):
                         }
                     return
                 elif ev_kind == "end":
+                    # Flush any trailing SSE line lacking a final newline
+                    tail = buf.strip()
+                    if tail.startswith("data:"):
+                        raw_json = tail[5:].strip()
+                        if raw_json and raw_json != "[DONE]":
+                            try:
+                                pkt = json.loads(raw_json)
+                            except ValueError:
+                                pkt = None
+                            if isinstance(pkt, dict):
+                                if pkt.get("type") == "content_block_delta":
+                                    delta = pkt.get("delta") or {}
+                                    if delta.get("type") == "text_delta" and delta.get("text"):
+                                        yield {"type": "text", "text": str(delta["text"])}
+                                    elif delta.get("type") == "thinking_delta" and delta.get("thinking"):
+                                        yield {"type": "reasoning", "text": str(delta["thinking"])}
+                                elif pkt.get("completion"):
+                                    yield {"type": "text", "text": str(pkt["completion"])}
                     return
 
         return _gen()
 
-    def _apply_model_selection(self, model_id: str) -> None:
+    def _apply_model_selection(self, model_id: str) -> Optional[bool]:
         want = (model_id or "").strip()
         if not want or want.lower() == "default":
-            return
-        want_tokens = [tok for tok in re.split(r"[\s\-_/]+", want.lower()) if tok and tok != "claude"]
-        script = f"""(() => {{
+            return True
+        want_tokens = [tok for tok in re.split(r"[\s\-_/.]+", want.lower()) if tok and tok != "claude"]
+        open_script = f"""(() => {{
           const wantFull = {json.dumps(want.lower())};
           const wantTokens = {json.dumps(want_tokens)};
           const trigger = (
@@ -437,16 +489,30 @@ class ClaudeProvider(WebChatEngine):
           );
           if (!trigger) return JSON.stringify({{ ok: false, reason: 'no_trigger' }});
           const cur = (trigger.innerText || trigger.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-          if (cur === wantFull || (wantTokens.length && wantTokens.every((t) => cur.includes(t)))) {{
+          const curToks = cur.split(/[\\s\\-_/.]+/).filter(Boolean);
+          if (cur === wantFull || (wantTokens.length && wantTokens.every((t) => curToks.includes(t)))) {{
             return JSON.stringify({{ ok: true, already: true }});
           }}
+          trigger.dispatchEvent(new PointerEvent('pointerdown', {{ bubbles: true, cancelable: true, button: 0, pointerType: 'mouse' }}));
           trigger.click();
+          return JSON.stringify({{ ok: true, opened: true }});
+        }})()"""
+        step1 = self.eval_js(open_script, timeout=3.0)
+        if not isinstance(step1, dict) or not step1.get("ok"):
+            return False
+        if step1.get("already"):
+            return True
+        time.sleep(0.3)
+        click_script = f"""(() => {{
+          const wantFull = {json.dumps(want.lower())};
+          const wantTokens = {json.dumps(want_tokens)};
           const items = Array.from(document.querySelectorAll(
             '[role="menuitem"], [role="menuitemradio"], [role="option"], [data-radix-collection-item]'
           ));
           for (const item of items) {{
             const txt = (item.innerText || item.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-            if (txt === wantFull || (wantTokens.length && wantTokens.every((t) => txt.includes(t)))) {{
+            const toks = txt.split(/[\\s\\-_/.]+/).filter(Boolean);
+            if (txt === wantFull || (wantTokens.length && wantTokens.every((t) => toks.includes(t)))) {{
               item.click();
               return JSON.stringify({{ ok: true, clicked: txt.slice(0, 60) }});
             }}
@@ -454,6 +520,8 @@ class ClaudeProvider(WebChatEngine):
           document.dispatchEvent(new KeyboardEvent('keydown', {{ key: 'Escape', code: 'Escape', bubbles: true }}));
           return JSON.stringify({{ ok: false, reason: 'not_found' }});
         }})()"""
-        res = self.eval_js(script, timeout=4.0)
+        res = self.eval_js(click_script, timeout=3.5)
         if isinstance(res, dict) and res.get("clicked"):
             time.sleep(0.25)
+            return True
+        return False

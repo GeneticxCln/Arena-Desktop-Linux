@@ -5,8 +5,11 @@ import asyncio
 import importlib.util
 import logging
 import os
+import queue
 import re
+import select
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -47,7 +50,6 @@ def _parse_agy_models_output(raw: str) -> list[dict]:
     seen: set[str] = set()
     cleaned = _ANSI_RE.sub("", raw or "")
     for raw_line in cleaned.splitlines():
-        # Strip spinner carriage-return frames on the first line
         line = raw_line.split("\r")[-1].strip()
         if not line or line.lower().startswith("fetching") or line.startswith("-"):
             continue
@@ -77,6 +79,55 @@ def _parse_agy_models_output(raw: str) -> list[dict]:
             "capabilities": caps,
         })
     return models
+
+
+def _kill_proc_group(proc: subprocess.Popen) -> None:
+    """Terminate a process group cleanly and always reap to avoid zombies."""
+    if proc.poll() is not None:
+        return
+    try:
+        pgid = os.getpgid(proc.pid)
+        os.killpg(pgid, signal.SIGTERM)
+        try:
+            proc.wait(timeout=0.8)
+            return
+        except subprocess.TimeoutExpired:
+            os.killpg(pgid, signal.SIGKILL)
+            try:
+                proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                pass
+    except Exception:
+        try:
+            proc.kill()
+            proc.wait(timeout=1.0)
+        except Exception:
+            pass
+
+
+def _format_history_prefix(history: list) -> str:
+    """Compact recent turns so follow-up messages keep conversation context."""
+    if not history:
+        return ""
+    recent = history[-8:]
+    lines = ["[Recent conversation context]"]
+    total = 0
+    for msg in recent:
+        if not isinstance(msg, dict):
+            continue
+        role = "User" if msg.get("role") == "user" else "Assistant"
+        txt = str(msg.get("text") or msg.get("content") or "").strip()
+        if not txt:
+            continue
+        snippet = txt[:800]
+        total += len(snippet)
+        if total > 4000:
+            break
+        lines.append(f"{role}: {snippet}")
+    if len(lines) <= 1:
+        return ""
+    lines.append("[Current message]\n")
+    return "\n".join(lines)
 
 
 class AntigravityProvider(Provider):
@@ -136,7 +187,7 @@ class AntigravityProvider(Provider):
 
     def list_models(self, *, force: bool = False) -> dict:
         now = time.time()
-        if not force and self._models_cache and (now - self._models_at) < 90.0:
+        if not force and self._models_cache and (now - self._models_at) < 300.0:
             return dict(self._models_cache)
         cli = _find_agy_cli()
         models: list[dict] = []
@@ -192,12 +243,14 @@ class AntigravityProvider(Provider):
     def _stream_via_sdk(
         self, prompt: str, workspace: str, model: str = "", stop_event=None
     ) -> Iterator[dict]:
-        import queue
         from google.antigravity import Agent, CapabilitiesConfig, LocalAgentConfig  # type: ignore
 
         out_q: "queue.Queue[Optional[dict]]" = queue.Queue()
+        loop_box: dict = {}
 
         async def _run():
+            loop_box["loop"] = asyncio.get_running_loop()
+            loop_box["task"] = asyncio.current_task()
             try:
                 kwargs = {"capabilities": CapabilitiesConfig()}
                 if workspace:
@@ -219,6 +272,8 @@ class AntigravityProvider(Provider):
                             break
                         if token:
                             out_q.put({"type": "text", "text": str(token)})
+            except asyncio.CancelledError:
+                pass
             except Exception as exc:
                 out_q.put({
                     "type": "error",
@@ -234,16 +289,33 @@ class AntigravityProvider(Provider):
             name="antigravity-sdk",
         )
         thread.start()
-        while True:
-            if stop_event is not None and stop_event.is_set():
-                return
-            try:
-                item = out_q.get(timeout=0.25)
-            except queue.Empty:
-                continue
-            if item is None:
-                return
-            yield item
+        try:
+            while True:
+                if stop_event is not None and stop_event.is_set():
+                    lp = loop_box.get("loop")
+                    tk = loop_box.get("task")
+                    if lp is not None and tk is not None:
+                        try:
+                            lp.call_soon_threadsafe(tk.cancel)
+                        except Exception:
+                            pass
+                    return
+                try:
+                    item = out_q.get(timeout=0.20)
+                except queue.Empty:
+                    continue
+                if item is None:
+                    return
+                yield item
+        finally:
+            # Always cancel any still-running SDK task on stop OR SSE client disconnect
+            lp = loop_box.get("loop")
+            tk = loop_box.get("task")
+            if lp is not None and tk is not None:
+                try:
+                    lp.call_soon_threadsafe(tk.cancel)
+                except Exception:
+                    pass
 
     def _stream_via_cli(
         self,
@@ -267,15 +339,20 @@ class AntigravityProvider(Provider):
             cmd.extend(["--mode", "auto"])
         elif pm == "bypassPermissions":
             cmd.append("--dangerously-skip-permissions")
-        cmd.extend(["-p", prompt])
+        # Guard against Linux MAX_ARG_STRLEN (128 KiB per argv entry) and leading '-' flag parsing
+        safe_prompt = prompt
+        if safe_prompt.startswith("-"):
+            safe_prompt = " " + safe_prompt
+        if len(safe_prompt.encode("utf-8")) > 110_000:
+            safe_prompt = safe_prompt.encode("utf-8")[-105_000:].decode("utf-8", errors="ignore")
+        cmd.extend(["-p", safe_prompt])
         try:
             proc = subprocess.Popen(
                 cmd,
                 cwd=cwd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
+                start_new_session=True,
             )
         except OSError as exc:
             yield {
@@ -286,19 +363,62 @@ class AntigravityProvider(Provider):
             return
         with self._proc_lock:
             self._procs.add(proc)
+
+        # Drain stderr concurrently so >64 KiB stderr never deadlocks the subprocess!
+        stderr_chunks: list[bytes] = []
+
+        def _drain_stderr() -> None:
+            if proc.stderr is None:
+                return
+            try:
+                while True:
+                    chunk = proc.stderr.read(4096)
+                    if not chunk:
+                        break
+                    if sum(len(c) for c in stderr_chunks) < 64 * 1024:
+                        stderr_chunks.append(chunk)
+            except Exception:
+                pass
+
+        err_thread = threading.Thread(target=_drain_stderr, daemon=True, name="agy-stderr")
+        err_thread.start()
+
         try:
+            import codecs
+            decoder = codecs.getincrementaldecoder("utf-8")("replace")
             emitted = False
             assert proc.stdout is not None
-            for line in proc.stdout:
+            stdout_fd = proc.stdout.fileno()
+            while True:
                 if stop_event is not None and stop_event.is_set():
-                    proc.terminate()
+                    _kill_proc_group(proc)
                     return
-                if line:
+                try:
+                    rlist, _, _ = select.select([stdout_fd], [], [], 0.15)
+                except (OSError, ValueError):
+                    break
+                if not rlist:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                try:
+                    raw = os.read(stdout_fd, 4096)
+                except OSError:
+                    break
+                if not raw:
+                    break
+                text = decoder.decode(raw, final=False)
+                if text:
                     emitted = True
-                    yield {"type": "text", "text": line}
+                    yield {"type": "text", "text": text}
+            tail = decoder.decode(b"", final=True)
+            if tail:
+                emitted = True
+                yield {"type": "text", "text": tail}
             rc = proc.wait(timeout=10)
+            err_thread.join(timeout=1.0)
             if rc != 0 and not emitted:
-                err_text = (proc.stderr.read() if proc.stderr else "").strip()
+                err_text = b"".join(stderr_chunks).decode("utf-8", errors="replace").strip()
                 yield {
                     "type": "error",
                     "code": "antigravity_cli",
@@ -313,11 +433,13 @@ class AntigravityProvider(Provider):
         finally:
             with self._proc_lock:
                 self._procs.discard(proc)
-            if proc.poll() is None:
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
+            _kill_proc_group(proc)
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except Exception:
+                        pass
 
     def stream_turn(
         self,
@@ -330,6 +452,7 @@ class AntigravityProvider(Provider):
         conversation_url: str = "",
         model: str = "",
         permission_mode: str = "",
+        is_followup_round: bool = False,
         stop_event=None,
     ) -> Iterator[dict]:
         kind, detail = self._backend()
@@ -343,8 +466,9 @@ class AntigravityProvider(Provider):
                 ),
             }
             return
-        full_prompt = (memory_block + message) if memory_block else message
-        stage_label = f"Antigravity ({model}) is thinking…" if model else "Antigravity is thinking…"
+        hist_prefix = _format_history_prefix(history)
+        full_prompt = f"{memory_block}{hist_prefix}{message}" if (memory_block or hist_prefix) else message
+        stage_label = f"Antigravity ({model}) is thinking..." if model else "Antigravity is thinking..."
         yield {"type": "agent", "stage": stage_label}
         if kind == "sdk":
             yield from self._stream_via_sdk(full_prompt, workspace, model=model, stop_event=stop_event)
@@ -363,8 +487,4 @@ class AntigravityProvider(Provider):
             procs = list(self._procs)
             self._procs.clear()
         for proc in procs:
-            try:
-                if proc.poll() is None:
-                    proc.terminate()
-            except Exception:
-                pass
+            _kill_proc_group(proc)

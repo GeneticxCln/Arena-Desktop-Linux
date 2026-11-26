@@ -24,7 +24,7 @@ _EXITING = False
 
 
 def _shutdown_and_exit(code: int = 0) -> None:
-    """Stop MCP servers, Gateway tunnels, sub-agents, and clean instance files before exiting."""
+    """Stop MCP servers, Gateway tunnels, sub-agents, PTYs, and flush WebKit cleanly before exit."""
     global _EXITING
     with _EXIT_LOCK:
         if _EXITING:
@@ -35,7 +35,34 @@ def _shutdown_and_exit(code: int = 0) -> None:
         web_app.shutdown_runtime()
     except Exception:
         LOG.exception("runtime shutdown failed")
+    # Ask GTK to exit its loop briefly so WebKitNetworkProcess can flush cookies/storage.
+    try:
+        from gi.repository import GLib, Gio  # type: ignore
+
+        def _quit_app():
+            try:
+                app = Gio.Application.get_default()
+                if app is not None:
+                    app.quit()
+            except Exception:
+                pass
+            return False
+
+        GLib.idle_add(_quit_app)
+        time.sleep(0.25)
+    except Exception:
+        pass
     os._exit(code)
+
+
+def _schedule_signal_shutdown(code: int = 0) -> None:
+    """Async-signal-safe trigger: never acquire Python/logging/GTK locks inside a signal handler."""
+    threading.Thread(
+        target=_shutdown_and_exit,
+        args=(code,),
+        daemon=True,
+        name="signal-shutdown",
+    ).start()
 
 
 def gui_backend():
@@ -388,7 +415,7 @@ def main():
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            signal.signal(sig, lambda *_a: _shutdown_and_exit(0))
+            signal.signal(sig, lambda *_a: _schedule_signal_shutdown(0))
         except Exception:
             pass
 
@@ -432,10 +459,11 @@ def main():
                                        hidden=True, background_color="#242422", js_api=ENGINE.bridge())
     ENGINE.attach(engine_win, main_win)
     ENGINE.dock = None
-    try:
-        diag.make_window_calls_non_blocking(engine_win)
-    except Exception:
-        LOG.exception("could not wrap arena-window for GTK thread safety")
+    for _win_to_wrap, _wrap_lbl in ((main_win, "main-window"), (engine_win, "arena-window"), (google_win, "google-window")):
+        try:
+            diag.make_window_calls_non_blocking(_win_to_wrap)
+        except Exception:
+            LOG.exception("could not wrap %s for GTK thread safety", _wrap_lbl)
     google_win = webview.create_window("Google AI mode - Arena Desktop", "about:blank", width=1100, height=760,
                                        x=140, y=140, hidden=True, background_color="#242422")
     google_ai.ENGINE.attach(google_win, main_win)

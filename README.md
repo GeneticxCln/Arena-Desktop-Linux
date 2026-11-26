@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-7.3.0-8b5cf6?style=flat-square" alt="Version 7.3.0" />
+  <img src="https://img.shields.io/badge/version-7.4.0-8b5cf6?style=flat-square" alt="Version 7.4.0" />
   <img src="https://img.shields.io/badge/platform-Linux-blue?style=flat-square" alt="Linux" />
   <img src="https://img.shields.io/badge/python-3.11%2B-3776ab?style=flat-square" alt="Python 3.11+" />
   <img src="https://img.shields.io/badge/models-400%2B%20via%20arena.ai-10b981?style=flat-square" alt="400+ models via arena.ai" />
@@ -32,10 +32,11 @@
 
 Arena Desktop wraps `arena.ai` and multi-provider AI tabs in a native Linux desktop app (`pywebview` + `WebKitGTK 4.1`) paired with local developer tools:
 
-- **Workspace-First Multi-Provider Tabs**: Organize tabs by project folder in the left **Workspaces** sidebar and open **Arena (`✦`)**, **Google AI mode (`G`)**, **DeepSeek (`◇`)**, **Claude (`◈`)**, **ChatGPT (`◎`)**, and **Google Antigravity (`▲`)** tabs side-by-side — with live model selection, shared `MEMORY.md` / `AGENTS.md`, and live cross-tab summaries.
+- **Workspace-First Multi-Provider Tabs**: Organize tabs by project folder in the left **Workspaces** sidebar and open **Arena (`✦`)**, **Google AI mode (`G`)**, **DeepSeek (`◇`)**, **Claude (`◈`)**, **ChatGPT (`◎`)**, **Qwen (`Q`)**, **Kimi (`K`)**, **Z.AI / GLM (`Z`)**, **MiniMax (`M`)**, and **Google Antigravity (`▲`)** tabs side-by-side — with live per-provider model selection, native Google OAuth popups, shared `MEMORY.md` / `AGENTS.md`, and live cross-tab summaries.
+- **Built-in Native Linux Terminal Emulator**: VS Code-style resizable bottom PTY drawer (`` Ctrl+` ``) powered by vendored offline `xterm.js` and real Linux pseudo-terminals (`pty`/`termios`), supporting multiple shell tabs, full-screen TUIs (`vim`, `htop`, `btop`), and one-click **Send to chat**.
 - **All Arena modes**: Battle, Side by Side, Direct, and native **Agent Mode** (plus a built-in Local Agent backend).
 - **All modalities**: Text, Code, Web Search, Image, Video, and Auto, following `arena.ai`'s rules and live model catalog (400+ models).
-- **Workspace Sync & Local Tools across Providers**: Grant Arena, DeepSeek, Claude, ChatGPT, and Antigravity controlled access (`ls`, `read_file`, `read_files`, `search`, `write_file`, `edit_file`, `mkdir`, `delete`, `run_cmd`) to a chosen project folder under strict permission modes (`Plan`, `Ask`, `Accept edits`, `Auto`, `Bypass`), with automatic file checkpoints and one-click Undo.
+- **Workspace Sync & Local Tools across Providers**: Grant Arena, DeepSeek, Claude, ChatGPT, Qwen, Kimi, Z.AI / GLM, MiniMax, and Antigravity controlled access (`ls`, `read_file`, `read_files`, `search`, `write_file`, `edit_file`, `mkdir`, `delete`, `run_cmd`) to a chosen project folder under strict permission modes (`Plan`, `Ask`, `Accept edits`, `Auto`, `Bypass`), with automatic file checkpoints and one-click Undo.
 - **MCP Servers & Agent Gateway**: Connect local STDIO MCP servers (presets, JSON, or CLI commands), toggle official Arena account connectors, and expose selected local MCP tools or your Workspace folder to the native Arena Agent through a temporary, pairing-protected Cloudflare Quick Tunnel (`cloudflared`).
 - **Native Linux Desktop Integration**:
   - **Secret Service encryption** (`ARENA-SECRET-v1:` AES-256-GCM via GNOME Keyring / KDE KWallet `secret-tool`, falling back to `0600` files in headless setups).
@@ -66,7 +67,11 @@ Arena Desktop wraps `arena.ai` and multi-provider AI tabs in a native Linux desk
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/providers.png" alt="Multi-Provider Settings — DeepSeek, Claude, ChatGPT & Antigravity (demo data)" width="900" />
+  <img src="docs/screenshots/providers.png" alt="Multi-Provider Settings — DeepSeek, Claude, ChatGPT, Qwen, Kimi, Z.AI / GLM, MiniMax & Antigravity (demo data)" width="900" />
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/terminal.png" alt="Built-in Linux PTY Terminal Drawer (demo data)" width="900" />
 </p>
 
 ---

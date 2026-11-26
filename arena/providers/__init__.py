@@ -8,12 +8,20 @@ from arena.providers.base import Provider
 from arena.providers.chatgpt import ChatGPTProvider
 from arena.providers.claude import ClaudeProvider
 from arena.providers.deepseek import DeepSeekProvider
+from arena.providers.kimi import KimiProvider
+from arena.providers.minimax import MiniMaxProvider
+from arena.providers.qwen import QwenProvider
 from arena.providers.web_engine import get_window_factory, set_window_factory
+from arena.providers.zai import ZaiProvider
 
 PROVIDERS: dict[str, Provider] = {
     "deepseek": DeepSeekProvider(),
     "claude": ClaudeProvider(),
     "chatgpt": ChatGPTProvider(),
+    "qwen": QwenProvider(),
+    "kimi": KimiProvider(),
+    "zai": ZaiProvider(),
+    "minimax": MiniMaxProvider(),
     "antigravity": AntigravityProvider(),
 }
 

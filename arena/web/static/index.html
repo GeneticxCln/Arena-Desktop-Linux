@@ -6,7 +6,8 @@
   <meta name="color-scheme" content="dark">
   <meta name="description" content="Arena Desktop — an unofficial local desktop client for arena.ai. A desktop interface over a local Flask + pywebview backend.">
   <title>Arena Desktop</title>
-  <link rel="stylesheet" href="/static/style.css?v=7.3.0" onerror="this.onerror=null;this.href='static/style.css?v=7.3.0'">
+  <link rel="stylesheet" href="/static/vendor/xterm.css?v=7.4.0" onerror="this.onerror=null;this.href='static/vendor/xterm.css?v=7.4.0'">
+  <link rel="stylesheet" href="/static/style.css?v=7.4.0" onerror="this.onerror=null;this.href='static/style.css?v=7.4.0'">
 </head>
 <body>
   <a class="skip-link" href="#prompt">Skip to the message box</a>
@@ -119,6 +120,10 @@
             <button class="icon-button" type="button" data-action="help" aria-label="Help and keyboard shortcuts" title="Help (F1)">
               <span data-icon="help"></span>
             </button>
+            <button class="icon-button topbar-icon" id="terminalToggleBtn" type="button"
+                    aria-label="Toggle Terminal" aria-expanded="false" title="Terminal (Ctrl+`)">
+              <span data-icon="terminal"></span>
+            </button>
             <button class="icon-button topbar-icon" id="workspaceArrowTop" type="button"
                     aria-label="Toggle Workspace panel" aria-expanded="false" title="Workspace">
               <span data-icon="folder"></span>
@@ -174,6 +179,34 @@
                 <span class="ws-new-tab-copy">
                   <strong>ChatGPT</strong>
                   <span>chatgpt.com signed-in window</span>
+                </span>
+              </button>
+              <button class="ws-new-tab-option" type="button" role="menuitem" data-new-tab-track="qwen">
+                <span class="ws-mode-badge is-qwen" aria-hidden="true">Q</span>
+                <span class="ws-new-tab-copy">
+                  <strong>Qwen</strong>
+                  <span>chat.qwen.ai signed-in window</span>
+                </span>
+              </button>
+              <button class="ws-new-tab-option" type="button" role="menuitem" data-new-tab-track="kimi">
+                <span class="ws-mode-badge is-kimi" aria-hidden="true">K</span>
+                <span class="ws-new-tab-copy">
+                  <strong>Kimi</strong>
+                  <span>kimi.ai/en signed-in window</span>
+                </span>
+              </button>
+              <button class="ws-new-tab-option" type="button" role="menuitem" data-new-tab-track="zai">
+                <span class="ws-mode-badge is-zai" aria-hidden="true">Z</span>
+                <span class="ws-new-tab-copy">
+                  <strong>Z.AI / GLM</strong>
+                  <span>chat.z.ai signed-in window</span>
+                </span>
+              </button>
+              <button class="ws-new-tab-option" type="button" role="menuitem" data-new-tab-track="minimax">
+                <span class="ws-mode-badge is-minimax" aria-hidden="true">M</span>
+                <span class="ws-new-tab-copy">
+                  <strong>MiniMax</strong>
+                  <span>agent.minimax.io signed-in window</span>
                 </span>
               </button>
               <button class="ws-new-tab-option" type="button" role="menuitem" data-new-tab-track="antigravity">
@@ -316,6 +349,33 @@
             </div>
           </form>
         </div>
+
+        <section class="terminal-drawer" id="terminalDrawer" hidden aria-label="Built-in terminal">
+          <div class="terminal-resize-handle" id="terminalResizeHandle" role="separator"
+               aria-orientation="horizontal" aria-label="Resize terminal" title="Drag to resize terminal"></div>
+          <header class="terminal-header">
+            <div class="terminal-tabs" id="terminalTabs" role="tablist" aria-label="Terminal tabs"></div>
+            <button class="terminal-icon-btn" id="terminalNewBtn" type="button"
+                    title="New terminal in active workspace" aria-label="New terminal">
+              <span data-icon="plus"></span>
+            </button>
+            <div class="terminal-header-spacer"></div>
+            <button class="terminal-action-btn" id="terminalSendToChatBtn" type="button"
+                    title="Send selected text (or recent output) to chat composer">
+              <span data-icon="arrow-up"></span>
+              <span>Send to chat</span>
+            </button>
+            <button class="terminal-icon-btn" id="terminalClearBtn" type="button"
+                    title="Clear terminal" aria-label="Clear terminal">
+              <span data-icon="trash"></span>
+            </button>
+            <button class="terminal-icon-btn" id="terminalCloseBtn" type="button"
+                    title="Hide terminal (Ctrl+`)" aria-label="Hide terminal">
+              <span data-icon="x"></span>
+            </button>
+          </header>
+          <div class="terminal-viewport" id="terminalViewport"></div>
+        </section>
       </main>
     </div>
 
@@ -436,6 +496,8 @@
       }, 12000);
     })();
   </script>
-  <script src="/static/app.js?v=7.3.0" defer onerror="this.onerror=null;this.src='static/app.js?v=7.3.0'"></script>
+  <script src="/static/vendor/xterm.js?v=7.4.0" defer onerror="this.onerror=null;this.src='static/vendor/xterm.js?v=7.4.0'"></script>
+  <script src="/static/vendor/xterm-addon-fit.js?v=7.4.0" defer onerror="this.onerror=null;this.src='static/vendor/xterm-addon-fit.js?v=7.4.0'"></script>
+  <script src="/static/app.js?v=7.4.0" defer onerror="this.onerror=null;this.src='static/app.js?v=7.4.0'"></script>
 </body>
 </html>

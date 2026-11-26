@@ -17,9 +17,9 @@ Things that are broken or unfinished in Arena Desktop. Fixes and pull requests a
 
 ## Testing
 
-- The live test scripts close `arena-ai.exe` and change the shared folder setting while they run. Close the app before running them.
+- The live test scripts close the running `Arena-Desktop` process and change the shared folder setting while they run. Close the app before running them.
 
 ## Logs
 
-- `%USERPROFILE%\.arena-personal\desktop.log` on Windows (`~/.arena-personal/desktop.log` on Linux): every send, its HTTP status, human checks and each sandbox step.
-- Start the app with `ARENA_STREAM_DUMP=1` to save every raw stream line to `%USERPROFILE%\.arena-personal\streams\` (`~/.arena-personal/streams/` on Linux).
+- `~/.arena-personal/desktop.log`: every send, its HTTP status, human checks and each sandbox step.
+- Start the app with `ARENA_STREAM_DUMP=1` to save every raw stream line to `~/.arena-personal/streams/`.

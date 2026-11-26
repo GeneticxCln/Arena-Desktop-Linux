@@ -86,10 +86,19 @@ class _FakeWebWindow:
         return []
 
 
-def test_provider_registry_lists_all_four_providers():
+def test_provider_registry_lists_all_providers():
     listed = providers.list_providers()
     ids = [p["id"] for p in listed]
-    assert ids == ["deepseek", "claude", "chatgpt", "antigravity"]
+    assert ids == [
+        "deepseek",
+        "claude",
+        "chatgpt",
+        "qwen",
+        "kimi",
+        "zai",
+        "minimax",
+        "antigravity",
+    ]
     for pid in ids:
         assert providers.get_provider(pid) is not None
     assert providers.get_provider("unknown-provider") is None
@@ -183,7 +192,7 @@ def test_provider_api_routes_and_shared_workspace_memory(tmp_path, monkeypatch):
             return {"ok": True, "open": True}
 
         def stream_turn(self, chat_id, message, history, *, memory_block="", workspace="",
-                        conversation_url="", model="", permission_mode="", stop_event=None):
+                        conversation_url="", model="", permission_mode="", is_followup_round=False, stop_event=None):
             captured["deepseek_mem"] = memory_block
             captured["deepseek_ws"] = workspace
             yield {"type": "reasoning", "text": "Checking stack"}
@@ -198,7 +207,7 @@ def test_provider_api_routes_and_shared_workspace_memory(tmp_path, monkeypatch):
         origin = "https://claude.ai/new"
 
         def stream_turn(self, chat_id, message, history, *, memory_block="", workspace="",
-                        conversation_url="", model="", permission_mode="", stop_event=None):
+                        conversation_url="", model="", permission_mode="", is_followup_round=False, stop_event=None):
             captured["claude_mem"] = memory_block
             yield {"type": "text", "text": "Claude agrees on uvicorn."}
 
@@ -485,7 +494,7 @@ def test_providers_read_and_write_shared_workspace_with_permissions(tmp_path, mo
         origin = "https://claude.ai/new"
 
         def stream_turn(self, chat_id, message, history, *, memory_block="", workspace="",
-                        conversation_url="", model="", permission_mode="", stop_event=None):
+                        conversation_url="", model="", permission_mode="", is_followup_round=False, stop_event=None):
             claude_prompts.append(message)
             if len(claude_prompts) == 1:
                 yield {
@@ -497,7 +506,7 @@ def test_providers_read_and_write_shared_workspace_with_permissions(tmp_path, mo
 
     class ToolDeepSeek(DeepSeekProvider):
         def stream_turn(self, chat_id, message, history, *, memory_block="", workspace="",
-                        conversation_url="", model="", permission_mode="", stop_event=None):
+                        conversation_url="", model="", permission_mode="", is_followup_round=False, stop_event=None):
             ds_prompts.append(message)
             if len(ds_prompts) == 1:
                 yield {
@@ -563,9 +572,137 @@ def test_providers_read_and_write_shared_workspace_with_permissions(tmp_path, mo
     assert "--mode plan" in out_plan
     assert "--mode accept-edits" in out_edits
 
+
+def test_audit_fixes_security_stop_history_and_antigravity_stderr(tmp_path, monkeypatch):
+    from arena.providers.chatgpt import ChatGPTProvider
+
+    ws = tmp_path / "sec_ws"
+    ws.mkdir()
+    (ws / "ok.txt").write_text("inside workspace\n", encoding="utf-8")
+    outside = tmp_path / "secret.txt"
+    outside.write_text("TOP_SECRET_DATA\n", encoding="utf-8")
+
+    cfg = {"workspace_dir": str(ws), "permission_mode": "plan", "memory_enabled": False}
+    monkeypatch.setattr(web_app, "load_config", lambda: cfg)
+    monkeypatch.setattr(web_app, "save_config", lambda d: cfg.update(d))
+
+    # 1. CRITICAL #1: read_files with workspace file + outside file MUST NOT auto-allow!
+    prompts_seen = []
+
+    class TraversalProv(WebChatEngine):
+        id = "claude"
+        name = "Claude"
+        short_name = "Claude"
+        badge = "\u25c8"
+        origin = "https://claude.ai/new"
+
+        def stream_turn(self, chat_id, message, history, *, memory_block="", workspace="",
+                        conversation_url="", model="", permission_mode="", is_followup_round=False, stop_event=None):
+            prompts_seen.append(message)
+            if len(prompts_seen) == 1:
+                yield {
+                    "type": "text",
+                    "text": f'<tool name="read_files"><paths>ok.txt\n{outside}</paths></tool>',
+                }
+            else:
+                yield {"type": "text", "text": "Done checking."}
+
+    orig_cl = providers.PROVIDERS["claude"]
+    providers.PROVIDERS["claude"] = TraversalProv()
+    try:
+        client = web_app.app.test_client()
+        seen_perm_prompts = []
+
+        def _auto_deny_outside():
+            import time as _t
+            deadline = _t.time() + 5.0
+            while _t.time() < deadline:
+                pending = web_app.BROKER.pending()
+                if pending:
+                    for item in pending:
+                        seen_perm_prompts.append(item)
+                        web_app.BROKER.resolve(item["id"], "deny")
+                    return
+                _t.sleep(0.02)
+
+        t_deny = threading.Thread(target=_auto_deny_outside, daemon=True)
+        t_deny.start()
+        r = client.post("/api/chat", json={
+            "message": "Read both",
+            "track": "claude",
+            "workspace": str(ws),
+            "tools": True,
+        })
+        assert r.status_code == 200
+        evs = _sse_events(r)
+        t_deny.join(timeout=2.0)
+        assert len(seen_perm_prompts) == 1
+        assert seen_perm_prompts[0]["inside"] is False
+        assert "secret.txt" in seen_perm_prompts[0]["summary"]
+        rf = next(e for e in evs if e.get("type") == "tool_result" and e.get("tool") == "read_files")
+        assert rf["ok"] is False
+        assert "TOP_SECRET_DATA" not in (rf.get("output") or "")
+        # CRITICAL #7: Saved assistant message has text_b="" and stripped <tool> XML
+        cid = next(e["chat_id"] for e in evs if e.get("chat_id"))
+        saved = web_app._load_chat(cid)
+        asst = next(m for m in saved["messages"] if m.get("role") == "assistant")
+        assert asst.get("text_b") == ""
+        assert "<tool" not in asst.get("text", "")
+
+        # CRITICAL #2: Stop event set on a chat must NOT break subsequent sends!
+        web_app._chat_stop_event(cid).set()
+        web_app._stop.set()
+        r_after_stop = client.post("/api/chat", json={
+            "chat_id": cid,
+            "message": "Follow up after stop",
+            "track": "claude",
+            "workspace": str(ws),
+        })
+        ev_after = _sse_events(r_after_stop)
+        assert any(e.get("type") == "done" and e.get("text_a") == "Done checking." for e in ev_after)
+    finally:
+        providers.PROVIDERS["claude"] = orig_cl
+
+    # 2. ChatGPT SSE parser ignores non-content append patches & flushes trailing line
+    cg = ChatGPTProvider()
+    cg_state = {}
+    evs_meta = cg._parse_observed_sse_chunk(
+        'data: {"p":"/title","o":"append","v":"SHOULD_NOT_APPEAR"}\n'
+        'data: {"p":"/message/content/parts/0","o":"append","v":"Real"}',
+        cg_state,
+    )
+    assert [e.get("text") for e in evs_meta if e.get("type") == "text"] == []
+    evs_flushed = cg._parse_observed_sse_chunk("", cg_state, flush=True)
+    assert [e.get("text") for e in evs_flushed if e.get("type") == "text"] == ["Real"]
+
+    # 3. Antigravity CLI drains >64 KiB stderr without deadlocking & includes history
+    heavy_agy = tmp_path / "agy_stderr"
+    heavy_agy.write_text(
+        "#!/bin/sh\n"
+        "python3 -c 'import sys; sys.stderr.write(\"E\"*90000); sys.stderr.flush()' \n"
+        "printf 'STDOUT_OK:%s\\n' \"$*\"\n",
+        encoding="utf-8",
+    )
+    heavy_agy.chmod(0o755)
+    ag = AntigravityProvider()
+    monkeypatch.setattr("arena.providers.antigravity._has_antigravity_sdk", lambda: False)
+    monkeypatch.setattr("arena.providers.antigravity._find_agy_cli", lambda: str(heavy_agy))
+    out = "".join(
+        e.get("text", "")
+        for e in ag.stream_turn(
+            "ag_h",
+            "second question",
+            [{"role": "user", "text": "FIRST_TURN_MARKER"}],
+            workspace=str(ws),
+        )
+        if e.get("type") == "text"
+    )
+    assert "STDOUT_OK:" in out
+    assert "FIRST_TURN_MARKER" in out
+
     # 4. Flask API `/api/providers/<id>/models` + model_id passthrough on `/api/chat`
     client = web_app.app.test_client()
-    for pid in ("deepseek", "claude", "chatgpt", "antigravity"):
+    for pid in ("deepseek", "claude", "chatgpt", "qwen", "kimi", "zai", "minimax", "antigravity"):
         r = client.get(f"/api/providers/{pid}/models")
         assert r.status_code == 200
         body = r.get_json()
@@ -578,7 +715,7 @@ def test_providers_read_and_write_shared_workspace_with_permissions(tmp_path, mo
 
     class StubModelProvider(DeepSeekProvider):
         def stream_turn(self, chat_id, message, history, *, memory_block="", workspace="",
-                        conversation_url="", model="", permission_mode="", stop_event=None):
+                        conversation_url="", model="", permission_mode="", is_followup_round=False, stop_event=None):
             seen_model["model"] = model
             yield {"type": "text", "text": f"Used {model}"}
 
@@ -598,3 +735,207 @@ def test_providers_read_and_write_shared_workspace_with_permissions(tmp_path, mo
         assert saved["model_a"] == "deepseek-reasoner"
     finally:
         providers.PROVIDERS["deepseek"] = orig
+
+
+def test_qwen_kimi_zai_minimax_live_models_and_sse_parsers(monkeypatch):
+    from arena.providers.kimi import KimiProvider
+    from arena.providers.minimax import MiniMaxProvider
+    from arena.providers.qwen import QwenProvider
+    from arena.providers.zai import ZaiProvider
+
+    # Qwen: /api/models live discovery + phase=think/answer SSE + flush
+    qw = QwenProvider()
+    monkeypatch.setattr(qw, "eval_js", lambda s, timeout=2.0: "tok-qwen")
+    monkeypatch.setattr(
+        qw,
+        "fetch_json",
+        lambda ep, headers=None, timeout=4.5: {
+            "ok": True,
+            "data": {
+                "data": [
+                    {"id": "qwen3-coder-plus", "name": "Qwen3 Coder Plus"},
+                    {"id": "qwq-32b", "name": "QwQ 32B"},
+                ]
+            },
+        },
+    )
+    q_live = qw._probe_live_models()
+    assert q_live and q_live["live"] is True
+    assert [m["id"] for m in q_live["models"]] == ["qwen3-coder-plus", "qwq-32b"]
+    assert "Coding" in q_live["models"][0]["capabilities"]
+    assert "Reasoning" in q_live["models"][1]["capabilities"]
+
+    q_state = {}
+    q_evs = qw._parse_observed_sse_chunk(
+        'data: {"choices":[{"delta":{"phase":"think","content":"plan"}}]}\n'
+        'data: {"choices":[{"delta":{"phase":"answer","content":"ok"}}]}',
+        q_state,
+    )
+    q_evs += qw._parse_observed_sse_chunk("", q_state, flush=True)
+    assert [(e["type"], e["text"]) for e in q_evs] == [("reasoning", "plan"), ("text", "ok")]
+
+    # Kimi: European origin + non-chat URL detection + native SSE & Connect/gRPC JSON + flush
+    km = KimiProvider()
+    assert km.origin == "https://www.kimi.ai/en"
+    assert km._is_non_chat_url("https://www.kimi.ai/make3d") is True
+    assert km._is_non_chat_url("https://www.kimi.ai/en") is False
+    assert km._is_non_chat_url("https://www.kimi.ai/chat/abc123") is False
+    k_state = {}
+    k_evs = km._parse_observed_sse_chunk(
+        'data: {"event":"k1","text":"thinking..."}\n'
+        'data: {"event":"cmpl","text":"answer"}\n'
+        '\x00\x00\x00\x00\x1f{"block":{"text":{"content":"!"}}}',
+        k_state,
+    )
+    k_evs += km._parse_observed_sse_chunk("", k_state, flush=True)
+    assert [(e["type"], e["text"]) for e in k_evs] == [
+        ("reasoning", "thinking..."),
+        ("text", "answer"),
+        ("text", "!"),
+    ]
+
+    # Z.AI / GLM: /api/models live discovery (matching active button + skipping hidden) + delta_content + history fallback
+    za = ZaiProvider()
+    monkeypatch.setattr(
+        za,
+        "eval_js",
+        lambda s, timeout=2.5: {"label": "GLM-5.3-Flash Max"} if "modelSelectorButton" in s else "tok-zai",
+    )
+    monkeypatch.setattr(
+        za,
+        "fetch_json",
+        lambda ep, headers=None, timeout=4.5: {
+            "ok": True,
+            "data": {
+                "data": [
+                    {"id": "glm-5.3", "name": "GLM-5.3", "info": {"meta": {"hidden": False}}},
+                    {"id": "glm-5.4", "name": "GLM-5.4", "info": {"meta": {"hidden": False}}},
+                    {"id": "x-preview-l", "name": "GLM-5.3-Flash", "info": {"meta": {"hidden": False}}},
+                    {"id": "glm-hidden", "name": "Hidden", "info": {"meta": {"hidden": True}}},
+                ]
+            },
+        },
+    )
+    z_live = za._probe_live_models()
+    assert z_live and z_live["live"] is True
+    assert [m["id"] for m in z_live["models"]] == ["glm-5.3", "glm-5.4", "x-preview-l"]
+    # Exact normalized match: "GLM-5.3-Flash Max" must match "x-preview-l" (GLM-5.3-Flash), NOT "glm-5.3"!
+    assert z_live["active_model"] == "x-preview-l"
+    assert "Fast" in z_live["models"][2]["capabilities"]
+
+    z_state = {}
+    z_evs = za._parse_observed_sse_chunk(
+        'data: {"type":"chat:completion","data":{"phase":"thinking","delta_content":"step"}}\n'
+        'data: {"type":"chat:completion","data":{"phase":"answer","delta_content":"code"}}',
+        z_state,
+    )
+    z_evs += za._parse_observed_sse_chunk("", z_state, flush=True)
+    assert [(e["type"], e["text"]) for e in z_evs] == [("reasoning", "step"), ("text", "code")]
+
+    # MiniMax: European origin + cumulative reply diff + non-prefix text_replace + flush
+    mm = MiniMaxProvider()
+    assert mm.origin == "https://agent.minimax.io/"
+    assert 'div.tiptap.ProseMirror[contenteditable="true"]' in mm.composer_selectors
+    m_state = {}
+    m_evs = mm._parse_observed_sse_chunk(
+        'data: {"data":{"reply":"Hel"}}\n'
+        'data: {"data":{"reply":"Hello!"}}\n'
+        'data: {"data":{"reply":"Replaced"}}',
+        m_state,
+    )
+    m_evs += mm._parse_observed_sse_chunk("", m_state, flush=True)
+    assert [(e["type"], e["text"]) for e in m_evs] == [
+        ("text", "Hel"),
+        ("text", "lo!"),
+        ("text_replace", "Replaced"),
+    ]
+
+
+def test_audit_round2_regressions(tmp_path, monkeypatch):
+    """Regression suite for round-2 audit findings (checkpoints, workspace guard, cookies, UTF-8, DeepSeek)."""
+    # 1. DeepSeek ignores non-content status patches (e.g. FINISHED / empty path)
+    ds = DeepSeekProvider()
+    ds_state = {}
+    ds_evs = ds._parse_observed_sse_chunk(
+        'data: {"p":"response/status","v":"FINISHED"}\n'
+        'data: {"p":"response/content","v":"Real reply"}\n'
+        'data: {"p":"response/status","v":"DONE"}\n',
+        ds_state,
+    )
+    assert [(e["type"], e["text"]) for e in ds_evs] == [("text", "Real reply")]
+
+    # 2. Multi-account cookie sync persists rotated cookie for account #2 (not just index 0)
+    acc_store = {
+        "current": "acc-2",
+        "accounts": [
+            {"id": "acc-1", "cookie": "old-1"},
+            {"id": "acc-2", "cookie": "old-2"},
+        ],
+    }
+    saved_stores = []
+    monkeypatch.setattr(web_app, "_accounts_load", lambda: acc_store)
+    monkeypatch.setattr(web_app, "_accounts_save", lambda s: saved_stores.append(dict(s)))
+    web_app._sync_current_account_cookie("fresh-cookie-2")
+    assert acc_store["accounts"][1]["cookie"] == "fresh-cookie-2"
+    assert len(saved_stores) == 1
+
+    # 3. Provider track rejects "/" as workspace & emits dict checkpoints {"a": ck_id} + msg_index
+    ws = tmp_path / "proj"
+    ws.mkdir()
+    (ws / "note.txt").write_text("before", encoding="utf-8")
+    cfg = {"workspace_dir": str(ws), "permission_mode": "auto", "memory_enabled": False}
+    monkeypatch.setattr(web_app, "load_config", lambda: cfg)
+    monkeypatch.setattr(web_app, "save_config", lambda d: cfg.update(d))
+
+    seen_ws = []
+
+    class StubWriteProvider(DeepSeekProvider):
+        def __init__(self):
+            super().__init__()
+            self._round = 0
+
+        def stream_turn(self, chat_id, message, history, *, memory_block="", workspace="",
+                        conversation_url="", model="", permission_mode="", is_followup_round=False, stop_event=None):
+            seen_ws.append(workspace)
+            self._round += 1
+            if self._round == 1 and workspace:
+                yield {"type": "text", "text": '<tool name="write_file"><path>note.txt</path><content>after</content></tool>'}
+            else:
+                yield {"type": "text", "text": "Updated."}
+
+    orig_ds = providers.PROVIDERS["deepseek"]
+    providers.PROVIDERS["deepseek"] = StubWriteProvider()
+    try:
+        client = web_app.app.test_client()
+        # Passing workspace="/" must be rejected (empty workspace, no local tools on /)
+        r_root = client.post("/api/chat", json={"message": "hi", "track": "deepseek", "workspace": "/"})
+        assert r_root.status_code == 200
+        _sse_events(r_root)
+        assert seen_ws[-1] == ""
+
+        # Valid project workspace writes file, creates checkpoint dict {"a": "<id>"}, and sets msg_index
+        providers.PROVIDERS["deepseek"]._round = 0
+        r_ok = client.post("/api/chat", json={"message": "update note", "track": "deepseek", "workspace": str(ws)})
+        assert r_ok.status_code == 200
+        evs = _sse_events(r_ok)
+        done = next(e for e in evs if e.get("type") == "done")
+        assert isinstance(done.get("checkpoints"), dict)
+        assert isinstance(done["checkpoints"].get("a"), str) and done["checkpoints"]["a"]
+        assert isinstance(done.get("msg_index"), int)
+    finally:
+        providers.PROVIDERS["deepseek"] = orig_ds
+
+    # 4. Antigravity CLI decodes multi-byte UTF-8 split across 4096-byte chunks without U+FFFD
+    utf8_agy = tmp_path / "agy_utf8"
+    utf8_agy.write_text(
+        "#!/bin/sh\n"
+        "python3 -c 'import sys; b = (\"a\"*4095 + \"\\U0001f680ok\").encode(\"utf-8\"); sys.stdout.buffer.write(b); sys.stdout.buffer.flush()'\n",
+        encoding="utf-8",
+    )
+    utf8_agy.chmod(0o755)
+    ag = AntigravityProvider()
+    monkeypatch.setattr("arena.providers.antigravity._has_antigravity_sdk", lambda: False)
+    monkeypatch.setattr("arena.providers.antigravity._find_agy_cli", lambda: str(utf8_agy))
+    out = "".join(e.get("text", "") for e in ag.stream_turn("ag_u8", "-starts-with-dash", []) if e.get("type") == "text")
+    assert "\ufffd" not in out
+    assert out.endswith("\U0001f680ok")
