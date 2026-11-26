@@ -459,15 +459,15 @@ def main():
                                        hidden=True, background_color="#242422", js_api=ENGINE.bridge())
     ENGINE.attach(engine_win, main_win)
     ENGINE.dock = None
+    google_win = webview.create_window("Google AI mode - Arena Desktop", "about:blank", width=1100, height=760,
+                                       x=140, y=140, hidden=True, background_color="#242422")
+    google_ai.ENGINE.attach(google_win, main_win)
+    web_app.GOOGLE_ENGINE = google_ai.ENGINE
     for _win_to_wrap, _wrap_lbl in ((main_win, "main-window"), (engine_win, "arena-window"), (google_win, "google-window")):
         try:
             diag.make_window_calls_non_blocking(_win_to_wrap)
         except Exception:
             LOG.exception("could not wrap %s for GTK thread safety", _wrap_lbl)
-    google_win = webview.create_window("Google AI mode - Arena Desktop", "about:blank", width=1100, height=760,
-                                       x=140, y=140, hidden=True, background_color="#242422")
-    google_ai.ENGINE.attach(google_win, main_win)
-    web_app.GOOGLE_ENGINE = google_ai.ENGINE
     from arena import providers as _providers
 
     def _create_provider_window(title: str, url: str, hidden: bool = True):
