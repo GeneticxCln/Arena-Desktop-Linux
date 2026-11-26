@@ -2578,6 +2578,56 @@ def test_cross_tab_memory_toggle_preview_and_snapshot(web, monkeypatch, tmp_path
     assert "API refactor" in written
 
 
+def test_multi_workspace_api_and_shared_arena_google_cross_tab_memory(web, monkeypatch, tmp_path):
+    appmod, c, cfg, use, sent = web
+    ws1 = tmp_path / "alpha"; ws1.mkdir()
+    ws2 = tmp_path / "beta"; ws2.mkdir()
+    monkeypatch.setattr(appmod, "GLOBAL_MEMORY_FILE", tmp_path / "none.md")
+
+    # Initial list includes built-in General workspace.
+    res = c.get("/api/workspaces").get_json()
+    assert res["ok"] is True
+    assert res["workspaces"][0]["id"] == "general"
+
+    # Adding ws1 activates it and syncs workspace_dir for both Arena and Google tracks.
+    added = c.post("/api/workspaces", json={"path": str(ws1)}).get_json()
+    assert added["ok"] is True
+    assert added["active_path"] == str(ws1.resolve())
+    ws1_id = added["active_id"]
+    assert cfg.get("workspace_dir") == str(ws1.resolve())
+    assert (cfg.get("google_settings") or {}).get("workspace_dir") == str(ws1.resolve())
+
+    # Add ws2, then switch back to ws1.
+    added2 = c.post("/api/workspaces", json={"path": str(ws2)}).get_json()
+    ws2_id = added2["active_id"]
+    assert added2["active_path"] == str(ws2.resolve())
+    sw = c.post("/api/workspaces/switch", json={"id": ws1_id}).get_json()
+    assert sw["ok"] is True and sw["active_id"] == ws1_id
+
+    # A Google tab and an Arena tab inside ws1 share live cross-tab memory.
+    appmod._save_chat(
+        "eeeeeeee-eeee-7eee-8eee-eeeeeeeeeeee", title="Google research tab",
+        messages=[
+            {"role": "user", "text": "Compare SQLite WAL vs Postgres"},
+            {"role": "assistant", "text": "SQLite WAL fits single-node desktop apps best."},
+        ],
+        mode="direct", modality="text", source="google", workspace_dir=str(ws1),
+    )
+    appmod._ui_mode, appmod._ui_modality = "direct", "text"
+    use(FakeResp(['a0:"Using SQLite WAL as researched."']))
+    events(c.post("/api/chat", json={
+        "message": "Implement storage layer", "mode": "direct",
+        "modality": "text", "model_id": "m1", "tools": False,
+    }))
+    prompt_sent = sent[-1][1]["userMessage"]["content"]
+    assert "[Google]" in prompt_sent
+    assert "SQLite WAL fits single-node desktop apps best." in prompt_sent
+
+    # Removing ws2 works; removing general is rejected.
+    assert c.post(f"/api/workspaces/{ws2_id}/remove", json={}).status_code == 200
+    assert c.post("/api/workspaces/general/remove", json={}).status_code == 400
+
+
 def _delegate_parent(web, tmp_path, monkeypatch):
     """A local-agent parent chat ready to receive a delegated turn."""
     appmod, c, cfg, use, sent = web

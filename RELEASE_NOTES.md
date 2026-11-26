@@ -1,3 +1,27 @@
+## Arena Desktop v7.2.0 (Native Linux)
+
+Introduces the new Workspace-First UI (left Workspaces sidebar + IDE-style top tab bar with per-tab Arena/Google mode selection) and fixes Linux WebKitGTK Google AI mode sign-in & cookie export end-to-end.
+
+### Highlights in 7.2.0
+
+- **Workspace-First UI & Per-Tab Mode Selection**:
+  - **Left Workspaces sidebar**: Manage multiple open project folders alongside the built-in **General** workspace (`GET/POST /api/workspaces`, `/api/workspaces/switch`, `/api/workspaces/<id>/remove`), with live tab counts and native folder picker support.
+  - **IDE/Browser-style top tab bar**: One workspace holds multiple open tabs side-by-side — each tab carries its own **Arena (`✦`)** or **Google AI (`G`)** mode badge, close button, and live streaming indicator.
+  - **Per-tab mode picker**: Clicking **`+ New tab ▾`** lets you choose **Arena mode** or **Google AI mode** for each new tab; switching tabs automatically adapts the composer without hiding sibling tabs.
+  - **Shared cross-tab memory across modes**: Arena and Google tabs inside the same workspace share `MEMORY.md`, `AGENTS.md`, and live `[Arena]` / `[Google]` sibling-tab summaries.
+  - **UI polish**: Removed the legacy top-bar chat bubble & global mode switcher in favor of a dedicated **History** button in the Workspaces sidebar footer, and kept the chat composer pinned cleanly at the bottom at a consistent width across both welcome and active chat views.
+- **Linux WebKitGTK Google AI Mode Fixes**:
+  - Fixed `GoogleEngine.show()` and `open_sign_in()` on Linux GTK (where `pywebview` sets `events.shown` during hidden startup), ensuring the Google sign-in window reliably pops up and raises to the front.
+  - Fixed Linux WebKitGTK cookie export (`http.cookies.Morsel` value extraction + direct `WebKit2.CookieManager.get_cookies()` queries across `www.google.com` and `accounts.google.com`, plus automatic cookie export on `/api/google/status` and `/api/google/verify`).
+  - Fixed `ReferenceError: Can't find variable: googleDone` in Google-mode account rendering (which previously caused false *"Local server is unavailable"* banners), kept the top-right Google profile pill visible, pinned `gi.require_version("Gtk", "3.0")` in `arena/diag.py`, and eliminated Windows `System.Windows.Forms` log spam on Linux.
+
+### Verification
+
+- Static checks (`bash -n`, `node --check`, `python -m compileall`, static UI hygiene) pass.
+- Non-browser test suite: **465 passed** on Linux with fully isolated test storage.
+
+---
+
 ## Arena Desktop v7.1.0 (Native Linux)
 
 Adds live cross-tab project memory and completes a full Linux runtime hardening pass.

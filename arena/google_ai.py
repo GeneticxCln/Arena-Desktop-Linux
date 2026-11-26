@@ -516,9 +516,6 @@ class GoogleEngine:
             if diag is not None: diag.note("[google-window] show: no window")
             return
         self.visible = True
-        if self.shown_once():
-            LOG.info("[google-window] show: already on screen")
-            return
         box: dict = {}
         done = threading.Event()
         if diag is not None: diag.note("[google-window] show: start")
@@ -527,6 +524,16 @@ class GoogleEngine:
         def work():
             try:
                 self.window.show()
+                try:
+                    restore = getattr(self.window, "restore", None)
+                    if callable(restore):
+                        restore()
+                except Exception:
+                    pass
+                native = getattr(self.window, "native", None)
+                present = getattr(native, "present", None)
+                if callable(present) and diag is not None:
+                    diag.run_on_ui_nonblocking(self.window, present, "google-present")
                 box["ok"] = True
                 LOG.info("[google-window] show: the window accepted show()")
             except Exception as exc:
@@ -736,10 +743,17 @@ class GoogleEngine:
         ``_on_ui``.
         """
         cached = getattr(self, "_core_cached", None)
-        if cached is not None and cached is not _NO_CORE:
+        if cached is _NO_CORE:
+            return None
+        if cached is not None:
             return cached
         native = getattr(self.window, "native", None)
         if native is None:
+            return None
+        # Native GTK / Qt windows on Linux have no WinForms BeginInvoke or WebView2
+        # control; mark immediately so status polls never try to import .NET System.
+        if not hasattr(native, "BeginInvoke") and getattr(native, "webview", None) is None:
+            self._core_cached = _NO_CORE
             return None
         if self._on_ui_thread(native):
             found = self._read_edge_host_on_ui(native)
@@ -797,6 +811,8 @@ class GoogleEngine:
         """
         native = getattr(self.window, "native", None) if self.window else None
         if native is None:
+            return None
+        if not hasattr(native, "BeginInvoke") and getattr(native, "webview", None) is None:
             return None
         box: dict = {}
 
@@ -1105,11 +1121,13 @@ class GoogleEngine:
         # window with no native part cannot produce WebView2 cookies anyway,
         # but stand-in windows in tests (and the pure-HTTP path) still must be
         # able to answer through their own jar reader.
-        if (getattr(self.window, "native", None) is not None
+        native = getattr(self.window, "native", None)
+        if (native is not None
+                and hasattr(native, "BeginInvoke")
                 and not getattr(self, "_ever_shown", False)):
             # WebView2 only services its cookie API while its renderer runs --
-            # but a browser has no such gate: its jar is readable as soon as the
-            # debugging port answers, whether or not a person ever saw it.
+            # but Linux WebKitGTK and external browsers keep persistent cookie
+            # managers readable whether or not the window was shown.
             LOG.info("[google-cookies] window never shown yet; no jar to read")
             return ""
         if diag is not None: diag.note("[google-cookies] start")
@@ -1214,69 +1232,129 @@ class GoogleEngine:
             found.extend(host_pairs)
         return found
 
-    def _cookies_from_pywebview(self) -> list:
-        """Read the pywebview/WebKitGTK jar, bounded and off the caller thread.
+    def _cookies_from_webkit_manager(self) -> list:
+        """Read Google cookies directly from WebKitGTK's CookieManager for all Google URLs.
 
-        Every other reader here speaks WebView2 or the custom browser window;
-        a plain pywebview window has neither, so before this the Google jar
-        could never be exported on Linux. ``get_cookies()`` is the only API
-        that window has, and its GTK backend waits on the UI thread's own
-        semaphore -- safe to call, but never safe to wait for without a
-        ceiling. The read happens on a daemon thread, only one at a time, and
-        only while the window is on screen (a hidden WebKit view leaves the
-        callback queued forever).
+        pywebview's ``window.get_cookies()`` only queries ``webview.get_uri()``,
+        which misses ``www.google.com`` cookies when the window is on
+        ``myaccount.google.com`` or ``about:blank``. Querying WebKit2's own
+        ``cookie_manager.get_cookies(url, ...)`` on the GLib main loop returns
+        every Google cookie (including HttpOnly SID/__Secure-1PSID) even when
+        the window is hidden.
         """
+        uid = getattr(self.window, "uid", None) if self.window is not None else None
+        if not uid:
+            return []
+        try:
+            import gi  # type: ignore
+            gi.require_version("Gtk", "3.0")
+            from gi.repository import GLib, Gtk  # type: ignore
+            from webview.platforms import gtk as gtk_backend  # type: ignore
+        except Exception:
+            return []
+        if Gtk.main_level() <= 0:
+            return []
+        view = gtk_backend.BrowserView.instances.get(uid)
+        cm = getattr(view, "cookie_manager", None) if view is not None else None
+        if cm is None:
+            return []
+
+        pairs = []
+        for url in self.COOKIE_URLS:
+            box: dict = {}
+            done = threading.Event()
+
+            def _make_request(target_url, target_box, target_done):
+                def _on_done(source, task, _data=None):
+                    try:
+                        results = source.get_cookies_finish(task) or []
+                        got = []
+                        for c in results:
+                            name = c.get_name() if hasattr(c, "get_name") else None
+                            value = c.get_value() if hasattr(c, "get_value") else None
+                            domain = c.get_domain() if hasattr(c, "get_domain") else ""
+                            if name and value is not None:
+                                host = str(domain or "").lstrip(".").lower()
+                                if not host or "google." in host or host.endswith("google.com"):
+                                    got.append((str(name), str(value)))
+                        target_box["pairs"] = got
+                    except Exception as exc:
+                        target_box["error"] = exc
+                    finally:
+                        target_done.set()
+
+                def _start():
+                    try:
+                        cm.get_cookies(target_url, None, _on_done, None)
+                    except Exception as exc:
+                        target_box["error"] = exc
+                        target_done.set()
+                    return False
+
+                return _start
+
+            GLib.idle_add(_make_request(url, box, done))
+            if done.wait(3.0) and box.get("pairs"):
+                pairs.extend(box["pairs"])
+        return pairs
+
+    def _cookies_from_pywebview(self) -> list:
+        """Read the pywebview/WebKitGTK jar, bounded and off the caller thread."""
         if self.window is None:
-            return []
-        reader = getattr(self.window, "get_cookies", None)
-        if not callable(reader):
-            return []
-        if not self.visible:
-            _note_once("pywebview-hidden",
-                       "[google-cookies] pywebview jar skipped: window hidden")
             return []
         with self._jar_lock:
             if self._jar_reading:
                 return []
             self._jar_reading = True
 
-        box: dict = {}
-        done = threading.Event()
+        try:
+            webkit_pairs = self._cookies_from_webkit_manager()
+            if webkit_pairs:
+                return webkit_pairs
+            reader = getattr(self.window, "get_cookies", None)
+            if not callable(reader):
+                return []
 
-        def work():
-            try:
-                box["jars"] = reader() or []
-            except BaseException as exc:      # never escape into the caller
-                box["error"] = exc
-            finally:
-                done.set()
-                with self._jar_lock:
-                    self._jar_reading = False
+            box: dict = {}
+            done = threading.Event()
 
-        threading.Thread(target=work, daemon=True,
-                         name="google-jar-pywebview").start()
-        if not done.wait(4.0):
-            LOG.info("google cookies: pywebview jar read still running after 4s; skipping")
-            return []
-        if "error" in box:
-            LOG.info("google cookies: pywebview jar read failed: %s", box["error"])
-            return []
+            def work():
+                try:
+                    box["jars"] = reader() or []
+                except BaseException as exc:      # never escape into the caller
+                    box["error"] = exc
+                finally:
+                    done.set()
 
-        pairs = []
-        for jar in box.get("jars") or []:
-            pairs.extend(self._cookie_pairs_from_item(jar))
-        return pairs
+            threading.Thread(target=work, daemon=True,
+                             name="google-jar-pywebview").start()
+            if not done.wait(4.0):
+                LOG.info("google cookies: pywebview jar read still running after 4s; skipping")
+                return []
+            if "error" in box:
+                LOG.info("google cookies: pywebview jar read failed: %s", box["error"])
+                return []
+
+            pairs = []
+            for jar in box.get("jars") or []:
+                pairs.extend(self._cookie_pairs_from_item(jar))
+            return pairs
+        finally:
+            with self._jar_lock:
+                self._jar_reading = False
 
     @staticmethod
     def _cookie_pairs_from_item(jar) -> list:
         """Flatten one pywebview jar entry into Google ``(name, value)`` pairs.
 
-        The GTK backend returns ``http.cookiejar.Cookie`` objects, while the
-        Qt/WinForms backends can return ``{name: morsel}`` mappings; both
-        shapes turn up here, so both are accepted. Cookies for other sites are
-        dropped: the header is sent to Google only.
+        The GTK backend returns ``http.cookies.SimpleCookie`` (a dict mapping
+        name -> ``http.cookies.Morsel``, where ``Morsel`` is itself a ``dict``
+        subclass storing its value in ``morsel.value`` and domain in
+        ``morsel['domain']``), while other backends can return
+        ``http.cookiejar.Cookie`` objects or plain dicts. All shapes are
+        accepted; cookies for non-Google sites are dropped.
         """
-        if isinstance(jar, dict) and "name" in jar and "value" in jar:
+        if isinstance(jar, dict) and "name" in jar and "value" in jar and not hasattr(jar.get("value"), "value"):
             items = [(jar.get("name"), jar)]
         elif isinstance(jar, dict):
             items = list(jar.items())
@@ -1289,19 +1367,17 @@ class GoogleEngine:
         for name, morsel in items:
             if not name:
                 continue
-            if isinstance(morsel, dict):
+            value = getattr(morsel, "value", None)
+            if value is None and isinstance(morsel, dict):
                 value = morsel.get("value")
-                domain = morsel.get("domain") or ""
-            else:
-                value = getattr(morsel, "value", None)
-                domain = getattr(morsel, "domain", "") or ""
-                if not domain and hasattr(morsel, "get"):
-                    try:
-                        domain = morsel.get("domain") or ""
-                    except Exception:
-                        domain = ""
             if value is None:
                 continue
+            domain = getattr(morsel, "domain", "") or ""
+            if not domain and hasattr(morsel, "get"):
+                try:
+                    domain = morsel.get("domain") or ""
+                except Exception:
+                    domain = ""
             host = str(domain).lstrip(".").lower()
             if host and "google." not in host and not host.endswith("google.com"):
                 continue
@@ -1328,7 +1404,7 @@ class GoogleEngine:
         already_open = self._sign_in_in_progress()
         if fresh and already_open:
             LOG.info("[google-window] sign-in already open; keeping the started session")
-            self.ensure_visible()
+            self.show()
             return
         if fresh and not already_open:
             # Stale flag from an earlier window: clear it, or every later poll
@@ -1411,7 +1487,7 @@ class GoogleEngine:
         return bool(state.get("running")) and not state.get("build_error")
 
     def _hl_suffix(self) -> str:
-        return "ru"
+        return "en"
 
     def open_account_menu(self):
         self.load(ACCOUNT_URL)
@@ -1786,7 +1862,10 @@ class GoogleEngine:
     def page_url(self) -> str:
         """The address the window is on, read from the browser itself."""
         value = self._on_ui(lambda core: str(core.Source or ""), limit=2.0)
-        return value if isinstance(value, str) else ""
+        if isinstance(value, str) and value:
+            return value
+        href = self._eval_on_page("location.href")
+        return str(href or "") if href else ""
 
     def verify(self, timeout: float = None) -> dict:
         """Reload Google and confirm who is signed in — no blind trust."""

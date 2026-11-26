@@ -597,8 +597,12 @@
     getModels(modality, mode, force = false) { return this.request(`/api/models?mode=${encodeURIComponent(mode || '')}&modality=${encodeURIComponent(modality)}${force ? '&force=1' : ''}`); },
     setMode(mode) { return this.request('/api/mode', { method: 'POST', body: { mode } }); },
     setModality(modality) { return this.request('/api/modality', { method: 'POST', body: { modality } }); },
-    newChat() { return this.request('/api/new', { method: 'POST', body: {} }); },
+    newChat(body = {}) { return this.request('/api/new', { method: 'POST', body: body || {} }); },
     getChats() { return this.request('/api/chats'); },
+    getWorkspaces() { return this.request('/api/workspaces'); },
+    addWorkspace(path, name = '') { return this.request('/api/workspaces', { method: 'POST', body: name ? { path, name } : { path } }); },
+    switchWorkspace(id) { return this.request('/api/workspaces/switch', { method: 'POST', body: { id } }); },
+    removeWorkspace(id) { return this.request(`/api/workspaces/${encodeURIComponent(id)}/remove`, { method: 'POST', body: {} }); },
     getArenaChats() { return this.request('/api/arena-chats?limit=50'); },
     openArenaChat(id, type, title) { return this.request(`/api/arena-chats/${encodeURIComponent(id)}/open`, { method: 'POST', body: { type, title } }); },
     archiveArenaChat(id, type) { return this.request(`/api/arena-chats/${encodeURIComponent(id)}/archive`, { method: 'POST', body: { type } }); },
@@ -1191,7 +1195,7 @@
         permission_mode: demoStore.permissionMode,
         workspace: demoStore.workspace,
         workspace_chosen: true,
-        app_version: '7.1.0',
+        app_version: '7.2.0',
         pending_permissions: demoStore.pendingPermissions.length,
         demo: true
       };
@@ -1659,7 +1663,54 @@
       if (item) { item.auth_status = 'disconnected'; item.connected = false; }
       return { ok: true, slug, demo: true, connectors: demoClone(demoStore.arenaConnectors) };
     },
+    async getWorkspaces() {
+      await sleep(40);
+      const list = demoStore.workspaces || [
+        { id: 'general', name: 'General', path: '', builtin: true, chat_count: 1 },
+        { id: 'ws-demo', name: 'DemoProject', path: demoStore.workspace || '/home/demo/project', builtin: false, exists: true, chat_count: 0 }
+      ];
+      return { ok: true, workspaces: list, active_id: demoStore.activeWorkspaceId || 'general', active_path: demoStore.activeWorkspacePath || '', demo: true };
+    },
+    async addWorkspace(path, name = '') {
+      await sleep(50);
+      const id = `ws-${Date.now()}`;
+      const label = name || String(path).split(/[\\/]/).filter(Boolean).pop() || path;
+      const list = demoStore.workspaces || [{ id: 'general', name: 'General', path: '', builtin: true, chat_count: 0 }];
+      list.push({ id, name: label, path, builtin: false, exists: true, chat_count: 0 });
+      demoStore.workspaces = list;
+      demoStore.activeWorkspaceId = id;
+      demoStore.activeWorkspacePath = path;
+      return { ok: true, workspaces: list, active_id: id, active_path: path, demo: true };
+    },
+    async switchWorkspace(id) {
+      await sleep(40);
+      const list = demoStore.workspaces || [{ id: 'general', name: 'General', path: '', builtin: true, chat_count: 0 }];
+      const found = list.find((w) => w.id === id) || list[0];
+      demoStore.activeWorkspaceId = found.id;
+      demoStore.activeWorkspacePath = found.path || '';
+      return { ok: true, workspaces: list, active_id: found.id, active_path: found.path || '', demo: true };
+    },
+    async removeWorkspace(id) {
+      await sleep(40);
+      const list = (demoStore.workspaces || []).filter((w) => w.id !== id || w.builtin);
+      demoStore.workspaces = list;
+      demoStore.activeWorkspaceId = 'general';
+      demoStore.activeWorkspacePath = '';
+      return { ok: true, workspaces: list, active_id: 'general', active_path: '', demo: true };
+    },
     async openNativeAgent() { await sleep(160); return { ok: true, demo: true, url: 'https://arena.ai/agent' }; },
+    async googleStatus() { await sleep(60); return { ok: true, desktop: false, signed_in: false, accounts: [], prefs: { hl: 'en', show_window: false, keep_citations: true, supervisor: false, supervisor_steps: 6 }, demo: true }; },
+    async googleVerify() { await sleep(80); return { ok: true, signed_in: false, email: '', name: '', accounts: [], demo: true }; },
+    async googleImport() { await sleep(80); return { ok: true, imported: 0, updated: 0, chats: [], demo: true }; },
+    async googleThreads() { await sleep(80); return { ok: true, threads: [], demo: true }; },
+    async googleThreadOpen() { await sleep(80); return { ok: true, demo: true }; },
+    async googleThreadRead() { await sleep(80); return { ok: true, messages: [], demo: true }; },
+    async googleSignIn() { await sleep(80); return { ok: true, pending: false, demo: true }; },
+    async googleOpen() { await sleep(80); return { ok: true, state: { attached: false, ready: false, open: false }, demo: true }; },
+    async saveGooglePrefs(body = {}) { await sleep(60); return { ok: true, prefs: body, demo: true }; },
+    async addGoogleCookies() { await sleep(80); return { ok: false, error: 'Google cookies are unavailable in demo mode.', demo: true }; },
+    async useGoogleAccount() { await sleep(80); return { ok: true, demo: true }; },
+    async removeGoogleAccount() { await sleep(80); return { ok: true, demo: true }; },
     async saveMedia() { await sleep(180); return { ok: true, path: `${demoStore.workspace}\\demo-media.png`, demo: true }; },
     async getDoctor() {
       await sleep(220);
@@ -1995,6 +2046,12 @@ You can start with a more structured option: one script, short captions, and a c
     memoryData: null,
     updateInfo: null,
     appSettings: null,
+    workspaces: [{ id: 'general', name: 'General', path: '', builtin: true, chat_count: 0 }],
+    activeWorkspaceId: 'general',
+    activeWorkspacePath: '',
+    closedTabIds: new Set(),
+    openTabMeta: {},
+    newTabMenuOpen: false,
     pendingQuestions: [],
     nativeSubagents: [],
     nativeSubagentsChat: null,
@@ -2287,6 +2344,7 @@ You can start with a more structured option: one script, short captions, and a c
       source: raw.source === 'arena' ? 'arena'
         : raw.source === 'google' ? 'google'
         : 'local',
+      workspace: typeof raw.workspace === 'string' ? raw.workspace : '',
       eval_id: typeof raw.eval_id === 'string' ? raw.eval_id : null,
       parent_id: raw.parent_id ? String(raw.parent_id) : null,
       children: Array.isArray(raw.children) ? raw.children.map((kid) => normalizeChat(kid)).filter(Boolean) : [],
@@ -3229,7 +3287,7 @@ You can start with a more structured option: one script, short captions, and a c
       const serverIds = new Set(serverChats.map((chat) => chat.id));
       const keptLocal = (state.chats || []).filter((chat) =>
         !serverIds.has(chat.id)
-        && (state.generations.has(chat.id) || chat.id === String(state.activeChatId)));
+        && (state.generations.has(chat.id) || chat.id === String(state.activeChatId) || Boolean(state.openTabMeta[chat.id])));
       state.chats = [...keptLocal, ...serverChats].sort((a, b) => {
         if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
         const left = new Date(a.updated_at || a.created_at || 0).getTime();
@@ -3592,8 +3650,8 @@ You can start with a more structured option: one script, short captions, and a c
     }
   }
 
-  async function googleSignIn() {
-    if (googleSignedIn()) {
+  async function googleSignIn(force = false) {
+    if (!force && googleSignedIn()) {
       updateAccountUI();
       return;
     }
@@ -3674,7 +3732,7 @@ You can start with a more structured option: one script, short captions, and a c
     }
   }
 
-  function setTrack(track, { silent = false } = {}) {
+  function setTrack(track, { silent = false, keepActive = false } = {}) {
     const next = track === 'google' ? 'google' : 'arena';
     const changed = state.track !== next;
     state.track = next;
@@ -3687,7 +3745,7 @@ You can start with a more structured option: one script, short captions, and a c
       state.mode = 'direct';
       state.selectionTouched = true;
     }
-    if (changed) {
+    if (changed && !keepActive) {
       const active = state.chats.find((chat) => String(chat.id) === String(state.activeChatId));
       if (active && chatTrack(active) !== next) {
         // Never show an Arena dialogue inside Google AI mode (or back).
@@ -3739,7 +3797,7 @@ You can start with a more structured option: one script, short captions, and a c
   }
 
   function filteredChats() {
-    return state.chats.filter((chat) => chatTrack(chat) === state.track && chatMatchesFilter(chat));
+    return state.chats.filter((chat) => !chat.parent_id && chatMatchesFilter(chat));
   }
 
   function dedupedArenaChats() {
@@ -3784,8 +3842,13 @@ You can start with a more structured option: one script, short captions, and a c
     const unread = !running && state.unreadDone.has(String(chat.id));
     const row = el('div', { class: `chat-row${active ? ' is-active' : ''}${running ? ' is-running' : ''}${unread ? ' is-unread' : ''}`, role: 'listitem' });
     const metaBits = [];
-    if (chat.source === 'google') metaBits.push(chat.imported ? 'Google AI mode · imported' : 'Google AI mode');
-    else if (chat.mode) metaBits.push(modeMeta(chat.mode).label);
+    if (chat.source === 'google') metaBits.push(chat.imported ? 'Google AI · imported' : 'Google AI');
+    else metaBits.push(chat.mode ? `Arena · ${modeMeta(chat.mode).label}` : 'Arena');
+    const cws = chatWorkspacePath(chat);
+    if (cws) {
+      const wsName = state.workspaces.find((w) => w.path === cws)?.name || cws.split(/[\\/]/).filter(Boolean).pop();
+      if (wsName) metaBits.push(wsName);
+    }
     metaBits.push(relativeTime(chat.updated_at || chat.created_at));
     const openButton = el('button', {
       class: 'chat-row-main chat-row-open',
@@ -4017,81 +4080,288 @@ You can start with a more structured option: one script, short captions, and a c
   }
 
   function setSidebarCollapsed(collapsed) {
-    // The old sidebar is gone: this now means "the chat rail is folded", so
-    // the toolbar shows one filename-style title instead of the strip.
     state.sidebarCollapsed = Boolean(collapsed);
-    els.app?.classList.toggle('rail-collapsed', state.sidebarCollapsed);
+    els.app?.classList.toggle('ws-sidebar-collapsed', state.sidebarCollapsed);
     els.collapseSidebar?.setAttribute('aria-expanded', String(!state.sidebarCollapsed));
-    els.collapseSidebar?.setAttribute('aria-label', state.sidebarCollapsed ? "Unfold the chats" : "Fold the chats");
-    if (els.collapseSidebar) els.collapseSidebar.title = state.sidebarCollapsed ? "Unfold the chats" : "Fold the chats";
-    els.chatsDrawerButton?.setAttribute('aria-expanded', String(!state.sidebarCollapsed));
+    els.collapseSidebar?.setAttribute('aria-label', state.sidebarCollapsed ? "Show workspaces sidebar" : "Hide workspaces sidebar");
+    if (els.collapseSidebar) els.collapseSidebar.title = state.sidebarCollapsed ? "Show workspaces sidebar" : "Hide workspaces sidebar";
     try { localStorage.setItem('arenaPersonal.sidebarCollapsed.v4', state.sidebarCollapsed ? '1' : '0'); } catch { /* storage unavailable */ }
+    renderWorkspaceSidebar();
     renderRailChats();
   }
 
   /* ---------------------------------------------------------------------- */
-  /* Toolbar chat rail                                                     */
+  /* Multi-Workspace Sidebar + IDE-style Workspace Tab Bar                  */
   /* ---------------------------------------------------------------------- */
-  const RAIL_MAX_PER_SIDE = 12;
-
   function shortChatTitle(text) {
-    const value = String(text || 'Chat').trim();
-    return value.length > 16 ? `${value.slice(0, 15)}…` : value;
+    const value = String(text || 'New tab').trim();
+    return value.length > 22 ? `${value.slice(0, 21)}\u2026` : value;
   }
 
-  function railChatButton(chat, repeated = false) {
+  function chatWorkspacePath(chat) {
+    if (!chat) return '';
+    const meta = state.openTabMeta[String(chat.id)];
+    if (meta && typeof meta.workspace === 'string') return meta.workspace;
+    return String(chat.workspace || chat.raw?.workspace || '');
+  }
+
+  function chatModeTrack(chat) {
+    if (!chat) return 'arena';
+    const meta = state.openTabMeta[String(chat.id)];
+    if (meta && (meta.track === 'google' || meta.track === 'arena')) return meta.track;
+    return chat.source === 'google' ? 'google' : 'arena';
+  }
+
+  function workspaceTabs(wsPath = state.activeWorkspacePath) {
+    const target = String(wsPath || '');
+    const seen = new Set();
+    const list = [];
+    for (const chat of state.chats) {
+      if (!chat || chat.parent_id) continue;
+      const cid = String(chat.id);
+      if (seen.has(cid) || state.closedTabIds.has(cid)) continue;
+      if (chatWorkspacePath(chat) !== target) continue;
+      seen.add(cid);
+      list.push(chat);
+    }
+    return list;
+  }
+
+  function setNewTabMenuOpen(open) {
+    state.newTabMenuOpen = Boolean(open);
+    if (els.newTabMenu) els.newTabMenu.hidden = !state.newTabMenuOpen;
+    els.railNewChat?.setAttribute('aria-expanded', String(state.newTabMenuOpen));
+  }
+
+  function closeWorkspaceTab(chatId) {
+    const cid = String(chatId || '');
+    if (!cid) return;
+    state.closedTabIds.add(cid);
+    const remaining = workspaceTabs(state.activeWorkspacePath);
+    if (String(state.activeChatId) === cid) {
+      if (remaining.length) {
+        void openChat(remaining[0].id);
+      } else {
+        state.activeChatId = null;
+        state.activeChatEvalId = null;
+        state.messages = [];
+        state.artifacts = [];
+        state.view = 'welcome';
+        renderChatArea();
+        setView('welcome');
+      }
+    }
+    renderRailChats();
+    renderWorkspaceSidebar();
+  }
+
+  function wsTabButton(chat) {
+    const cid = String(chat.id);
+    const active = cid === String(state.activeChatId);
+    const mode = chatModeTrack(chat);
+    const busy = chatIsGenerating(cid);
+    const closeBtn = el('span', {
+      class: 'ws-tab-close',
+      role: 'button',
+      tabindex: '-1',
+      title: 'Close tab',
+      'aria-label': `Close ${chat.title || 'tab'}`,
+      onclick: (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        closeWorkspaceTab(cid);
+      }
+    }, iconEl('x'));
+    const children = [
+      el('span', {
+        class: `ws-mode-badge ${mode === 'google' ? 'is-google' : 'is-arena'}`,
+        'aria-hidden': 'true',
+        text: mode === 'google' ? 'G' : '\u2726'
+      }),
+      el('span', { class: 'ws-tab-title', text: shortChatTitle(chat.title) })
+    ];
+    if (busy) children.push(el('span', { class: 'ws-tab-busy', 'aria-label': 'Generating' }));
+    children.push(closeBtn);
     return el('button', {
-      class: `rail-chip${String(chat.id) === String(state.activeChatId) ? ' is-active' : ''}${repeated ? ' is-repeat' : ''}`,
-      type: 'button', title: chat.title || 'Chat',
-      onclick: (event) => { event.preventDefault(); void openChat(chat.id); }
-    }, el('span', { text: shortChatTitle(chat.title) }));
+      class: `ws-tab${active ? ' is-active' : ''}`,
+      type: 'button',
+      role: 'tab',
+      'aria-selected': String(active),
+      title: `${chat.title || 'Tab'} (${mode === 'google' ? 'Google AI mode' : 'Arena mode'})`,
+      onclick: (event) => {
+        event.preventDefault();
+        setNewTabMenuOpen(false);
+        void openChat(cid);
+      }
+    }, ...children);
   }
 
   function renderRailChats() {
-    const left = els.railLeft;
-    const right = els.railRight;
-    if (!left || !right) return;
-    clear(left);
-    clear(right);
-    if (state.sidebarCollapsed) return;
+    const host = els.wsTabsList;
+    if (!host) return;
+    clear(host);
+    const tabs = workspaceTabs(state.activeWorkspacePath);
+    tabs.forEach((chat) => host.appendChild(wsTabButton(chat)));
+    renderWorkspaceSidebar();
+  }
 
-    const chats = state.chats.filter((chat) => chatTrack(chat) === state.track);
-    if (!chats.length) return;
-
-    // The row is never half empty: a short history repeats itself until both
-    // sides are filled. The count comes from the room actually available, so
-    // wide windows get a full conveyor and narrow ones stay clean.
-    const chipWidth = 150;                       // chip + gap, roughly
-    const freeEachSide = Math.max(2, Math.round(((els.railStrip?.clientWidth || 900) - 240) / 2 / chipWidth));
-    const wanted = freeEachSide * 2;
-    // A pool built by repeating the chat list: `while (pool.length < wanted)
-    // pool.push(...chats)` never ends when the list is empty, which is exactly
-    // what an empty or fully filtered history gives — and that froze the whole
-    // interface the moment the chat list was opened. Repeats are computed
-    // without a loop that can miss its exit condition.
-    const pool = [];
-    if (chats.length) {
-      while (pool.length < wanted) pool.push(...chats);
+  function renderWorkspaceSidebar() {
+    const host = els.workspaceList;
+    if (!host) return;
+    clear(host);
+    const list = Array.isArray(state.workspaces) && state.workspaces.length
+      ? state.workspaces
+      : [{ id: 'general', name: 'General', path: '', builtin: true, chat_count: 0 }];
+    list.forEach((ws) => {
+      const active = ws.id === state.activeWorkspaceId;
+      const count = workspaceTabs(ws.path || '').length;
+      const parts = [
+        el('span', { class: 'ws-item-icon', 'aria-hidden': 'true' },
+          iconEl(ws.builtin ? 'globe' : 'folder')),
+        el('span', { class: 'ws-item-copy' },
+          el('span', { class: 'ws-item-name', text: ws.name || 'Workspace' }),
+          ws.path ? el('span', { class: 'ws-item-path', text: ws.path }) : null),
+        count > 0 ? el('span', { class: 'ws-item-count', text: String(count) }) : null
+      ];
+      if (!ws.builtin) {
+        parts.push(el('span', {
+          class: 'ws-item-remove',
+          role: 'button',
+          tabindex: '-1',
+          title: 'Remove workspace from sidebar',
+          'aria-label': `Remove ${ws.name}`,
+          onclick: (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            void removeWorkspaceById(ws.id);
+          }
+        }, iconEl('x')));
+      }
+      host.appendChild(el('button', {
+        class: `ws-item${active ? ' is-active' : ''}`,
+        type: 'button',
+        role: 'listitem',
+        'aria-current': active ? 'true' : 'false',
+        title: ws.path || 'General (no project folder)',
+        onclick: () => { void switchWorkspace(ws.id); }
+      }, ...parts));
+    });
+    const activeWs = list.find((w) => w.id === state.activeWorkspaceId);
+    if (els.railBrandName) {
+      els.railBrandName.textContent = activeWs && !activeWs.builtin
+        ? `Arena Desktop \u00b7 ${activeWs.name}`
+        : 'Arena Desktop';
     }
-    const visible = pool.slice(0, wanted);
-    if (!visible.length) return;
+  }
 
-    // Newest next to the button, older ones outward: build each side from the
-    // inside out, then reverse the left one so it mirrors the movement.
-    const leftChips = [];
-    const rightChips = [];
-    visible.forEach((chat, index) => {
-      const clone = index >= chats.length;      // a repeat, not the real chat
-      (index % 2 === 1 ? leftChips : rightChips).push(railChatButton(chat, clone));
-    });
-    leftChips.reverse().forEach((chip) => left.appendChild(chip));
-    rightChips.forEach((chip) => right.appendChild(chip));
+  function applyWorkspacesPayload(data) {
+    if (!data || !Array.isArray(data.workspaces)) return;
+    state.workspaces = data.workspaces;
+    state.activeWorkspaceId = data.active_id || 'general';
+    state.activeWorkspacePath = String(data.active_path || '');
+    if (state.activeWorkspacePath) {
+      state.workspace = state.activeWorkspacePath;
+      state.workspaceChosen = true;
+    } else {
+      state.workspaceChosen = false;
+    }
+    state.memoryData = null;
+    renderWorkspaceSidebar();
+    renderRailChats();
+  }
 
-    // The strip drifts outward, like the reference: keep the newest nearest.
-    requestAnimationFrame(() => {
-      if (left) left.scrollLeft = left.scrollWidth;
-      if (right) right.scrollLeft = 0;
-    });
+  async function loadWorkspaces() {
+    try {
+      const data = await API.getWorkspaces();
+      applyWorkspacesPayload(data);
+    } catch {
+      renderWorkspaceSidebar();
+    }
+  }
+
+  async function switchWorkspace(wsId) {
+    if (!wsId) return;
+    setNewTabMenuOpen(false);
+    try {
+      const data = await API.switchWorkspace(wsId);
+      applyWorkspacesPayload(data);
+      state.workspacePanelRoot = '';
+      resetWorkspaceTree();
+      renderWorkspaceTreePanel();
+      if (state.workspacePanelOpen) void loadWorkspaceTree('.', { force: true });
+      const tabs = workspaceTabs(state.activeWorkspacePath);
+      if (tabs.length) {
+        await openChat(tabs[0].id);
+      } else {
+        state.activeChatId = null;
+        state.activeChatEvalId = null;
+        state.messages = [];
+        state.artifacts = [];
+        state.view = 'welcome';
+        renderChatArea();
+        setView('welcome');
+        updateComposerState();
+      }
+    } catch (error) {
+      toast(errorMessage(error), 'error', 'Workspace');
+    }
+  }
+
+  async function addWorkspaceFromPicker() {
+    if (window.pywebview?.api?.choose_folder) {
+      try {
+        const chosen = await window.pywebview.api.choose_folder();
+        const path = typeof chosen === 'string' ? chosen : (chosen?.path ?? chosen?.folder ?? chosen?.directory ?? '');
+        if (!path) return null;
+        const data = await API.addWorkspace(path);
+        applyWorkspacesPayload(data);
+        state.workspacePanelRoot = '';
+        resetWorkspaceTree();
+        renderWorkspaceTreePanel();
+        if (state.workspacePanelOpen) void loadWorkspaceTree('.', { force: true });
+        toast(state.activeWorkspacePath, 'success', 'Workspace opened');
+        const tabs = workspaceTabs(state.activeWorkspacePath);
+        if (tabs.length) {
+          await openChat(tabs[0].id);
+        } else {
+          state.activeChatId = null;
+          state.messages = [];
+          state.view = 'welcome';
+          renderChatArea();
+          setView('welcome');
+        }
+        return state.activeWorkspacePath;
+      } catch (error) {
+        toast(errorMessage(error), 'error', 'Workspace not opened');
+        return null;
+      }
+    }
+    openSettings('workspace');
+    toast('Enter a folder path in Settings \u2192 Folder to add a workspace.', 'info', 'Open workspace');
+    return null;
+  }
+
+  async function removeWorkspaceById(wsId) {
+    try {
+      const data = await API.removeWorkspace(wsId);
+      applyWorkspacesPayload(data);
+      state.workspacePanelRoot = '';
+      resetWorkspaceTree();
+      renderWorkspaceTreePanel();
+      if (state.workspacePanelOpen) void loadWorkspaceTree('.', { force: true });
+      const tabs = workspaceTabs(state.activeWorkspacePath);
+      if (tabs.length) {
+        await openChat(tabs[0].id);
+      } else {
+        state.activeChatId = null;
+        state.messages = [];
+        state.view = 'welcome';
+        renderChatArea();
+        setView('welcome');
+      }
+    } catch (error) {
+      toast(errorMessage(error), 'error', 'Workspace');
+    }
   }
 
   function setChatsDrawerOpen(open) {
@@ -4108,22 +4378,16 @@ You can start with a more structured option: one script, short captions, and a c
     }
   }
 
-  // The drawer hangs from the chats icon: its left edge and its little arrow
-  // are measured from that button, whatever else moves in the bar.
   function placeChatsDrawer() {
-    const button = els.chatsDrawerButton;
     const drawer = els.chatsDrawer;
-    const cluster = els.chatsDrawer?.parentElement?.parentElement;
-    if (!button || !drawer || !cluster) return;
-    const b = button.getBoundingClientRect();
-    const c = cluster.getBoundingClientRect();
+    if (!drawer) return;
+    const sidebar = els.workspaceSidebar;
+    const sbRect = sidebar && !state.sidebarCollapsed ? sidebar.getBoundingClientRect() : null;
     const width = Math.min(360, window.innerWidth - 28);
-    // Keep the list on screen even when the icon sits near the right edge.
-    let left = b.left - c.left;
-    const maxLeft = window.innerWidth - c.left - width - 14;
-    left = Math.max(0, Math.min(left, maxLeft));
+    let left = sbRect && sbRect.width > 20 ? sbRect.right + 10 : 14;
+    const maxLeft = Math.max(14, window.innerWidth - width - 14);
+    left = Math.max(14, Math.min(left, maxLeft));
     drawer.style.setProperty('--drawer-left', `${Math.round(left)}px`);
-    drawer.style.setProperty('--drawer-caret', `${Math.round(b.width / 2 - 5)}px`);
   }
 
   function focusComposer() {
@@ -4153,15 +4417,10 @@ You can start with a more structured option: one script, short captions, and a c
     if (els.chatView) els.chatView.hidden = state.view !== 'chat';
     const mainArea = els.mainArea || document.querySelector('.main-area');
     if (mainArea) mainArea.classList.toggle('is-welcome', state.view === 'welcome');
-    // One composer, two homes: centered on the welcome screen (like
-    // arena.ai's home page), docked at the bottom inside a chat.
+    // Always keep the composer docked at the bottom of main-area with the same size.
     const shell = els.composerShell || document.querySelector('.composer-shell');
-    if (shell) {
-      if (state.view === 'welcome' && els.welcomeComposerSlot && shell.parentNode !== els.welcomeComposerSlot) {
-        els.welcomeComposerSlot.appendChild(shell);
-      } else if (state.view === 'chat' && mainArea && shell.parentNode !== mainArea) {
-        mainArea.appendChild(shell);
-      }
+    if (shell && mainArea && shell.parentNode !== mainArea) {
+      mainArea.appendChild(shell);
     }
     updateTopbarTitle();
     if (focus) {
@@ -5007,7 +5266,7 @@ You can start with a more structured option: one script, short captions, and a c
         // carries the button that opens the right place in one click.
         if (lane.errorAction === 'sign_in') {
           box.appendChild(el('button', { class: 'button button-small', type: 'button',
-            onclick: () => { void googleSignIn(); } },
+            onclick: () => { void googleSignIn(true); } },
             iconEl('login'), el('span', { text: 'Sign in to Google' })));
         } else if (lane.errorAction === 'open_window') {
           box.appendChild(el('button', { class: 'button button-small', type: 'button',
@@ -5114,7 +5373,7 @@ You can start with a more structured option: one script, short captions, and a c
       // with no way to sign in is what made the dead session feel endless.
       if (turn.errorAction === 'sign_in') {
         box.appendChild(el('button', { class: 'button button-small', type: 'button',
-          onclick: () => { void googleSignIn(); } },
+          onclick: () => { void googleSignIn(true); } },
           iconEl('login'), el('span', { text: 'Sign in to Google' })));
       } else if (turn.errorAction === 'open_window') {
         box.appendChild(el('button', { class: 'button button-small', type: 'button',
@@ -6742,18 +7001,15 @@ You can start with a more structured option: one script, short captions, and a c
         els.accountDot.classList.toggle('is-error', Boolean(g.expired)
           || Boolean(state.google?.window?.error));
       }
+      const googleDone = googleSignedIn();
+      const arenaDone = Boolean(state.authenticated || state.me?.signed_in);
       if (els.accountButton) {
         els.accountButton.setAttribute('aria-label', `Google profile: ${name}. ${sub}. Open accounts`);
         els.accountButton.setAttribute('aria-haspopup', 'menu');
-        const googleDone = googleSignedIn();
-        const arenaDone = Boolean(state.authenticated || state.me?.signed_in);
         const checkEl = els.accountCheck || document.getElementById('accountCheck');
         els.accountButton.classList.toggle('is-signed-in', googleDone);
         els.accountButton.classList.toggle('is-expired', !googleDone && g.expired);
-        els.accountButton.hidden = Boolean(googleDone && !arenaDone);
-        if (googleDone && els.accountPopover) {
-          els.accountPopover.hidden = true;
-        }
+        els.accountButton.hidden = false;
         if (checkEl) {
           checkEl.hidden = !googleDone;
         }
@@ -7059,18 +7315,40 @@ You can start with a more structured option: one script, short captions, and a c
     if (state.creatingChat) return;
     closePopover(false);
     closeMobileSidebar();
+    setNewTabMenuOpen(false);
     if (String(state.activeChatId) !== String(chatId)) stashActiveTurns();
     saveComposerDraft();
     markChatSeen(chatId);
+    state.closedTabIds.delete(String(chatId));
     const known = state.chats.find((chat) => chat.id === String(chatId));
+    const tabTrack = chatModeTrack(known);
+    if (known && state.track !== tabTrack) {
+      setTrack(tabTrack, { silent: true, keepActive: true });
+    }
     state.activeChatId = String(chatId);
     state.activeChatEvalId = known?.eval_id || null;
-    state.activeChatSource = known?.source || 'local';
+    state.activeChatSource = known?.source || (tabTrack === 'google' ? 'google' : 'local');
     restoreComposerDraft();
     syncGenerationState();
     const historyToken = (state.historyRequest || 0) + 1;
     state.historyRequest = historyToken;
     state.activeChatTitle = known?.title || (retry ? state.activeChatTitle : "Conversation");
+    // Freshly created unsent tab: stay open cleanly without hitting 404 on /api/chats/<id>.
+    if (known && known.unsent && !chatIsGenerating(chatId)) {
+      state.messages = state.chatTurns[String(chatId)] || [];
+      state.artifacts = [];
+      state.challenge = null;
+      state.historyError = null;
+      state.historyLoading = false;
+      state.view = 'chat';
+      renderChats();
+      renderChatHead();
+      renderChallenge();
+      renderMessages({ preserveScroll: false });
+      setView('chat');
+      updateComposerState();
+      return;
+    }
     state.messages = [];
     state.artifacts = [];
     state.challenge = null;
@@ -7173,41 +7451,61 @@ You can start with a more structured option: one script, short captions, and a c
     }
   }
 
-  async function createNewChat({ focus = true } = {}) {
+  async function createNewChat({ focus = true, track = null } = {}) {
     if (state.creatingChat) return null;
     if (state.serverError || state.networkOffline) {
-      toast("Local server unavailable. New chat not created.", 'error', "No connection");
+      toast("Local server unavailable. New tab not created.", 'error', "No connection");
       return null;
     }
+    const tabTrack = track === 'google' ? 'google' : track === 'arena' ? 'arena' : (state.track === 'google' ? 'google' : 'arena');
+    setNewTabMenuOpen(false);
     state.creatingChat = true;
     els.newChatBtn?.classList.add('is-spinning');
     els.newChatBtn?.setAttribute('aria-busy', 'true');
     try {
-      const raw = await API.newChat();
+      const wsPath = state.activeWorkspacePath || '';
+      const raw = await API.newChat({ track: tabTrack, workspace: wsPath });
       const chatId = raw?.chat_id ?? raw?.id ?? raw?.chat?.id;
-      if (!chatId) throw new ApiError("The server did not return the new chat ID.");
+      if (!chatId) throw new ApiError("The server did not return the new tab ID.");
       stashActiveTurns();
       saveComposerDraft();
-      state.activeChatId = String(chatId);
+      const cid = String(chatId);
+      state.closedTabIds.delete(cid);
+      state.openTabMeta[cid] = { track: tabTrack, workspace: wsPath };
+      setTrack(tabTrack, { silent: true, keepActive: true });
+      state.activeChatId = cid;
       state.activeChatEvalId = null;
-      state.activeChatSource = 'local';
+      state.activeChatSource = tabTrack === 'google' ? 'google' : 'local';
       restoreComposerDraft();
-      state.activeChatTitle = String(raw?.title ?? raw?.chat?.title ?? "New chat");
+      const defaultTitle = tabTrack === 'google' ? 'New Google tab' : 'New Arena tab';
+      state.activeChatTitle = String(raw?.title ?? raw?.chat?.title ?? defaultTitle);
       state.messages = [];
       state.artifacts = [];
       state.historyError = null;
       state.historyLoading = false;
       state.challenge = null;
       state.view = 'chat';
+      if (!state.chats.some((item) => String(item.id) === cid)) {
+        state.chats.unshift({
+          id: cid,
+          title: state.activeChatTitle,
+          updated_at: new Date().toISOString(),
+          mode: tabTrack === 'google' ? 'direct' : state.mode,
+          modality: tabTrack === 'google' ? 'text' : state.modality,
+          source: tabTrack === 'google' ? 'google' : 'local',
+          workspace: wsPath,
+          unsent: true
+        });
+      }
       renderChatArea();
+      renderChats();
       syncGenerationState();
       closeMobileSidebar();
-      void loadChats({ silent: true });
       if (focus) window.setTimeout(focusComposer, 20);
-      announce("New chat created.");
+      announce(tabTrack === 'google' ? "New Google AI tab created." : "New Arena tab created.");
       return state.activeChatId;
     } catch (error) {
-      toast(errorMessage(error), 'error', "New chat not created");
+      toast(errorMessage(error), 'error', "New tab not created");
       return null;
     } finally {
       state.creatingChat = false;
@@ -8586,10 +8884,13 @@ You can start with a more structured option: one script, short captions, and a c
 
       let chatId = state.activeChatId;
       if (!chatId) {
-        const raw = await API.newChat();
+        const wsPath = state.activeWorkspacePath || '';
+        const raw = await API.newChat({ track: state.track, workspace: wsPath });
         chatId = raw?.chat_id ?? raw?.id ?? raw?.chat?.id;
         if (!chatId) throw new ApiError("The server did not return a chat ID.");
         chatId = String(chatId);
+        state.closedTabIds.delete(chatId);
+        state.openTabMeta[chatId] = { track: state.track, workspace: wsPath };
         state.activeChatId = chatId;
         state.activeChatTitle = String(raw?.title ?? "New chat");
         state.messages = [];
@@ -8604,7 +8905,7 @@ You can start with a more structured option: one script, short captions, and a c
       // The visible composer selection travels with the request itself, so a
       // late status/chat response can never reroute this send to another mode.
       const body = { message: text, chat_id: chatId, mode: state.mode, modality: state.modality,
-                     track: state.track };
+                     track: state.track, workspace: state.activeWorkspacePath || '' };
       if (state.track === 'google') { body.mode = 'direct'; body.modality = 'text'; }
       try { body.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { /* optional */ }
       if (state.mode === 'agent') {
@@ -8637,13 +8938,23 @@ You can start with a more structured option: one script, short captions, and a c
       if (sentAttachments.length) body.attachments = sentAttachments;
 
       const turn = makeGenerationTurn(text, chatId, sentAttachments);
-      if (!state.activeChatTitle || state.activeChatTitle === "New chat") {
+      const isDefaultTitle = !state.activeChatTitle
+        || state.activeChatTitle === "New chat"
+        || state.activeChatTitle === "New Arena tab"
+        || state.activeChatTitle === "New Google tab";
+      if (isDefaultTitle) {
         state.activeChatTitle = truncate(text, 52);
         const chat = state.chats.find((item) => item.id === String(chatId));
-        if (chat) chat.title = state.activeChatTitle;
-        else {
-          state.chats.unshift({ id: String(chatId), title: state.activeChatTitle, updated_at: new Date().toISOString(), mode: state.mode, modality: state.modality, source: state.track === 'google' ? 'google' : 'local' });
+        if (chat) {
+          chat.title = state.activeChatTitle;
+          chat.unsent = false;
+          chat.workspace = state.activeWorkspacePath || chat.workspace || '';
+        } else {
+          state.chats.unshift({ id: String(chatId), title: state.activeChatTitle, updated_at: new Date().toISOString(), mode: state.mode, modality: state.modality, source: state.track === 'google' ? 'google' : 'local', workspace: state.activeWorkspacePath || '' });
         }
+      } else {
+        const chat = state.chats.find((item) => item.id === String(chatId));
+        if (chat) chat.unsent = false;
       }
       state.messages.push(turn);
       state.artifacts = state.artifacts.filter((artifact) => artifact.chatId !== null || artifact.chatId === chatId);
@@ -9983,6 +10294,7 @@ You can start with a more structured option: one script, short captions, and a c
     resetWorkspaceTree();
     updateComposerState();
     renderWorkspaceTreePanel();
+    void loadWorkspaces();
     if (state.workspacePanelOpen) void loadWorkspaceTree('.', { force: true });
     return state.workspace;
   }
@@ -10255,7 +10567,7 @@ You can start with a more structured option: one script, short captions, and a c
       // that says so and signs in again, the way arena.ai shows its own.
       ? el('button', {
         class: 'account-expired-card', type: 'button', 'data-popover-action': 'google-expired',
-        onclick: () => { closePopover(false); void googleSignIn(); }
+        onclick: () => { closePopover(false); void googleSignIn(true); }
       },
         el('span', { class: 'account-avatar is-google is-expired', 'aria-hidden': 'true', text: '?' }),
         el('span', { class: 'account-menu-copy' },
@@ -10291,7 +10603,7 @@ You can start with a more structured option: one script, short captions, and a c
             closePopover(false);
             toast('That saved session is no longer valid. Sign in to Google again, or paste a fresh Cookie header.',
               'warning', 'Google session expired');
-            void googleSignIn();
+            void googleSignIn(true);
           }
         },
           el('span', { class: 'account-avatar is-google is-expired', 'aria-hidden': 'true', text: '?' }),
@@ -10330,7 +10642,7 @@ You can start with a more structured option: one script, short captions, and a c
     }, iconEl('external'), el('span', { text: 'Open Google window' })));
     content.appendChild(el('button', {
       class: 'account-menu-action', type: 'button', 'data-popover-action': 'google-add-window',
-      onclick: () => { closePopover(false); void googleSignIn(); }
+      onclick: () => { closePopover(false); void googleSignIn(true); }
     }, iconEl('login'), el('span', { text: 'Sign-in window' })));
     content.appendChild(el('button', {
       class: 'account-menu-action', type: 'button', 'data-popover-action': 'google-add-cookies',
@@ -13644,6 +13956,14 @@ You can start with a more structured option: one script, short captions, and a c
     els.chatsDrawerButton = $('#chatsDrawerButton');
     els.chatsDrawerClose = $('#chatsDrawerClose');
     els.railCenter = $('#railCenter');
+    els.workspaceSidebar = $('#workspaceSidebar');
+    els.workspaceList = $('#workspaceList');
+    els.addWorkspaceBtn = $('#addWorkspaceBtn');
+    els.addWorkspaceFooterBtn = $('#addWorkspaceFooterBtn');
+    els.wsTabsScroll = $('#wsTabsScroll');
+    els.wsTabsList = $('#wsTabsList');
+    els.newTabWrap = $('#newTabWrap');
+    els.newTabMenu = $('#newTabMenu');
     els.railStrip = $('#railStrip');
     els.railLeft = $('#railLeft');
     els.railRight = $('#railRight');
@@ -13653,7 +13973,7 @@ You can start with a more structured option: one script, short captions, and a c
     els.workspaceTopButton = $('#workspaceArrowTop');
     els.collapseSidebar = $('#collapseSidebar');
     els.newChatBtn = $('#newChatBtn');
-    els.navNewChat = $('#navNewChat') || $('#railNewChat');
+    els.navNewChat = $('#navNewChat');
     els.navArenaMode = $('#navArenaMode');
     els.navGoogleMode = $('#navGoogleMode');
     els.navSeeMore = $('#navSeeMore');
@@ -13841,19 +14161,12 @@ You can start with a more structured option: one script, short captions, and a c
     els.newChatBtn?.addEventListener('click', () => { void createNewChat(); });
     els.navNewChat?.addEventListener('click', () => { void createNewChat(); });
     els.navArenaMode?.addEventListener('click', () => {
-      if (state.track !== 'arena') setTrack('arena');
-      if (state.mode !== 'direct') {
-        state.mode = 'direct';
-        state.selectionTouched = true;
-        Promise.resolve(API.setMode?.('direct')).catch(() => {});
-        updateComposerState();
-      }
-      void createNewChat();
+      setChatsDrawerOpen(false);
+      void createNewChat({ track: 'arena' });
     });
     els.navGoogleMode?.addEventListener('click', () => {
-      // In-app Google AI mode: its own theme, its own chats, no connectors.
-      if (state.track !== 'google') setTrack('google');
-      void createNewChat();
+      setChatsDrawerOpen(false);
+      void createNewChat({ track: 'google' });
       window.setTimeout(() => { void loadGoogleThreads({ silent: true }); }, 900);
     });
     els.navSeeMore?.addEventListener('click', () => {
@@ -13869,6 +14182,9 @@ You can start with a more structured option: one script, short captions, and a c
     // Click-away without an overlay: the list must stay fully clickable, which
     // a full-screen shield inside the toolbar got wrong.
     document.addEventListener('mousedown', (event) => {
+      if (state.newTabMenuOpen && !event.target.closest('#newTabWrap')) {
+        setNewTabMenuOpen(false);
+      }
       if (!state.chatsDrawerOpen) return;
       if (event.target.closest('#chatsDrawer') || event.target.closest('#chatsDrawerButton')) return;
       setChatsDrawerOpen(false);
@@ -13879,9 +14195,24 @@ You can start with a more structured option: one script, short captions, and a c
       if (event.target.closest('.chat-row-open')) setChatsDrawerOpen(false);
     });
     document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && state.newTabMenuOpen) setNewTabMenuOpen(false);
       if (event.key === 'Escape' && state.chatsDrawerOpen) setChatsDrawerOpen(false);
     });
-    els.railNewChat?.addEventListener('click', () => { void createNewChat(); setChatsDrawerOpen(false); });
+    els.railNewChat?.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setChatsDrawerOpen(false);
+      setNewTabMenuOpen(!state.newTabMenuOpen);
+    });
+    els.newTabMenu?.addEventListener('click', (event) => {
+      const btn = event.target.closest('[data-new-tab-track]');
+      if (!btn) return;
+      const chosenTrack = btn.getAttribute('data-new-tab-track') === 'google' ? 'google' : 'arena';
+      setNewTabMenuOpen(false);
+      void createNewChat({ track: chosenTrack });
+    });
+    els.addWorkspaceBtn?.addEventListener('click', () => { void addWorkspaceFromPicker(); });
+    els.addWorkspaceFooterBtn?.addEventListener('click', () => { void addWorkspaceFromPicker(); });
     els.mobileMenuBtn?.addEventListener('click', () => {
       if (els.app?.classList.contains('mobile-sidebar-open')) closeMobileSidebar();
       else openMobileSidebar();
@@ -14939,6 +15270,7 @@ async function startApp() {
     const status = await loadStatus({ initial: true });
     if (status) {
       await Promise.allSettled([
+        loadWorkspaces(),
         loadChats(),
         loadModels(state.modality, { quiet: true }),
         refreshWorkspacePanel(),
@@ -15004,9 +15336,10 @@ function googleSignedIn() {
   const acc = g.account || {};
   const live = g.live || {};
   const expired = Boolean(acc.expired || g.expired || g.session_expired);
+  if (g.has_cookie === false) return false;
   return Boolean(
     !expired &&
-    (live.signed_in || acc.signed_in || g.signed_in || googleTick)
+    (g.signed_in || live.signed_in || acc.signed_in || googleTick)
   );
 }
 

@@ -164,6 +164,8 @@ _wrapped_windows: "list" = []
 def _glib_idle_add(fn) -> bool:
     """Schedule ``fn`` on the active GTK/GLib main loop without blocking."""
     try:
+        import gi  # type: ignore
+        gi.require_version("Gtk", "3.0")
         from gi.repository import GLib, Gtk  # type: ignore
         if Gtk.main_level() <= 0:
             return False

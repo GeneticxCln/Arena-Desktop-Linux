@@ -212,3 +212,87 @@ def test_flagging_with_no_accounts_is_a_noop(tmp_path, monkeypatch):
     web._google_flag_account("", reason="dead session")
 
     assert path.read_text(encoding="utf-8") == before
+
+
+def test_show_still_calls_window_show_when_gtk_marked_shown_at_startup():
+    """On pywebview+GTK, hidden=True windows fire events.shown during startup
+    and immediately hide(); GoogleEngine.show() must still call window.show()."""
+    calls = []
+
+    class FakeShown:
+        def wait(self, timeout=None):
+            return True
+
+    class FakeEvents:
+        shown = FakeShown()
+
+    class FakeGtkNative:
+        def present(self):
+            calls.append("present")
+
+    class FakeWindow:
+        events = FakeEvents()
+        native = FakeGtkNative()
+
+        def show(self):
+            calls.append("show")
+
+        def restore(self):
+            calls.append("restore")
+
+    engine = GoogleEngine()
+    engine.window = FakeWindow()
+    assert engine.shown_once() is True
+
+    engine.show()
+    assert "show" in calls
+    assert "restore" in calls
+    assert "present" in calls
+
+    # Re-showing after hide must also call window.show() again.
+    calls.clear()
+    engine.visible = False
+    engine.show()
+    assert "show" in calls
+
+
+def test_linux_gtk_native_never_imports_dotnet_system(caplog):
+    class FakeGtkNative:
+        pass
+
+    class FakeWindow:
+        native = FakeGtkNative()
+
+        def evaluate_js(self, script):
+            return "https://accounts.google.com/signin"
+
+    engine = GoogleEngine()
+    engine.window = FakeWindow()
+    with caplog.at_level("INFO"):
+        assert engine._edge_manager() is None
+        assert engine._on_ui(lambda core: True) is None
+        assert engine.page_url() == "https://accounts.google.com/signin"
+    assert "No module named 'System'" not in caplog.text
+
+
+def test_cookie_pairs_from_pywebview_gtk_simplecookie_morsel():
+    """pywebview+GTK returns SimpleCookie({name: Morsel}); Morsel is a dict
+    subclass whose value lives on .value, not morsel.get('value')."""
+    from http.cookies import SimpleCookie
+
+    sc_google = SimpleCookie()
+    sc_google.load("SID=sid-gtk-123; Domain=.google.com; Path=/; HttpOnly")
+    sc_other = SimpleCookie()
+    sc_other.load("OTHER=nope; Domain=.example.com; Path=/")
+
+    assert GoogleEngine._cookie_pairs_from_item(sc_google) == [("SID", "sid-gtk-123")]
+    assert GoogleEngine._cookie_pairs_from_item(sc_other) == []
+
+    class FakeWindow:
+        def get_cookies(self):
+            return [sc_google, sc_other]
+
+    engine = GoogleEngine()
+    engine.window = FakeWindow()
+    engine.visible = False  # Must still export even when window is hidden on GTK
+    assert engine.cookies(tries=1) == "SID=sid-gtk-123"

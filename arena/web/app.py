@@ -381,7 +381,7 @@ def _diag_trace(fn):
 
 _API_TOKEN = secrets.token_urlsafe(32)
 
-APP_VERSION = "7.1.0"
+APP_VERSION = "7.2.0"
 
 # One tick of every polling loop that waits on something outside the request
 # (a question the person has to answer, a permission, a preview URL). It is a
@@ -896,21 +896,22 @@ def _summarize_tab_for_memory(data: dict) -> str:
         segments.append(f"Outcome: {outcome}")
     if not segments:
         return ""
-    header = f'- "{title}"' + (f" ({stamp})" if stamp else "")
+    mode_tag = "[Google]" if data.get("source") == "google" else "[Arena]"
+    header = f'- {mode_tag} "{title}"' + (f" ({stamp})" if stamp else "")
     return header + " \u2014 " + " | ".join(segments)
 
 
 def _cross_tab_memory(folder, exclude_chat_ids=None) -> tuple:
     """Compact live digest of recent sibling tabs in the same project folder.
 
-    Returns ``(text, count)``. Only top-level chats belonging to the current
-    account, track and workspace folder are included, sorted newest first.
+    Returns ``(text, count)``. Top-level chats (both Arena and Google tabs)
+    belonging to the current account and workspace folder are included,
+    sorted newest first.
     """
     target = _norm_workspace_path(folder)
     if not target or not CHATS_DIR.exists():
         return "", 0
     excluded = {str(cid) for cid in (exclude_chat_ids or ()) if cid}
-    track = _request_track()
     store = _accounts_load()
     current_id, first_id = store.get("current"), _first_account_id(store)
     candidates = []
@@ -934,9 +935,6 @@ def _cross_tab_memory(folder, exclude_chat_ids=None) -> tuple:
         if data.get("parent_id") or data.get("supervisor_of"):
             continue
         if not _chat_visible(data, current_id, first_id):
-            continue
-        is_google = (data.get("source") == "google")
-        if (track == "google") != is_google:
             continue
         if _norm_workspace_path(data.get("workspace")) != target:
             continue
@@ -2365,12 +2363,15 @@ def api_modality():
 @app.route("/api/new", methods=["POST"])
 def api_new_chat():
     global _conversation_history, _current_chat_id
+    data = request.get_json(silent=True) or {}
+    track = "google" if str(data.get("track") or "").lower() == "google" else "arena"
     client = get_client()
     client.eval_id = None
     client.sources.clear()
     _conversation_history = []
     _current_chat_id = str(uuid.uuid4())
-    return jsonify({"ok": True, "chat_id": _current_chat_id})
+    ws = _norm_workspace_path(data.get("workspace")) if data.get("workspace") else (_norm_workspace_path(_chosen_ws()) or "")
+    return jsonify({"ok": True, "chat_id": _current_chat_id, "track": track, "workspace": ws})
 
 
 @app.route("/api/history")
@@ -9811,11 +9812,22 @@ def api_google_status():
     # saved account in step, so the profile button tells the truth without the
     # person having to click anything.
     if live.get("signed_in"):
-        # Only a real confirmation clears the mark. A failed live check must
-        # not wipe evidence: the badge would blink back to "fine" by itself.
-        _google_flag_account("", ok=True)
-        box = _google_account_state()
-    signed_in = bool(live.get("signed_in")) and not box["session_expired"]
+        if not has_stored_cookie and engine is not None:
+            # Window is already signed in, but cookies were not yet exported
+            # into google_accounts.json (e.g. after upgrading or a missed read).
+            exported = ""
+            try:
+                exported = engine.cookies(tries=1)
+            except Exception:
+                LOG.exception("google status cookie auto-export failed")
+            if exported and _google_has_auth_cookie(exported):
+                _google_store_account(live, "window", cookie=exported)
+                has_stored_cookie = True
+        if has_stored_cookie:
+            # Only a real confirmation with usable cookies clears the mark.
+            _google_flag_account("", ok=True)
+            box = _google_account_state()
+    signed_in = bool(live.get("signed_in")) and has_stored_cookie and not box["session_expired"]
     return jsonify({
         "ok": True,
         "desktop": engine is not None,
@@ -9847,8 +9859,17 @@ def api_google_verify():
                                      "Google window to check."}), 400
         info = engine.verify()
     if info.get("signed_in"):
-        _google_store_account(info, "window" if info.get("source") == "window" else "cookies")
-        _google_flag_account("", ok=True)
+        cookie = ""
+        engine = _google_engine()
+        if (info.get("source") == "window" or not _google_current_cookie()) and engine is not None:
+            try:
+                cookie = engine.cookies(tries=2)
+            except Exception:
+                LOG.exception("google verify cookie export failed")
+        _google_store_account(info, "window" if info.get("source") == "window" else "cookies",
+                              cookie=cookie or None)
+        if cookie or _google_current_cookie():
+            _google_flag_account("", ok=True)
     elif _google_current_cookie():
         _google_flag_account("", reason="Google does not see a session for the saved cookies.")
     return jsonify({"ok": True, "signed_in": bool(info.get("signed_in")),
@@ -11125,30 +11146,115 @@ def api_workspace_preview(subpath):
     return resp
 
 
-@app.route("/api/workspace/set", methods=["POST"])
-def api_workspace_set():
-    payload = request.get_json(silent=True) or {}
-    track = "google" if str(payload.get("track") or "").lower() == "google" else "arena"
-    _set_track(track)
-    if payload.get("clear"):
-        if track == "google":
-            cfg = load_config()
-            scoped = dict(cfg.get("google_settings") or {})
-            scoped.pop("workspace_dir", None)
-            cfg["google_settings"] = scoped
-            save_config(cfg)
+def _sync_workspace_dir_for_all_tracks(cfg: dict, path_str: str) -> None:
+    """Keep Arena and Google tabs inside the active workspace on the same folder."""
+    scoped = dict(cfg.get("google_settings") or {})
+    if path_str:
+        cfg["workspace_dir"] = path_str
+        scoped["workspace_dir"] = path_str
+    else:
+        cfg.pop("workspace_dir", None)
+        scoped.pop("workspace_dir", None)
+    if scoped or "google_settings" in cfg:
+        cfg["google_settings"] = scoped
+
+
+def _workspace_id_for_path(path_str: str) -> str:
+    return "ws-" + hashlib.sha1(path_str.encode("utf-8")).hexdigest()[:10]
+
+
+def _workspaces_load() -> dict:
+    """Return normalized multi-workspace state from config.json.
+
+    Always includes the built-in ``general`` workspace (no project folder)
+    first, followed by any saved project folder workspaces. Migrates an
+    existing top-level ``workspace_dir`` automatically on first read.
+    """
+    cfg = load_config()
+    raw_list = cfg.get("workspaces")
+    items = []
+    seen_paths = set()
+    if isinstance(raw_list, list):
+        for entry in raw_list:
+            if not isinstance(entry, dict):
+                continue
+            path_str = _norm_workspace_path(entry.get("path"))
+            if not path_str or path_str in seen_paths:
+                continue
+            seen_paths.add(path_str)
+            ws_id = str(entry.get("id") or _workspace_id_for_path(path_str))
+            name = str(entry.get("name") or Path(path_str).name or path_str).strip()
+            items.append({"id": ws_id, "name": name, "path": path_str})
+    # Ensure the currently selected workspace_dir is represented in the list.
+    current_dir = _norm_workspace_path(cfg.get("workspace_dir"))
+    if current_dir and current_dir not in seen_paths:
+        items.append({
+            "id": _workspace_id_for_path(current_dir),
+            "name": Path(current_dir).name or current_dir,
+            "path": current_dir,
+        })
+        seen_paths.add(current_dir)
+    active_id = str(cfg.get("active_workspace_id") or "")
+    valid_ids = {"general"} | {it["id"] for it in items}
+    if active_id not in valid_ids:
+        if current_dir:
+            match = next((it["id"] for it in items if it["path"] == current_dir), "general")
+            active_id = match
         else:
-            cfg = load_config()
-            cfg.pop("workspace_dir", None)
-            save_config(cfg)
-        return jsonify({"ok": True, "workspace": str(_workspace_dir()), "cleared": True,
-                        "track": track})
-    raw = ((payload.get("path") or "")).strip().strip('"')
+            active_id = "general"
+    chats = _list_chats()
+    counts = {"general": 0}
+    for it in items:
+        counts[it["path"]] = 0
+    for chat in chats:
+        if chat.get("parent_id"):
+            continue
+        cws = _norm_workspace_path(chat.get("workspace"))
+        if cws and cws in counts:
+            counts[cws] += 1
+        elif not cws:
+            counts["general"] += 1
+    out = [{"id": "general", "name": "General", "path": "", "builtin": True,
+            "chat_count": counts["general"]}]
+    for it in items:
+        out.append({
+            "id": it["id"],
+            "name": it["name"],
+            "path": it["path"],
+            "builtin": False,
+            "exists": Path(it["path"]).is_dir(),
+            "chat_count": counts.get(it["path"], 0),
+        })
+    active = next((w for w in out if w["id"] == active_id), out[0])
+    return {
+        "workspaces": out,
+        "active_id": active["id"],
+        "active_path": active["path"],
+    }
+
+
+def _workspaces_save_items(cfg: dict, folder_items: list, active_id: str) -> None:
+    cfg["workspaces"] = [
+        {"id": it["id"], "name": it["name"], "path": it["path"]}
+        for it in folder_items if it.get("path")
+    ]
+    cfg["active_workspace_id"] = active_id
+    active_path = next((it["path"] for it in folder_items if it["id"] == active_id), "")
+    _sync_workspace_dir_for_all_tracks(cfg, active_path)
+    save_config(cfg)
+
+
+@app.route("/api/workspaces", methods=["GET", "POST"])
+def api_workspaces():
+    if request.method == "GET":
+        return jsonify({"ok": True, **_workspaces_load()})
+    payload = request.get_json(silent=True) or {}
+    raw = str(payload.get("path") or "").strip().strip('"')
     if not raw:
         return jsonify({"ok": False, "error": "No folder given"}), 400
     root = Path(raw).expanduser()
     if not root.is_absolute():
-        return jsonify({"ok": False, "error": "Use a full folder path, like C:\\Users\\you\\project"}), 400
+        return jsonify({"ok": False, "error": "Use a full folder path, like /home/you/project"}), 400
     root = root.resolve()
     if root == Path(root.anchor) or root == Path.home().resolve():
         return jsonify({"ok": False, "error": "Pick a project folder, not a whole drive or your home folder."}), 400
@@ -11156,8 +11262,103 @@ def api_workspace_set():
         root.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         return jsonify({"ok": False, "error": f"Cannot use that folder: {e}"}), 400
-    _settings_store({"workspace_dir": str(root)})
-    return jsonify({"ok": True, "workspace": str(root), "track": track})
+    path_str = str(root)
+    state = _workspaces_load()
+    folder_items = [w for w in state["workspaces"] if not w.get("builtin")]
+    existing = next((w for w in folder_items if w["path"] == path_str), None)
+    if existing:
+        active_id = existing["id"]
+    else:
+        active_id = _workspace_id_for_path(path_str)
+        name = str(payload.get("name") or root.name or path_str).strip()
+        folder_items.append({"id": active_id, "name": name, "path": path_str})
+    cfg = load_config()
+    _workspaces_save_items(cfg, folder_items, active_id)
+    updated = _workspaces_load()
+    return jsonify({"ok": True, **updated})
+
+
+@app.route("/api/workspaces/switch", methods=["POST"])
+def api_workspaces_switch():
+    payload = request.get_json(silent=True) or {}
+    target_id = str(payload.get("id") or "").strip()
+    state = _workspaces_load()
+    folder_items = [w for w in state["workspaces"] if not w.get("builtin")]
+    valid_ids = {"general"} | {w["id"] for w in folder_items}
+    if target_id not in valid_ids:
+        return jsonify({"ok": False, "error": "Workspace not found"}), 404
+    cfg = load_config()
+    _workspaces_save_items(cfg, folder_items, target_id)
+    return jsonify({"ok": True, **_workspaces_load()})
+
+
+@app.route("/api/workspaces/<ws_id>", methods=["DELETE"])
+@app.route("/api/workspaces/<ws_id>/remove", methods=["POST"])
+def api_workspaces_remove(ws_id):
+    if ws_id == "general":
+        return jsonify({"ok": False, "error": "The General workspace cannot be removed."}), 400
+    state = _workspaces_load()
+    folder_items = [w for w in state["workspaces"] if not w.get("builtin")]
+    kept = [w for w in folder_items if w["id"] != ws_id]
+    if len(kept) == len(folder_items):
+        return jsonify({"ok": False, "error": "Workspace not found"}), 404
+    active_id = state["active_id"]
+    if active_id == ws_id:
+        active_id = kept[-1]["id"] if kept else "general"
+    cfg = load_config()
+    _workspaces_save_items(cfg, kept, active_id)
+    return jsonify({"ok": True, **_workspaces_load()})
+
+
+@app.route("/api/workspace/set", methods=["POST"])
+def api_workspace_set():
+    payload = request.get_json(silent=True) or {}
+    track = "google" if str(payload.get("track") or "").lower() == "google" else "arena"
+    _set_track(track)
+    if payload.get("clear"):
+        state = _workspaces_load()
+        folder_items = [w for w in state["workspaces"] if not w.get("builtin")]
+        cfg = load_config()
+        if payload.get("track") == "google":
+            scoped = dict(cfg.get("google_settings") or {})
+            scoped.pop("workspace_dir", None)
+            cfg["google_settings"] = scoped
+            save_config(cfg)
+        else:
+            _workspaces_save_items(cfg, folder_items, "general")
+        return jsonify({"ok": True, "workspace": str(_workspace_dir()), "cleared": True,
+                        "track": track})
+    raw = ((payload.get("path") or "")).strip().strip('"')
+    if not raw:
+        return jsonify({"ok": False, "error": "No folder given"}), 400
+    root = Path(raw).expanduser()
+    if not root.is_absolute():
+        return jsonify({"ok": False, "error": "Use a full folder path, like /home/you/project"}), 400
+    root = root.resolve()
+    if root == Path(root.anchor) or root == Path.home().resolve():
+        return jsonify({"ok": False, "error": "Pick a project folder, not a whole drive or your home folder."}), 400
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return jsonify({"ok": False, "error": f"Cannot use that folder: {e}"}), 400
+    path_str = str(root)
+    state = _workspaces_load()
+    folder_items = [w for w in state["workspaces"] if not w.get("builtin")]
+    existing = next((w for w in folder_items if w["path"] == path_str), None)
+    if existing:
+        ws_id = existing["id"]
+    else:
+        ws_id = _workspace_id_for_path(path_str)
+        folder_items.append({"id": ws_id, "name": root.name or path_str, "path": path_str})
+    cfg = load_config()
+    if payload.get("track") == "google":
+        scoped = dict(cfg.get("google_settings") or {})
+        scoped["workspace_dir"] = path_str
+        cfg["google_settings"] = scoped
+        save_config(cfg)
+    else:
+        _workspaces_save_items(cfg, folder_items, ws_id)
+    return jsonify({"ok": True, "workspace": path_str, "track": track, "workspace_id": ws_id})
 
 
 @app.route("/api/workspace/save", methods=["POST"])
