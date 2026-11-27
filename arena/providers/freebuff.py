@@ -9,9 +9,12 @@ from urllib.parse import urlparse
 from arena import diag
 from arena.providers.web_engine import WebChatEngine, _looks_like_human_check
 
+# freebuff.com's own trigger first (button.agent-trigger, "Model and reasoning");
+# the generic selectors only matter if the page changes.
 _MODEL_BUTTON_SELECTOR = (
-    'button[aria-label*="model" i], [data-testid*="model"] button, [data-testid*="model"], '
-    '[class*="model-selector"], [class*="model-picker"], [class*="model-trigger"]'
+    'button.agent-trigger[data-testid="model-picker"], button[aria-label="Model and reasoning"], '
+    'button[aria-label*="model" i], [data-testid*="model"] button, '
+    '[class*="model-selector"] button, [class*="model-picker"] button, [class*="model-trigger"]'
 )
 
 # freebuff.com's chat picks a reasoning tier, not a model. Which model each tier
@@ -43,8 +46,28 @@ def _tier_key(label: str) -> str:
 # Finds menu entries by their tier name instead of guessing element types: each
 # entry is the outermost element whose first text line is a tier name.
 _TIER_SCAN_JS = r"""(() => { /* __freebuffTierScan */
-  const tierRe = /^(instant|efficient|balanced|powerful|default|max)\b/i;
   const trigger = document.querySelector(%s);
+  const clean = (t) => String(t || '').replace(/\s+/g, ' ').trim();
+  // 1. freebuff.com's dialog: button.agent-option[role=option] entries.
+  const dialog = (trigger && document.getElementById(trigger.getAttribute('aria-controls') || ''))
+    || document.querySelector('.agent-menu.model-picker, [role="dialog"][aria-label="Model and reasoning"]');
+  if (dialog) {
+    const items = Array.from(dialog.querySelectorAll('[role="option"]')).filter((el) => !el.disabled).map((el) => {
+      const nameEl = el.querySelector('.agent-option-name');
+      const group = el.closest('.agent-menu-group');
+      const groupLabel = group ? group.querySelector('.model-picker-group-label') : null;
+      return {
+        name: clean(el.getAttribute('aria-label') || (nameEl && nameEl.innerText) || (el.innerText || '').split('\n')[0]),
+        desc: '',
+        group: clean(groupLabel && groupLabel.innerText),
+        tooltip: clean(el.getAttribute('data-tooltip')),
+        selected: el.getAttribute('aria-selected') === 'true',
+      };
+    }).filter((i) => i.name);
+    if (items.length) return JSON.stringify({ items });
+  }
+  // 2. Any other menu: entries found by their tier name.
+  const tierRe = /^(instant|efficient|balanced|powerful|default|max)\b/i;
   const best = new Map();
   for (const el of document.querySelectorAll('[role="menuitem"],[role="menuitemradio"],[role="option"],[data-radix-collection-item],li,button,[role="button"],div')) {
     if (trigger && (el === trigger || el.contains(trigger) || trigger.contains(el))) continue;
@@ -58,15 +81,48 @@ _TIER_SCAN_JS = r"""(() => { /* __freebuffTierScan */
   return JSON.stringify({ items: Array.from(best.values()).map(({ name, desc }) => ({ name, desc })) });
 })()""" % json.dumps(_MODEL_BUTTON_SELECTOR)
 
+# Logged when the menu reader finds nothing: what the button and any open
+# popup look like, so the reader can be matched to the real menu. Sidebar and
+# nav text (chat titles) is left out.
+_MENU_SNAPSHOT_JS = r"""(() => {
+  const trigger = document.querySelector(%s);
+  const attrs = (el) => el ? {
+    tag: el.tagName.toLowerCase(), role: el.getAttribute('role') || '', cls: String(el.className || '').slice(0, 60),
+    haspopup: el.getAttribute('aria-haspopup') || '', expanded: el.getAttribute('aria-expanded') || '',
+    controls: el.getAttribute('aria-controls') || '', state: el.getAttribute('data-state') || ''
+  } : null;
+  const outside = (el) => !el.closest('nav, aside, [class*="sidebar"]') && !(trigger && trigger.contains(el));
+  const popups = Array.from(document.querySelectorAll('[role="menu"],[role="listbox"],[role="dialog"],[data-radix-popper-content-wrapper],[popover]'))
+    .filter(outside).slice(0, 4)
+    .map((el) => ({ ...attrs(el), text: (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 160) }));
+  const words = /\b(instant|efficient|balanced|powerful|default|max|high|low|medium|fast|smart)\b/i;
+  const hits = [];
+  for (const el of document.querySelectorAll('body *')) {
+    if (el.children.length > 3 || !outside(el)) continue;
+    const text = (el.innerText || '').replace(/\s+/g, ' ').trim();
+    if (!text || text.length > 50 || !words.test(text)) continue;
+    hits.push({ tag: el.tagName.toLowerCase(), role: el.getAttribute('role') || '', cls: String(el.className || '').slice(0, 40), text });
+    if (hits.length >= 12) break;
+  }
+  return JSON.stringify({ trigger: attrs(trigger), popups, hits });
+})()""" % json.dumps(_MODEL_BUTTON_SELECTOR)
+
 _TIER_CLICK_JS = r"""(() => { /* __freebuffTierClick */
   const want = __WANT__;
   const wantKey = want.split(/\s+/)[0];
   const trigger = document.querySelector(%s);
+  const dialog = (trigger && document.getElementById(trigger.getAttribute('aria-controls') || ''))
+    || document.querySelector('.agent-menu.model-picker, [role="dialog"][aria-label="Model and reasoning"]');
+  const pool = dialog
+    ? dialog.querySelectorAll('[role="option"]')
+    : document.querySelectorAll('[role="menuitem"],[role="menuitemradio"],[role="option"],[data-radix-collection-item],li,button,[role="button"],div');
   let hit = null;
   let keyHit = null;
-  for (const el of document.querySelectorAll('[role="menuitem"],[role="menuitemradio"],[role="option"],[data-radix-collection-item],li,button,[role="button"],div')) {
+  for (const el of pool) {
     if (trigger && (el === trigger || el.contains(trigger) || trigger.contains(el))) continue;
-    const first = ((el.innerText || el.textContent || '').split('\n').map((t) => t.trim()).filter(Boolean)[0] || '').toLowerCase();
+    if (el.disabled) continue;
+    const label = (el.getAttribute('role') === 'option' && el.getAttribute('aria-label')) || '';
+    const first = (label || (el.innerText || el.textContent || '').split('\n').map((t) => t.trim()).filter(Boolean)[0] || '').toLowerCase();
     // Keep the innermost match: it is the clickable entry. A label that only
     // shares the tier word ("Powerful" for "Powerful Max") is the fallback.
     if (first === want) hit = el;
@@ -174,7 +230,8 @@ class FreebuffProvider(WebChatEngine):
         if not href:
             return False
         path = (urlparse(href).path or "/").rstrip("/") or "/"
-        if any(path == base or path.startswith(base + "/") for base in ("/app", "/chat")):
+        # Signed in, "/" is the Freebuff Web workspace itself.
+        if path == "/" or any(path == base or path.startswith(base + "/") for base in ("/app", "/chat")):
             return False
         return True
 
@@ -341,7 +398,9 @@ class FreebuffProvider(WebChatEngine):
         dom = self.eval_js(
             r"""(() => {
               const btn = document.querySelector(%s);
-              const label = btn ? (btn.innerText || btn.textContent || '').replace(/\s+/g, ' ').trim() : '';
+              // freebuff.com's button: span.agent-model (model or tier) + span.agent-effort.
+              const part = btn ? (btn.querySelector('.agent-model') || btn) : null;
+              const label = part ? (part.innerText || part.textContent || '').replace(/\s+/g, ' ').trim() : '';
               return JSON.stringify({ label });
             })()""" % json.dumps(_MODEL_BUTTON_SELECTOR),
             timeout=2.5,
@@ -349,12 +408,11 @@ class FreebuffProvider(WebChatEngine):
         return str(dom.get("label") or "").strip() if isinstance(dom, dict) else ""
 
     def _open_model_menu(self) -> bool:
-        """Open the page's model menu: pointerdown for Radix-style menus, then click."""
+        """Open the page's model menu by clicking its trigger (it toggles on click)."""
         res = self.eval_js(
             """(() => {
               const btn = document.querySelector(%s);
               if (!btn) return JSON.stringify({ ok: false });
-              btn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerType: 'mouse' }));
               if (btn.getAttribute('aria-expanded') !== 'true') btn.click();
               return JSON.stringify({ ok: true });
             })()""" % json.dumps(_MODEL_BUTTON_SELECTOR),
@@ -363,9 +421,13 @@ class FreebuffProvider(WebChatEngine):
         return isinstance(res, dict) and bool(res.get("ok"))
 
     def _close_model_menu(self) -> None:
+        """Close the menu the same way, so reading it never changes the selection."""
         self.eval_js(
-            "(() => { document.dispatchEvent(new KeyboardEvent('keydown', "
-            "{ key: 'Escape', code: 'Escape', bubbles: true })); return '1'; })()",
+            """(() => {
+              const btn = document.querySelector(%s);
+              if (btn && btn.getAttribute('aria-expanded') === 'true') btn.click();
+              return '1';
+            })()""" % json.dumps(_MODEL_BUTTON_SELECTOR),
             timeout=1.5,
         )
 
@@ -386,6 +448,9 @@ class FreebuffProvider(WebChatEngine):
         if active_lbl and self._open_model_menu():
             time.sleep(0.32)
             items = self._scan_tier_items()
+            if not items:
+                snapshot = self.eval_js(_MENU_SNAPSHOT_JS, timeout=3.0)
+                diag.note(f"freebuff menu snapshot: {json.dumps(snapshot)[:1200]}")
             self._close_model_menu()
         active_key = _tier_key(active_lbl)
         # Unreadable menu: offer the standard tiers, keeping the button's own
@@ -418,14 +483,19 @@ class FreebuffProvider(WebChatEngine):
                 "name": name,
                 "org": "Freebuff",
                 "description": (
-                    str(tier.get("desc") or "").strip()
-                    or _TIER_DETAILS.get(_tier_key(name), "Available on freebuff.com/chat")
+                    " - ".join(p for p in (str(tier.get("group") or ""), str(tier.get("tooltip") or "")) if p.strip())
+                    or str(tier.get("desc") or "").strip()
+                    or _TIER_DETAILS.get(_tier_key(name), "Available on freebuff.com")
                 )[:120],
                 "capabilities": _TIER_CAPS.get(_tier_key(name), ["Text", "Code"]),
                 "active": False,
             })
-        # The button's label marks the active entry: exact text first, else the same tier.
-        active_id = next((m["id"] for m in models if active_lbl and m["id"].lower() == active_lbl.lower()), "")
+        # The dialog's own selection marks the active entry; else the button's label
+        # (exact text first, then the same tier).
+        selected = {" ".join(str(t.get("name") or "").split()).lower() for t in tiers if t.get("selected")}
+        active_id = next((m["id"] for m in models if m["id"].lower() in selected), "")
+        if not active_id:
+            active_id = next((m["id"] for m in models if active_lbl and m["id"].lower() == active_lbl.lower()), "")
         if not active_id and active_key:
             active_id = next((m["id"] for m in models if _tier_key(m["id"]) == active_key), "")
         models = [{**m, "active": m["id"] == active_id} for m in models]

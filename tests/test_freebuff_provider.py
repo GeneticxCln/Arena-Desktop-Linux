@@ -53,7 +53,9 @@ def test_freebuff_provider_metadata_and_urls():
     assert fb._is_non_chat_url("https://freebuff.com/app/thread-123") is False
     assert fb._is_non_chat_url("https://freebuff.com/chat") is False
     assert fb._is_non_chat_url("https://freebuff.com/chat/thread-123") is False
-    assert fb._is_non_chat_url("https://freebuff.com/") is True
+    # Signed in, the home page is the Freebuff Web workspace itself.
+    assert fb._is_non_chat_url("https://freebuff.com/") is False
+    assert fb._is_non_chat_url("https://freebuff.com/cli") is True
     assert fb._is_non_chat_url("https://freebuff.com/pricing") is True
     assert fb._is_non_chat_url("https://freebuff.com/desktop") is True
 
@@ -348,20 +350,40 @@ def test_freebuff_tier_labels_with_a_reasoning_level(monkeypatch):
 
 
 def test_freebuff_model_check_returns_to_the_app_page_first(monkeypatch):
-    """The window drifted to the home page: read models on /app, not there."""
-    prov, probed = _signed_out_probe_setup(
-        monkeypatch, user={"email": "a@b.c"}, guest_cta=False
-    )
-    url = {"now": "https://freebuff.com/"}
+    """The window drifted to the home page: load /app once, wait until the page
+    really is /app (the old page keeps answering "/" while it loads), then read."""
+    prov, probed = _signed_out_probe_setup(monkeypatch, user={"email": "a@b.c"}, guest_cta=False)
+    answers = iter(["https://freebuff.com/cli"] * 3 + ["https://freebuff.com/app"] * 20)
     loaded: list[str] = []
-    monkeypatch.setattr(prov, "page_url", lambda: url["now"])
-
-    def fake_load(target):
-        loaded.append(target)
-        url["now"] = target
-
-    monkeypatch.setattr(prov, "load_url", fake_load)
-    monkeypatch.setattr(prov, "_wait_for_origin", lambda *a, **k: {})
+    seen_by_probe: list[str] = []
+    monkeypatch.setattr(prov, "page_url", lambda: next(answers))
+    monkeypatch.setattr(prov, "load_url", lambda target: loaded.append(target) or True)
+    monkeypatch.setattr("arena.providers.web_engine.time.sleep", lambda s: None)
+    monkeypatch.setattr(
+        prov,
+        "_probe_live_models",
+        lambda: seen_by_probe.append(prov.page_url()) or {"live": True, "active_model": "m1", "models": [{"id": "m1", "name": "M1"}]},
+    )
     res = prov.list_models(force=True)
     assert loaded == ["https://freebuff.com/app"]
-    assert res["source"] == "live" and probed == [True]
+    assert seen_by_probe == ["https://freebuff.com/app"]
+    assert res["source"] == "live"
+
+
+def test_freebuff_reads_the_real_model_dialog(monkeypatch):
+    """freebuff.com's picker: role=option buttons, aria-selected marks the current one,
+    data-tooltip holds the model id, groups carry a label."""
+    fb = FreebuffProvider()
+    menu = [
+        {"name": "Instant", "desc": "", "group": "", "tooltip": "", "selected": False},
+        {"name": "Balanced", "desc": "", "group": "", "tooltip": "", "selected": True},
+        {"name": "Powerful", "desc": "", "group": "", "tooltip": "", "selected": False},
+        {"name": "My OpenAI", "desc": "", "group": "Your providers", "tooltip": "gpt-6.1-sol", "selected": False},
+    ]
+    _tier_page(monkeypatch, fb, active="Powerful", menu=menu)
+    live = fb._probe_live_models()
+    assert [m["id"] for m in live["models"]] == ["Instant", "Balanced", "Powerful", "My OpenAI"]
+    # The dialog's own selection wins over the button label.
+    assert live["active_model"] == "Balanced"
+    assert live["models"][3]["description"] == "Your providers - gpt-6.1-sol"
+    assert "m-61c26317cc" in live["models"][1]["description"]

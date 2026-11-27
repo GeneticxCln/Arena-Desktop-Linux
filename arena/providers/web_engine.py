@@ -29,7 +29,6 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
-from urllib.parse import urlparse
 
 from arena import diag
 from arena.providers.base import Provider
@@ -968,6 +967,16 @@ class WebChatEngine(Provider):
         low = (href or "").lower()
         return any(h in low for h in self.login_url_hints)
 
+    def _wait_for_chat_page(self, timeout: float) -> bool:
+        """Poll until the window reports a chat page (see ``_is_non_chat_url``)."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            href = self.page_url()
+            if href and not self._is_non_chat_url(href):
+                return True
+            time.sleep(0.25)
+        return False
+
     def _shows_signed_out_page(self) -> bool:
         """True when the provider window has no signed-in account.
 
@@ -1146,8 +1155,10 @@ class WebChatEngine(Provider):
             return self._cached_or_default_models()
         if self._is_non_chat_url(self.page_url()):
             # The window drifted to a landing page: models live on the chat page.
-            self.load_url(self.origin)
-            self._wait_for_origin(urlparse(self.origin).netloc, timeout=8.0)
+            # Wait for the page itself to report the chat page: until the load
+            # commits, the old page keeps answering with its own address.
+            if self.load_url(self.origin):
+                self._wait_for_chat_page(timeout=8.0)
         if self._shows_signed_out_page():
             # No account in the window: there is no model list to read, and
             # the placeholder must not pass for one.
