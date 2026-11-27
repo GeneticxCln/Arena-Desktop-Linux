@@ -2,12 +2,83 @@
 from __future__ import annotations
 
 import json
-import re
 import time
-from typing import Iterator, Optional
+from collections.abc import Iterator
 from urllib.parse import urlparse
 
+from arena import diag
 from arena.providers.web_engine import WebChatEngine, _looks_like_human_check
+
+_MODEL_BUTTON_SELECTOR = (
+    'button[aria-label*="model" i], [data-testid*="model"] button, [data-testid*="model"], '
+    '[class*="model-selector"], [class*="model-picker"], [class*="model-trigger"]'
+)
+
+# freebuff.com's chat picks a reasoning tier, not a model. Which model each tier
+# runs comes from the Freebuff app's own code (v0.2.38) for a normal account.
+_STANDARD_TIERS = ("Instant", "Balanced", "Powerful")
+_TIER_DETAILS = {
+    "instant": "DeepSeek V4.1 Flash · low reasoning",
+    "efficient": "A free fast model (DeepSeek V4.1 Flash · low reasoning when none)",
+    "balanced": "Chat mode: Freebuff's chat model (m-61c26317cc). Otherwise DeepSeek V4.1 Flash · high reasoning",
+    "powerful": "DeepSeek V4.1 Flash · max reasoning (Muse Spark 1.3 on limited access with 100+ credits)",
+    "default": "This model · default reasoning",
+    "max": "This model · max reasoning",
+}
+_TIER_CAPS = {
+    "instant": ["Text", "Code", "Fast"],
+    "efficient": ["Text", "Code", "Fast"],
+    "balanced": ["Text", "Code", "Reasoning"],
+    "powerful": ["Text", "Code", "Reasoning"],
+    "max": ["Text", "Code", "Reasoning"],
+}
+
+
+def _tier_key(label: str) -> str:
+    """The tier a label names ("Powerful Max" -> "powerful"), or "" for a model name."""
+    words = (label or "").strip().lower().split()
+    return words[0] if words and words[0] in _TIER_DETAILS else ""
+
+
+# Finds menu entries by their tier name instead of guessing element types: each
+# entry is the outermost element whose first text line is a tier name.
+_TIER_SCAN_JS = r"""(() => { /* __freebuffTierScan */
+  const tierRe = /^(instant|efficient|balanced|powerful|default|max)\b/i;
+  const trigger = document.querySelector(%s);
+  const best = new Map();
+  for (const el of document.querySelectorAll('[role="menuitem"],[role="menuitemradio"],[role="option"],[data-radix-collection-item],li,button,[role="button"],div')) {
+    if (trigger && (el === trigger || el.contains(trigger) || trigger.contains(el))) continue;
+    const lines = (el.innerText || el.textContent || '').split('\n').map((t) => t.trim()).filter(Boolean);
+    if (!lines.length || lines.length > 4 || !tierRe.test(lines[0])) continue;
+    if (lines.slice(1).some((t) => tierRe.test(t))) continue;  // a container of several entries
+    const key = lines[0].toLowerCase();
+    const prev = best.get(key);
+    if (!prev || lines.length > prev.lines) best.set(key, { name: lines[0], desc: lines.slice(1).join(' - ').slice(0, 100), lines: lines.length });
+  }
+  return JSON.stringify({ items: Array.from(best.values()).map(({ name, desc }) => ({ name, desc })) });
+})()""" % json.dumps(_MODEL_BUTTON_SELECTOR)
+
+_TIER_CLICK_JS = r"""(() => { /* __freebuffTierClick */
+  const want = __WANT__;
+  const wantKey = want.split(/\s+/)[0];
+  const trigger = document.querySelector(%s);
+  let hit = null;
+  let keyHit = null;
+  for (const el of document.querySelectorAll('[role="menuitem"],[role="menuitemradio"],[role="option"],[data-radix-collection-item],li,button,[role="button"],div')) {
+    if (trigger && (el === trigger || el.contains(trigger) || trigger.contains(el))) continue;
+    const first = ((el.innerText || el.textContent || '').split('\n').map((t) => t.trim()).filter(Boolean)[0] || '').toLowerCase();
+    // Keep the innermost match: it is the clickable entry. A label that only
+    // shares the tier word ("Powerful" for "Powerful Max") is the fallback.
+    if (first === want) hit = el;
+    else if (first.split(/\s+/)[0] === wantKey) keyHit = el;
+  }
+  hit = hit || keyHit;
+  if (!hit) return JSON.stringify({ ok: false });
+  hit.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerType: 'mouse' }));
+  hit.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, button: 0, pointerType: 'mouse' }));
+  hit.click();
+  return JSON.stringify({ ok: true });
+})()""" % json.dumps(_MODEL_BUTTON_SELECTOR)
 
 
 class FreebuffProvider(WebChatEngine):
@@ -104,7 +175,7 @@ class FreebuffProvider(WebChatEngine):
             return False
         return True
 
-    def _read_session_user(self) -> Optional[dict]:
+    def _read_session_user(self) -> dict | None:
         """Query NextAuth /api/auth/session inside the WebKitGTK page."""
         res = self.fetch_json("/api/auth/session", timeout=3.0)
         if not (isinstance(res, dict) and res.get("ok")):
@@ -133,6 +204,19 @@ class FreebuffProvider(WebChatEngine):
             timeout=2.0,
         )
         return bool(dom.get("guest")) if isinstance(dom, dict) else False
+
+    def _shows_signed_out_page(self) -> bool:
+        """Guests get the normal /chat page, so the URL alone cannot tell.
+
+        Signed out means: a sign-in URL, or no session user while the guest
+        "Sign in" button is shown (both, so one flaky check cannot hide a list).
+        """
+        if self._is_login_url(self.page_url()):
+            return True
+        has_user = self._read_session_user() is not None
+        guest_cta = self._has_guest_signin_button()
+        diag.note(f"freebuff sign-in check: session_user={'yes' if has_user else 'no'} guest_button={'yes' if guest_cta else 'no'}")
+        return not has_user and guest_cta
 
     def verify(self) -> dict:
         """Verify Freebuff authentication via /api/auth/session + auth cookies.
@@ -253,171 +337,112 @@ class FreebuffProvider(WebChatEngine):
     def _read_active_model_label(self) -> str:
         dom = self.eval_js(
             r"""(() => {
-              const btn = document.querySelector(
-                'button[aria-label*="model" i], [data-testid*="model"] button, [data-testid*="model"], ' +
-                '[class*="model-selector"], [class*="model-picker"], [class*="model-trigger"]'
-              );
+              const btn = document.querySelector(%s);
               const label = btn ? (btn.innerText || btn.textContent || '').replace(/\s+/g, ' ').trim() : '';
               return JSON.stringify({ label });
-            })()""",
+            })()""" % json.dumps(_MODEL_BUTTON_SELECTOR),
             timeout=2.5,
         )
         return str(dom.get("label") or "").strip() if isinstance(dom, dict) else ""
 
-    def _probe_live_models(self) -> Optional[dict]:
-        """Query live Freebuff model catalog endpoints or the signed-in DOM model picker."""
-        models: list[dict] = []
-        seen: set[str] = set()
-        active_lbl = self._read_active_model_label()
-        active_low = active_lbl.lower()
-
-        def _add(mid: str, name: str, desc: str, org: str, active: bool) -> None:
-            clean_id = " ".join(str(mid or name or "").split()).strip()
-            clean_name = " ".join(str(name or clean_id).split()).strip()
-            if not clean_id or len(clean_name) > 64:
-                return
-            if re.search(r"\b(sign in|sign up|log in|log out|pricing|upgrade|download)\b", clean_name, re.I):
-                return
-            key = clean_id.lower()
-            if key in seen:
-                return
-            seen.add(key)
-            low = f"{clean_id} {clean_name}".lower()
-            caps = ["Text", "Code"]
-            if any(w in low for w in ("reason", "think", "pro", "r1", "claude", "opus", "sonnet", "gpt", "deepseek", "solar")):
-                caps.append("Reasoning")
-            if any(w in low for w in ("flash", "mini", "fast", "lightning", "haiku")):
-                caps.append("Fast")
-            is_active = active or bool(active_low and active_low in (clean_name.lower(), key))
-            models.append({
-                "id": clean_id,
-                "name": clean_name,
-                "org": org or "Freebuff",
-                "description": (desc or "Available on freebuff.com/chat")[:120],
-                "capabilities": caps,
-                "active": is_active,
-            })
-
-        for endpoint in ("/api/v1/models", "/api/models", "/api/chat/models", "/api/v1/freebuff/models"):
-            res = self.fetch_json(endpoint, timeout=3.5)
-            data = res.get("data")
-            raw_list = None
-            if isinstance(data, dict):
-                raw_list = data.get("models") or data.get("data") or data.get("items")
-            elif isinstance(data, list):
-                raw_list = data
-            if not (res.get("ok") and isinstance(raw_list, list) and raw_list):
-                continue
-            for item in raw_list:
-                if isinstance(item, str):
-                    _add(item, item, "", "Freebuff", False)
-                    continue
-                if not isinstance(item, dict):
-                    continue
-                if item.get("hidden") is True or item.get("disabled") is True:
-                    continue
-                mid = str(item.get("id") or item.get("model") or item.get("key") or item.get("slug") or "").strip()
-                name = str(item.get("name") or item.get("displayName") or item.get("label") or mid).strip()
-                org = str(item.get("provider") or item.get("org") or "Freebuff").strip()
-                desc = str(item.get("description") or "").strip()
-                _add(mid, name, desc, org, bool(item.get("default") or item.get("active")))
-            if models:
-                break
-
-        if not models and active_lbl:
-            _add(active_lbl, active_lbl, "Currently active on freebuff.com/chat", "Freebuff", True)
-            opened = self.eval_js(
-                """(() => {
-                  const btn = document.querySelector(
-                    'button[aria-label*="model" i], [data-testid*="model"] button, [data-testid*="model"], ' +
-                    '[class*="model-selector"], [class*="model-picker"], [class*="model-trigger"]'
-                  );
-                  if (!btn) return JSON.stringify({ ok: false });
-                  btn.click();
-                  return JSON.stringify({ ok: true });
-                })()""",
-                timeout=2.5,
-            )
-            if isinstance(opened, dict) and opened.get("ok"):
-                time.sleep(0.32)
-                scraped = self.eval_js(
-                    r"""(() => {
-                      const out = [];
-                      const nodes = Array.from(document.querySelectorAll(
-                        '[role="menuitem"], [role="option"], [role="menuitemradio"], [data-radix-collection-item]'
-                      ));
-                      for (const el of nodes) {
-                        const lines = (el.innerText || el.textContent || '').split('\n').map((s) => s.trim()).filter(Boolean);
-                        if (lines.length && lines[0].length <= 56) {
-                          out.push({ name: lines[0], desc: lines.slice(1).join(' - ').slice(0, 100) });
-                        }
-                      }
-                      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
-                      return JSON.stringify({ items: out });
-                    })()""",
-                    timeout=3.0,
-                )
-                if isinstance(scraped, dict):
-                    for item in scraped.get("items") or []:
-                        _add(str(item.get("name") or ""), str(item.get("name") or ""), str(item.get("desc") or ""), "Freebuff", False)
-
-        if not models:
-            return None
-        if not any(m.get("active") for m in models):
-            models[0]["active"] = True
-        active_id = next((m["id"] for m in models if m.get("active")), models[0]["id"])
-        return {
-            "live": True,
-            "active_model": active_id,
-            "models": models,
-        }
-
-    def _apply_model_selection(self, model_id: str) -> Optional[bool]:
-        want = (model_id or "").strip()
-        if not want or want.lower() == "default":
-            return True
-        cur = self._read_active_model_label().lower()
-        if cur and (want.lower() == cur or want.lower() in cur):
-            return True
-        opened = self.eval_js(
+    def _open_model_menu(self) -> bool:
+        """Open the page's model menu: pointerdown for Radix-style menus, then click."""
+        res = self.eval_js(
             """(() => {
-              const btn = document.querySelector(
-                'button[aria-label*="model" i], [data-testid*="model"] button, [data-testid*="model"], ' +
-                '[class*="model-selector"], [class*="model-picker"], [class*="model-trigger"]'
-              );
+              const btn = document.querySelector(%s);
               if (!btn) return JSON.stringify({ ok: false });
-              btn.click();
+              btn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerType: 'mouse' }));
+              if (btn.getAttribute('aria-expanded') !== 'true') btn.click();
               return JSON.stringify({ ok: true });
-            })()""",
+            })()""" % json.dumps(_MODEL_BUTTON_SELECTOR),
             timeout=2.5,
         )
-        if not (isinstance(opened, dict) and opened.get("ok")):
+        return isinstance(res, dict) and bool(res.get("ok"))
+
+    def _close_model_menu(self) -> None:
+        self.eval_js(
+            "(() => { document.dispatchEvent(new KeyboardEvent('keydown', "
+            "{ key: 'Escape', code: 'Escape', bubbles: true })); return '1'; })()",
+            timeout=1.5,
+        )
+
+    def _scan_tier_items(self) -> list[dict]:
+        """Tier entries ({name, desc}) in the open model menu, found by their names."""
+        res = self.eval_js(_TIER_SCAN_JS, timeout=3.0)
+        items = res.get("items") if isinstance(res, dict) else None
+        return [i for i in items or [] if isinstance(i, dict) and str(i.get("name") or "").strip()]
+
+    def _probe_live_models(self) -> dict | None:
+        """List the tiers freebuff.com's chat offers (Instant / Balanced / Powerful).
+
+        The web chat has no model API (every /api/*models path answers 404) and
+        its menu offers reasoning tiers, not model names, so the tiers are the list.
+        """
+        active_lbl = self._read_active_model_label()
+        items: list[dict] = []
+        if active_lbl and self._open_model_menu():
+            time.sleep(0.32)
+            items = self._scan_tier_items()
+            self._close_model_menu()
+        active_key = _tier_key(active_lbl)
+        # Unreadable menu: offer the standard tiers, keeping the button's own
+        # label ("Powerful Max") for the tier that is selected.
+        tiers = items or (
+            [{"name": active_lbl if _tier_key(n) == active_key else n, "desc": ""} for n in _STANDARD_TIERS]
+            if active_key
+            else []
+        )
+        # Host and first path segment only: later segments hold chat ids.
+        path = "/".join((self.page_url() or "").split("?", 1)[0].split("#", 1)[0].split("/")[:4])
+        diag.note(
+            f"freebuff models probe: page={path or '-'} active={active_lbl or '-'} "
+            f"menu_tiers={[i['name'] for i in items]} total={len(tiers) or (1 if active_lbl else 0)}"
+        )
+        if not tiers:
+            if not active_lbl:
+                return None
+            # A named model on the button (not a tier): offer just that one.
+            tiers = [{"name": active_lbl, "desc": "Currently active on freebuff.com/chat"}]
+        models = []
+        seen: set[str] = set()
+        for tier in tiers:
+            name = " ".join(str(tier.get("name") or "").split())
+            if not name or name.lower() in seen:
+                continue
+            seen.add(name.lower())
+            models.append({
+                "id": name,
+                "name": name,
+                "org": "Freebuff",
+                "description": (
+                    str(tier.get("desc") or "").strip()
+                    or _TIER_DETAILS.get(_tier_key(name), "Available on freebuff.com/chat")
+                )[:120],
+                "capabilities": _TIER_CAPS.get(_tier_key(name), ["Text", "Code"]),
+                "active": False,
+            })
+        # The button's label marks the active entry: exact text first, else the same tier.
+        active_id = next((m["id"] for m in models if active_lbl and m["id"].lower() == active_lbl.lower()), "")
+        if not active_id and active_key:
+            active_id = next((m["id"] for m in models if _tier_key(m["id"]) == active_key), "")
+        models = [{**m, "active": m["id"] == active_id} for m in models]
+        return {"live": True, "active_model": active_id, "models": models}
+
+    def _apply_model_selection(self, model_id: str) -> bool:
+        """Pick a tier (or model) in the page's menu by its exact name."""
+        want = " ".join((model_id or "").split())
+        if not want or want.lower() == "default":
+            return True
+        if self._read_active_model_label().lower() == want.lower():
+            return True
+        if not self._open_model_menu():
             return False
         time.sleep(0.32)
-        toks = [t for t in re.split(r"[\s\-_/]+", want.lower()) if t]
-        res = self.eval_js(
-            f"""(() => {{
-              const wantFull = {json.dumps(want.lower())};
-              const toks = {json.dumps(toks[:3])};
-              const nodes = Array.from(document.querySelectorAll(
-                '[role="menuitem"], [role="option"], [role="menuitemradio"], [data-radix-collection-item]'
-              ));
-              for (const item of nodes) {{
-                const txt = (item.innerText || item.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-                if (txt === wantFull || txt.includes(wantFull) || (toks.length && toks.every((t) => txt.includes(t)))) {{
-                  item.click();
-                  return JSON.stringify({{ ok: true, clicked: txt.slice(0, 60) }});
-                }}
-              }}
-              document.dispatchEvent(new KeyboardEvent('keydown', {{ key: 'Escape', code: 'Escape', bubbles: true }}));
-              return JSON.stringify({{ ok: false }});
-            }})()""",
-            timeout=3.0,
-        )
-        if isinstance(res, dict) and res.get("clicked"):
+        res = self.eval_js(_TIER_CLICK_JS.replace("__WANT__", json.dumps(want.lower())), timeout=3.0)
+        if isinstance(res, dict) and res.get("ok"):
             time.sleep(0.2)
             return True
-        time.sleep(0.15)
+        self._close_model_menu()
         return False
 
     def _parse_observed_sse_chunk(self, raw_chunk: str, state: dict, *, flush: bool = False) -> list[dict]:

@@ -1,7 +1,9 @@
 """Unit tests for the Freebuff web provider (freebuff.com/chat)."""
+
 from __future__ import annotations
 
 import json
+import re
 
 from arena import providers
 from arena.providers.freebuff import FreebuffProvider
@@ -12,7 +14,9 @@ class _FakeWindow:
     def __init__(self):
         self.shown = False
         self.loaded = []
-        self.events = type("_Ev", (), {"closing": _EventList(), "closed": _EventList()})()
+        self.events = type(
+            "_Ev", (), {"closing": _EventList(), "closed": _EventList()}
+        )()
 
     def show(self):
         self.shown = True
@@ -69,7 +73,11 @@ def test_freebuff_verify_distinguishes_guest_composer_from_signed_in(monkeypatch
     monkeypatch.setattr(fb, "eval_js", lambda s, timeout=2.0: {"guest": True})
 
     # Guest session: /api/auth/session returns {} -> must NOT report signed_in=True even with composer visible
-    monkeypatch.setattr(fb, "fetch_json", lambda ep, timeout=3.0: {"ok": True, "status": 200, "data": {}})
+    monkeypatch.setattr(
+        fb,
+        "fetch_json",
+        lambda ep, timeout=3.0: {"ok": True, "status": 200, "data": {}},
+    )
     guest = fb.verify()
     assert guest["signed_in"] is False
     assert "Sign in" in guest["detail"]
@@ -116,32 +124,82 @@ def test_freebuff_stream_turn_requires_signin_before_submitting_as_guest(monkeyp
     assert win.shown is True
 
 
-def test_freebuff_live_models_discovery(monkeypatch):
+def _tier_page(monkeypatch, fb, *, active, menu):
+    """Fake freebuff.com page: a model button labelled ``active`` whose menu
+    holds ``menu`` items ({name, desc}). Returns the list of clicked tiers."""
+    clicked: list[str] = []
+    monkeypatch.setattr(fb, "_read_active_model_label", lambda: active)
+    monkeypatch.setattr("arena.providers.freebuff.time.sleep", lambda s: None)
+
+    def fake_eval(script, timeout=0):
+        if "__freebuffTierScan" in script:
+            return {"items": list(menu)}
+        if "__freebuffTierClick" in script:
+            want = json.loads(re.search(r"const want = (\"[^\"]*\");", script).group(1))
+            hit = next((m["name"] for m in menu if m["name"].lower() == want), "")
+            if hit:
+                clicked.append(hit)
+            return {"ok": bool(hit)}
+        return {"ok": True}  # open / escape
+
+    monkeypatch.setattr(fb, "eval_js", fake_eval)
+    monkeypatch.setattr(
+        fb,
+        "fetch_json",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no API probing")),
+    )
+    return clicked
+
+
+def test_freebuff_lists_the_tiers_its_menu_offers(monkeypatch):
     fb = FreebuffProvider()
-    monkeypatch.setattr(fb, "eval_js", lambda s, timeout=2.5: {"label": "Solar Pro 4"})
-
-    def _fake_fetch(ep, timeout=3.5):
-        if ep == "/api/v1/models":
-            return {
-                "ok": True,
-                "data": {
-                    "models": [
-                        {"id": "deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash", "provider": "DeepSeek"},
-                        {"id": "solar-pro-4", "name": "Solar Pro 4", "provider": "Upstage"},
-                        {"id": "hidden-model", "name": "Hidden", "hidden": True},
-                    ]
-                },
-            }
-        return {"ok": False, "data": None}
-
-    monkeypatch.setattr(fb, "fetch_json", _fake_fetch)
+    _tier_page(
+        monkeypatch,
+        fb,
+        active="Powerful",
+        menu=[
+            {"name": "Instant", "desc": "Fast answers"},
+            {"name": "Balanced", "desc": ""},
+            {"name": "Powerful", "desc": "Best results"},
+        ],
+    )
     live = fb._probe_live_models()
-    assert live is not None
-    assert live["live"] is True
-    assert [m["id"] for m in live["models"]] == ["deepseek-v4.1-flash", "solar-pro-4"]
-    assert live["active_model"] == "solar-pro-4"
-    assert "Fast" in live["models"][0]["capabilities"]
-    assert "Reasoning" in live["models"][1]["capabilities"]
+    assert [m["id"] for m in live["models"]] == ["Instant", "Balanced", "Powerful"]
+    assert live["active_model"] == "Powerful"
+    assert live["models"][0]["description"] == "Fast answers"
+    # A tier without menu text explains which model it runs.
+    assert "m-61c26317cc" in live["models"][1]["description"]
+
+
+def test_freebuff_falls_back_to_standard_tiers_when_the_menu_is_unreadable(monkeypatch):
+    fb = FreebuffProvider()
+    _tier_page(monkeypatch, fb, active="Powerful", menu=[])
+    live = fb._probe_live_models()
+    assert [m["id"] for m in live["models"]] == ["Instant", "Balanced", "Powerful"]
+    assert live["active_model"] == "Powerful"
+    assert "DeepSeek V4.1 Flash" in live["models"][2]["description"]
+
+
+def test_freebuff_keeps_a_named_model_button_as_is(monkeypatch):
+    fb = FreebuffProvider()
+    _tier_page(monkeypatch, fb, active="DeepSeek V4 Pro", menu=[])
+    live = fb._probe_live_models()
+    assert [m["id"] for m in live["models"]] == ["DeepSeek V4 Pro"]
+
+
+def test_freebuff_switches_tier_by_its_name(monkeypatch):
+    fb = FreebuffProvider()
+    menu = [
+        {"name": "Instant", "desc": ""},
+        {"name": "Balanced", "desc": ""},
+        {"name": "Powerful", "desc": ""},
+    ]
+    clicked = _tier_page(monkeypatch, fb, active="Powerful", menu=menu)
+    assert (
+        fb._apply_model_selection("Powerful") is True and clicked == []
+    )  # already on it
+    assert fb._apply_model_selection("Balanced") is True and clicked == ["Balanced"]
+    assert fb._apply_model_selection("Ultra") is False
 
 
 def test_freebuff_sse_parser_handles_all_stream_formats():
@@ -209,6 +267,78 @@ def test_freebuff_chat_route_streams_and_persists_source(tmp_path, monkeypatch):
         cid = next(e["chat_id"] for e in events if e.get("chat_id"))
         saved = web_app._load_chat(cid)
         assert saved["source"] == "freebuff"
-        assert any("Freebuff web reply" in str(m.get("text") or "") for m in saved.get("messages") or [])
+        assert any(
+            "Freebuff web reply" in str(m.get("text") or "")
+            for m in saved.get("messages") or []
+        )
     finally:
         providers.PROVIDERS["freebuff"] = orig
+
+
+def _signed_out_probe_setup(monkeypatch, *, user, guest_cta):
+    prov = FreebuffProvider()
+    prov.window = _FakeWindow()
+    probed: list[bool] = []
+    monkeypatch.setattr(prov, "page_url", lambda: "https://freebuff.com/chat")
+    monkeypatch.setattr(prov, "_read_session_user", lambda: user)
+    monkeypatch.setattr(prov, "_has_guest_signin_button", lambda: guest_cta)
+    monkeypatch.setattr(prov, "_wait_for_composer", lambda timeout=0: {})
+    monkeypatch.setattr(
+        prov,
+        "_probe_live_models",
+        lambda: (
+            probed.append(True)
+            or {
+                "live": True,
+                "active_model": "m1",
+                "models": [{"id": "m1", "name": "M1"}],
+            }
+        ),
+    )
+    return prov, probed
+
+
+def test_freebuff_guest_on_chat_page_is_reported_signed_out(monkeypatch):
+    """freebuff.com/chat shows its composer to guests, with no /login URL."""
+    prov, probed = _signed_out_probe_setup(monkeypatch, user=None, guest_cta=True)
+    res = prov.list_models(force=True)
+    assert res["signed_in"] is False
+    assert res["source"] == "default"
+    assert probed == []
+
+
+def test_freebuff_signed_in_user_gets_the_live_list(monkeypatch):
+    prov, probed = _signed_out_probe_setup(
+        monkeypatch, user={"email": "a@b.c"}, guest_cta=False
+    )
+    res = prov.list_models(force=True)
+    assert res["signed_in"] is True and res["source"] == "live"
+    assert probed == [True]
+
+
+def test_freebuff_tier_labels_with_a_reasoning_level(monkeypatch):
+    """The live button reads "Powerful Max": tier name plus reasoning level."""
+    fb = FreebuffProvider()
+    _tier_page(monkeypatch, fb, active="Powerful Max", menu=[])
+    live = fb._probe_live_models()
+    assert [m["id"] for m in live["models"]] == ["Instant", "Balanced", "Powerful Max"]
+    assert live["active_model"] == "Powerful Max"
+    assert "DeepSeek V4.1 Flash" in live["models"][2]["description"]
+
+    menu = [
+        {"name": "Instant Low", "desc": ""},
+        {"name": "Balanced High", "desc": ""},
+        {"name": "Powerful Max", "desc": ""},
+    ]
+    clicked = _tier_page(monkeypatch, fb, active="Powerful Max", menu=menu)
+    live = fb._probe_live_models()
+    assert [m["id"] for m in live["models"]] == [
+        "Instant Low",
+        "Balanced High",
+        "Powerful Max",
+    ]
+    assert [m["active"] for m in live["models"]] == [False, False, True]
+    assert "low reasoning" in live["models"][0]["description"]
+    assert fb._apply_model_selection("Balanced High") is True and clicked == [
+        "Balanced High"
+    ]

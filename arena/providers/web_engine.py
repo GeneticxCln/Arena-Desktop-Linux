@@ -967,6 +967,14 @@ class WebChatEngine(Provider):
         low = (href or "").lower()
         return any(h in low for h in self.login_url_hints)
 
+    def _shows_signed_out_page(self) -> bool:
+        """True when the provider window has no signed-in account.
+
+        Most providers send guests to a sign-in URL. Override when guests get
+        the normal chat page instead.
+        """
+        return self._is_login_url(self.page_url())
+
     def _is_non_chat_url(self, href: str) -> bool:
         """Override in subclasses to force navigating back to origin from tool/landing subpages."""
         return False
@@ -1135,9 +1143,9 @@ class WebChatEngine(Provider):
                 self._wait_for_composer(timeout=6.0 if force else 3.5)
         if self.window is None:
             return self._cached_or_default_models()
-        if self._is_login_url(self.page_url()):
-            # The window shows the provider's sign-in page: there is no model
-            # list to read, and the placeholder must not pass for one.
+        if self._shows_signed_out_page():
+            # No account in the window: there is no model list to read, and
+            # the placeholder must not pass for one.
             return {**self._cached_or_default_models(), "signed_in": False}
         # Never touch the live provider DOM (e.g. clicking dropdowns / Escape) while a turn is running.
         if not self._turn_lock.acquire(blocking=False):
