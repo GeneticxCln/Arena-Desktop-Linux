@@ -42,12 +42,15 @@ def test_freebuff_provider_metadata_and_urls():
     assert isinstance(fb, FreebuffProvider)
     assert fb.id == "freebuff"
     assert fb.kind == "webview"
-    assert fb.origin == "https://freebuff.com/chat"
+    # The full Freebuff Web workspace (code mode, model picker), not the plain /chat.
+    assert fb.origin == "https://freebuff.com/app"
     assert fb.badge == "F"
     assert fb.badge_class == "is-freebuff"
     assert "div.composer-input[data-composer-input]" in fb.composer_selectors
     assert "button.send-key:not([disabled])" in fb.send_selectors
 
+    assert fb._is_non_chat_url("https://freebuff.com/app") is False
+    assert fb._is_non_chat_url("https://freebuff.com/app/thread-123") is False
     assert fb._is_non_chat_url("https://freebuff.com/chat") is False
     assert fb._is_non_chat_url("https://freebuff.com/chat/thread-123") is False
     assert fb._is_non_chat_url("https://freebuff.com/") is True
@@ -342,3 +345,23 @@ def test_freebuff_tier_labels_with_a_reasoning_level(monkeypatch):
     assert fb._apply_model_selection("Balanced High") is True and clicked == [
         "Balanced High"
     ]
+
+
+def test_freebuff_model_check_returns_to_the_app_page_first(monkeypatch):
+    """The window drifted to the home page: read models on /app, not there."""
+    prov, probed = _signed_out_probe_setup(
+        monkeypatch, user={"email": "a@b.c"}, guest_cta=False
+    )
+    url = {"now": "https://freebuff.com/"}
+    loaded: list[str] = []
+    monkeypatch.setattr(prov, "page_url", lambda: url["now"])
+
+    def fake_load(target):
+        loaded.append(target)
+        url["now"] = target
+
+    monkeypatch.setattr(prov, "load_url", fake_load)
+    monkeypatch.setattr(prov, "_wait_for_origin", lambda *a, **k: {})
+    res = prov.list_models(force=True)
+    assert loaded == ["https://freebuff.com/app"]
+    assert res["source"] == "live" and probed == [True]

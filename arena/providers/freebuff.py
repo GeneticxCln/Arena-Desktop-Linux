@@ -88,12 +88,15 @@ class FreebuffProvider(WebChatEngine):
     badge = "F"
     badge_class = "is-freebuff"
     description = "freebuff.com/chat in a signed-in WebKitGTK window (Freebuff Chat)"
-    origin = "https://freebuff.com/chat"
+    # Freebuff Web (/app) is the full workspace with code mode and the model
+    # picker. /chat is a bare chat that sends signed-in users to the home page.
+    origin = "https://freebuff.com/app"
     window_title = "Freebuff - Arena Desktop"
     cookie_urls = (
         "https://freebuff.com/",
         "https://www.freebuff.com/",
         "https://freebuff.com/chat",
+        "https://freebuff.com/app",
     )
     auth_cookie_names = (
         "next-auth.session-token",
@@ -167,11 +170,11 @@ class FreebuffProvider(WebChatEngine):
     )
 
     def _is_non_chat_url(self, href: str) -> bool:
-        """Keep Freebuff tabs on /chat or /chat/<id> rather than marketing/landing routes."""
+        """Keep Freebuff tabs on /app or /chat (and their /<id> pages), not landing routes."""
         if not href:
             return False
         path = (urlparse(href).path or "/").rstrip("/") or "/"
-        if path == "/chat" or path.startswith("/chat/"):
+        if any(path == base or path.startswith(base + "/") for base in ("/app", "/chat")):
             return False
         return True
 

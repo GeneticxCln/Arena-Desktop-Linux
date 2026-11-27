@@ -29,6 +29,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
+from urllib.parse import urlparse
 
 from arena import diag
 from arena.providers.base import Provider
@@ -1143,6 +1144,10 @@ class WebChatEngine(Provider):
                 self._wait_for_composer(timeout=6.0 if force else 3.5)
         if self.window is None:
             return self._cached_or_default_models()
+        if self._is_non_chat_url(self.page_url()):
+            # The window drifted to a landing page: models live on the chat page.
+            self.load_url(self.origin)
+            self._wait_for_origin(urlparse(self.origin).netloc, timeout=8.0)
         if self._shows_signed_out_page():
             # No account in the window: there is no model list to read, and
             # the placeholder must not pass for one.
