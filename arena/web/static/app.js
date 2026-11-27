@@ -1231,7 +1231,7 @@
         permission_mode: demoStore.permissionMode,
         workspace: demoStore.workspace,
         workspace_chosen: true,
-        app_version: '7.4.1',
+        app_version: '7.4.2',
         pending_permissions: demoStore.pendingPermissions.length,
         demo: true
       };
@@ -9574,12 +9574,42 @@ You can start with a more structured option: one script, short captions, and a c
   /* ---------------------------------------------------------------------- */
   let activePopover = null;
 
+  function resolveLiveTrigger(trigger) {
+    if (!trigger) return null;
+    if (trigger.isConnected) return trigger;
+    const pTrack = trigger.getAttribute?.('data-provider-model-picker');
+    if (pTrack) {
+      const live = document.querySelector(`[data-provider-model-picker="${pTrack.replace(/"/g, '\\"')}"]`);
+      if (live) return live;
+    }
+    const lane = trigger.getAttribute?.('data-model-picker');
+    if (lane) {
+      const live = document.querySelector(`[data-model-picker="${lane.replace(/"/g, '\\"')}"]`);
+      if (live) return live;
+    }
+    if (trigger.id) {
+      const live = document.getElementById(trigger.id);
+      if (live) return live;
+    }
+    return null;
+  }
+
   function positionPopover(popover, trigger, placement = 'auto') {
     if (!popover || !trigger) return;
+    const liveTrigger = resolveLiveTrigger(trigger);
+    let triggerRect = liveTrigger ? liveTrigger.getBoundingClientRect() : null;
+    if (!triggerRect || (triggerRect.width === 0 && triggerRect.height === 0 && triggerRect.top === 0 && triggerRect.left === 0)) {
+      triggerRect = popover._lastTriggerRect || null;
+      if (!triggerRect) return;
+    } else {
+      popover._lastTriggerRect = triggerRect;
+      if (activePopover && activePopover.node === popover && liveTrigger) {
+        activePopover.trigger = liveTrigger;
+      }
+    }
     popover.style.visibility = 'hidden';
     popover.style.left = '8px';
     popover.style.top = '8px';
-    const triggerRect = trigger.getBoundingClientRect();
     const width = popover.offsetWidth || 320;
     const height = popover.offsetHeight || 280;
     const margin = 8;
@@ -9645,7 +9675,8 @@ You can start with a more structured option: one script, short captions, and a c
     let outsideTarget = null;
     const onOutside = (event) => {
       if (!activePopover || activePopover.node !== node) return;
-      if (node.contains(event.target) || trigger.contains(event.target) || event.target.closest?.('.modal-backdrop')) return;
+      const curTrigger = resolveLiveTrigger(activePopover.trigger || trigger);
+      if (node.contains(event.target) || curTrigger?.contains(event.target) || event.target.closest?.('.modal-backdrop')) return;
       closePopover(false);
     };
     const onKey = (event) => {

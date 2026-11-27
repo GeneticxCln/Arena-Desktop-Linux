@@ -1,3 +1,26 @@
+## Arena Desktop v7.4.2 (Native Linux)
+
+Adds the **OpenCode CLI** local agent provider with provider-grouped model selection, and fixes critical model-picker popover rendering and anchoring across all multi-provider tabs.
+
+### Highlights in 7.4.2
+
+- **OpenCode CLI Provider (`arena/providers/opencode.py`)**:
+  - Auto-detects the local `opencode` CLI, retrieves live models from `opencode models` merged with `~/.config/opencode/opencode.json` metadata (display names, context windows, capabilities), and supports streaming JSON output (`--format json --thinking`), tool progress reporting, permission modes (`--auto` / plan), and native multi-turn `--session` resume.
+  - Added provider filter tabs (`All`, `beatai`, `ollama`, `opencode`, etc.) and group headers inside the searchable model picker popover.
+- **Multi-Provider Model Picker Fixes (`arena/web/static/app.js`, `style.css`)**:
+  - Fixed `openProviderModelPicker()` calling `openPopover()` with the wrong argument shape (which previously rendered an empty popover box on all extra-provider tabs).
+  - Fixed `positionPopover()` and outside-click detection via `resolveLiveTrigger()` so async `renderModelChips()` re-renders never detach the trigger and teleport the popover to the top-left `(0, 0)` corner on Freebuff, DeepSeek, Antigravity, Claude, ChatGPT, or other provider tabs.
+  - Wired the sidebar **Models** button (`#modelsNavBtn`) and Command Palette (`Choose model`) to display live counts and open the active provider's model picker.
+- **Code Hygiene**:
+  - Modernized Python type annotations (`X | None`, `list`, `dict`) and cleaned unused imports across `arena/models.py`, `arena/web/app.py`, and provider tests.
+
+### Verification
+
+- Static checks (`ruff`, `node --check`, `bash -n`, `python -m compileall`, Cyrillic UI hygiene, `qwen.py` untouched) pass.
+- Full non-browser test suite: **518 passed**.
+
+---
+
 ## Arena Desktop v7.4.1 (Native Linux)
 
 Comprehensive security, reliability, streaming, and UI bug-fix release covering all Critical, Medium, and Low findings from the full codebase audit.

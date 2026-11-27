@@ -1,4 +1,4 @@
-# Arena Desktop v7.4.1 - Start Here
+# Arena Desktop v7.4.2 - Start Here
 
 Arena Desktop is an unofficial native Linux desktop client for arena.ai. It is not affiliated with or endorsed by Arena AI Inc.
 

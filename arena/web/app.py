@@ -407,7 +407,7 @@ _API_TOKEN = secrets.token_urlsafe(32)
 _BOOT_NONCE: str | None = None
 _BOOT_COOKIE_NAME = "_arena_boot"
 
-APP_VERSION = "7.4.1"
+APP_VERSION = "7.4.2"
 
 # One tick of every polling loop that waits on something outside the request
 # (a question the person has to answer, a permission, a preview URL). It is a
