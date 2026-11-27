@@ -5,17 +5,15 @@ Supports 400+ dynamic models from arena.ai with no static hardcoding.
 
 import hashlib
 import json
-import os
 import time
-from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Any
 
 import requests
 from rich.panel import Panel
 from rich.table import Table
 
+from arena.config import API_PREFIX, BASE_URL, CONFIG_DIR
 from arena.console import con
-from arena.config import BASE_URL, API_PREFIX, CONFIG_DIR, load_config, save_config
 
 CACHE_FILE = CONFIG_DIR / "models_cache.json"
 CACHE_TTL_SECONDS = 3600  # 1 hour cache TTL
@@ -37,6 +35,8 @@ ORG_COLOR_MAP = {
     "stepfun": "#EC4899",      # Pink
     "minimax": "#14B8A6",      # Teal
     "freebuff": "#22C55E",     # Freebuff Emerald
+    "opencode": "#F97316",     # OpenCode Orange
+    "ollama": "#94A3B8",       # Ollama Slate
     "cohere": "#F43F5E",       # Rose
     "nvidia": "#76B900",       # Nvidia Green
     "boss-bandit": "#EAB308",  # Router Gold
@@ -87,7 +87,7 @@ MODALITIES = {
 }
 
 
-def _first_icon_url(*sources) -> Optional[str]:
+def _first_icon_url(*sources) -> str | None:
     """First plausible icon/logo URL in a catalog entry, if Arena sends one.
 
     The current public catalog schema has no per-model icon (the website
@@ -123,8 +123,8 @@ def get_org_color(org_name: str) -> str:
     return DYNAMIC_COLOR_PALETTE[idx]
 
 
-def sync_models(cookie: Optional[str] = None, force: bool = False,
-                fetch_json=None) -> List[Dict[str, Any]]:
+def sync_models(cookie: str | None = None, force: bool = False,
+                fetch_json=None) -> list[dict[str, Any]]:
     """
     Dynamically fetch and update the model catalog from arena.ai.
     Uses disk caching with TTL; force=True bypasses cache.
@@ -170,7 +170,7 @@ def sync_models(cookie: Optional[str] = None, force: bool = False,
                 pass
         return []
 
-    models: List[Dict[str, Any]] = []
+    models: list[dict[str, Any]] = []
     seen = set()
 
     if isinstance(raw_catalog, dict):
@@ -255,18 +255,18 @@ def sync_models(cookie: Optional[str] = None, force: bool = False,
     return models
 
 
-def fetch_models(cookie: Optional[str] = None) -> List[Dict[str, Any]]:
+def fetch_models(cookie: str | None = None) -> list[dict[str, Any]]:
     """Fetch cached or live models."""
     return sync_models(cookie=cookie, force=False)
 
 
-def get_popular_models(all_models: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def get_popular_models(all_models: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Sort text/code models by performance rank for quick selection."""
     selectable = [m for m in all_models if m.get("arena") in ("text", "code") and m.get("user_selectable")]
     return sorted(selectable, key=lambda x: (x.get("rank") is None, x.get("rank", 9999), x.get("name", "")))
 
 
-def _capability_maps(model: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+def _capability_maps(model: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     caps = model.get("capabilities") if isinstance(model.get("capabilities"), dict) else {}
     inputs = caps.get("inputCapabilities") if isinstance(caps.get("inputCapabilities"), dict) else {}
     if not inputs and isinstance(caps.get("input"), dict):
@@ -290,13 +290,13 @@ def _truthy_capability(value: Any) -> bool:
     return isinstance(value, (int, float)) and value != 0
 
 
-def _video_input_required(model: Dict[str, Any]) -> bool:
+def _video_input_required(model: dict[str, Any]) -> bool:
     inputs, _ = _capability_maps(model)
     video = inputs.get("video")
     return isinstance(video, dict) and video.get("required") is True
 
 
-def _supports_modality(model: Dict[str, Any], modality: str) -> bool:
+def _supports_modality(model: dict[str, Any], modality: str) -> bool:
     """Match Arena's own capability predicates, with an arena fallback.
 
     New catalog entries carry input/output capabilities.  Older cached
@@ -321,7 +321,7 @@ def _supports_modality(model: Dict[str, Any], modality: str) -> bool:
     return model.get("arena") == target_arena
 
 
-def model_input_support(model: Dict[str, Any]) -> Dict[str, Optional[bool]]:
+def model_input_support(model: dict[str, Any]) -> dict[str, bool | None]:
     """Return image/file input support as Arena evaluates it.
 
     Arena's composer checks ``!!inputCapabilities.image`` and
@@ -351,7 +351,7 @@ def model_input_support(model: Dict[str, Any]) -> Dict[str, Optional[bool]]:
     inputs, _outputs = _capability_maps(model)
     # Normalised rows already carry these booleans.  Treat an explicit False
     # as authoritative rather than falling back to "unknown".
-    known: Dict[str, Optional[bool]] = {}
+    known: dict[str, bool | None] = {}
     for kind, field in (("image", "supports_image_input"), ("file", "supports_file_input")):
         value = model.get(field)
         known[kind] = bool(value) if value is not None else None
@@ -360,7 +360,7 @@ def model_input_support(model: Dict[str, Any]) -> Dict[str, Optional[bool]]:
     if not inputs:
         return known
 
-    def _presence(kind: str, keys: Tuple[str, ...]) -> Optional[bool]:
+    def _presence(kind: str, keys: tuple[str, ...]) -> bool | None:
         if known[kind] is not None:
             return known[kind]
         present_keys = [key for key in keys if key in inputs]
@@ -383,7 +383,7 @@ def model_input_support(model: Dict[str, Any]) -> Dict[str, Optional[bool]]:
     }
 
 
-def model_can_receive_attachment(model: Dict[str, Any], media_type: str) -> Optional[bool]:
+def model_can_receive_attachment(model: dict[str, Any], media_type: str) -> bool | None:
     """Can this model receive a message attachment of *media_type*?"""
     media = (media_type or "").split(";", 1)[0].strip().lower()
     support = model_input_support(model)
@@ -392,7 +392,7 @@ def model_can_receive_attachment(model: Dict[str, Any], media_type: str) -> Opti
     return support["file"]
 
 
-def get_router_model(all_models: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def get_router_model(all_models: list[dict[str, Any]]) -> dict[str, Any] | None:
     """Return live Max Router only when Arena marks it user-selectable."""
     for model in all_models or []:
         if not model.get("user_selectable"):
@@ -407,8 +407,8 @@ def get_router_model(all_models: List[Dict[str, Any]]) -> Optional[Dict[str, Any
     return None
 
 
-def get_auto_agent_model(all_models: List[Dict[str, Any]], preferred_id: Optional[str] = None,
-                         required_inputs: Tuple[str, ...] = ()) -> Optional[Dict[str, Any]]:
+def get_auto_agent_model(all_models: list[dict[str, Any]], preferred_id: str | None = None,
+                         required_inputs: tuple[str, ...] = ()) -> dict[str, Any] | None:
     """Pick an internal model for Agent without exposing a model choice.
 
     Max/routers are deliberately excluded: Agent must keep working when the
@@ -443,8 +443,8 @@ def get_auto_agent_model(all_models: List[Dict[str, Any]], preferred_id: Optiona
     return candidates[0] if candidates else None
 
 
-def get_models_for_modality(all_models: List[Dict[str, Any]], modality: str = "chat",
-                            mode: str = "direct") -> List[Dict[str, Any]]:
+def get_models_for_modality(all_models: list[dict[str, Any]], modality: str = "chat",
+                            mode: str = "direct") -> list[dict[str, Any]]:
     """Return models the user may actually pick for a UI mode/modality.
 
     Battle and Video are server-selected.  Agent has no visible or selectable
@@ -458,7 +458,7 @@ def get_models_for_modality(all_models: List[Dict[str, Any]], modality: str = "c
     if mode not in ("direct", "direct-battle", "side-by-side"):
         return []
 
-    matches: List[Dict[str, Any]] = []
+    matches: list[dict[str, Any]] = []
     seen_ids = set()
     for model in all_models or []:
         model_id = model.get("id")
@@ -477,7 +477,7 @@ def get_models_for_modality(all_models: List[Dict[str, Any]], modality: str = "c
                                           x.get("rank", 9999), x.get("name", "")))
 
 
-def check_model_capability(model: Dict[str, Any], modality: str, mode: str = "direct") -> bool:
+def check_model_capability(model: dict[str, Any], modality: str, mode: str = "direct") -> bool:
     """Verify whether a model may be selected for this mode and modality."""
     if not model or not model.get("user_selectable"):
         return False
@@ -495,8 +495,8 @@ def check_model_capability(model: Dict[str, Any], modality: str, mode: str = "di
 
 
 def display_available_models(
-    models: List[Dict[str, Any]],
-    active_id: Optional[str] = None,
+    models: list[dict[str, Any]],
+    active_id: str | None = None,
     modality: str = "chat",
     max_display: int = 40
 ) -> None:
@@ -553,7 +553,7 @@ def display_available_models(
     con.print(table)
     if len(filtered) > max_display:
         con.print(f"  [dim]+ {len(filtered) - max_display} more models available for this modality.[/dim]\n")
-def format_models_table(models: List[Dict[str, Any]], active_id: Optional[str] = None, title: str = "Models") -> Table:
+def format_models_table(models: list[dict[str, Any]], active_id: str | None = None, title: str = "Models") -> Table:
     """Render models into a clean Rich table with dynamic org colors."""
     t = Table(title=title, show_lines=False, header_style="bold cyan", width=85)
     t.add_column("#", style="dim", width=4, justify="right")

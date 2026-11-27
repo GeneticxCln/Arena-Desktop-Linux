@@ -248,7 +248,7 @@
     if (ORG_LOGOS[key]) return ORG_LOGOS[key];
     const rawInitial = (key || '?')[0].toUpperCase();
     const initial = /^[A-Z0-9]$/.test(rawInitial) ? rawInitial : '?';
-    const colors = { kimi: '#0EA5E9', minimax: '#14B8A6', freebuff: '#22C55E', zai: '#8B5CF6', stepfun: '#EC4899', bytedance: '#00D1FF', tencent: '#2B82EE', amazon: '#FF9900', microsoft: '#00BCF2', ibm: '#054ADA', cohere: '#F43F5E' };
+    const colors = { kimi: '#0EA5E9', minimax: '#14B8A6', freebuff: '#22C55E', opencode: '#F97316', ollama: '#94A3B8', zai: '#8B5CF6', stepfun: '#EC4899', bytedance: '#00D1FF', tencent: '#2B82EE', amazon: '#FF9900', microsoft: '#00BCF2', ibm: '#054ADA', cohere: '#F43F5E' };
     const fill = colors[key] || '#3a4040';
     return `<svg viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="12" r="10" fill="${fill}"/><text x="12" y="16" text-anchor="middle" fill="#e8f0ea" font-size="11" font-weight="700" font-family="sans-serif">${initial}</text></svg>`;
   }
@@ -269,6 +269,8 @@
     if (/command|cohere/.test(text)) return 'cohere';
     if (/minimax|abab/.test(text)) return 'minimax';
     if (/freebuff|codebuff/.test(text)) return 'freebuff';
+    if (/opencode/.test(text)) return 'opencode';
+    if (/ollama/.test(text)) return 'ollama';
     return '';
   }
 
@@ -1745,6 +1747,7 @@
           { id: 'zai', name: 'Z.AI / GLM', short_name: 'Z.AI', badge: 'Z', badge_class: 'is-zai', description: 'chat.z.ai signed-in window', kind: 'webview', available: false, signed_in: false, open: false, detail: 'Demo mode' },
           { id: 'minimax', name: 'MiniMax', short_name: 'MiniMax', badge: 'M', badge_class: 'is-minimax', description: 'agent.minimax.io signed-in window', kind: 'webview', available: false, signed_in: false, open: false, detail: 'Demo mode' },
           { id: 'freebuff', name: 'Freebuff', short_name: 'Freebuff', badge: 'F', badge_class: 'is-freebuff', description: 'freebuff.com/chat signed-in window', kind: 'webview', available: false, signed_in: false, open: false, detail: 'Demo mode' },
+          { id: 'opencode', name: 'OpenCode', short_name: 'OpenCode', badge: 'O', badge_class: 'is-opencode', description: 'Local OpenCode CLI runtime', kind: 'local_agent', available: false, signed_in: false, open: false, detail: 'Demo mode' },
           { id: 'antigravity', name: 'Antigravity', short_name: 'Antigravity', badge: '\u25b2', badge_class: 'is-antigravity', description: 'Local Google Antigravity runtime', kind: 'local_agent', available: false, signed_in: false, open: false, detail: 'Demo mode' }
         ],
         demo: true
@@ -2413,7 +2416,7 @@ You can start with a more structured option: one script, short captions, and a c
       modality: validModality(raw.modality),
       agent_backend: raw.agent_backend === 'arena' ? 'arena' : raw.agent_backend === 'local' ? 'local' : null,
       pinned: Boolean(raw.pinned ?? raw.starred),
-      source: ['arena', 'google', 'deepseek', 'claude', 'chatgpt', 'qwen', 'kimi', 'zai', 'minimax', 'freebuff', 'antigravity'].includes(raw.source)
+      source: ['arena', 'google', 'deepseek', 'claude', 'chatgpt', 'qwen', 'kimi', 'zai', 'minimax', 'freebuff', 'opencode', 'antigravity'].includes(raw.source)
         ? raw.source
         : 'local',
       workspace: typeof raw.workspace === 'string' ? raw.workspace : '',
@@ -3587,9 +3590,15 @@ You can start with a more structured option: one script, short captions, and a c
     zai: { label: 'Z.AI / GLM', badge: 'Z', cls: 'is-zai', title: '<em>Z.AI</em> / GLM', lede: 'Chat with Z.AI / GLM (chat.z.ai) inside your signed-in Linux WebKitGTK session, sharing workspace memory and read/write tools with sibling tabs.', note: 'Pure WebKitGTK signed-in window · no CLI or API key required', placeholder: 'Ask Z.AI / GLM…' },
     minimax: { label: 'MiniMax', badge: 'M', cls: 'is-minimax', title: 'Mini<em>Max</em>', lede: 'Chat with MiniMax (agent.minimax.io) inside your signed-in Linux WebKitGTK session, sharing workspace memory and read/write tools with sibling tabs.', note: 'Pure WebKitGTK signed-in window · no CLI or API key required', placeholder: 'Ask MiniMax…' },
     freebuff: { label: 'Freebuff', badge: 'F', cls: 'is-freebuff', title: '<em>Freebuff</em> Chat', lede: 'Chat with Freebuff (freebuff.com/chat) inside your signed-in Linux WebKitGTK session, sharing workspace memory, skills, and read/write tools with sibling tabs.', note: 'Pure WebKitGTK signed-in window · no CLI or API key required', placeholder: 'Ask Freebuff…' },
+    opencode: { label: 'OpenCode', badge: 'O', cls: 'is-opencode', title: '<em>OpenCode</em> CLI', lede: 'Run your local OpenCode CLI agent directly inside this workspace with all configured OpenCode & Ollama models, persistent sessions, MEMORY.md, and cross-tab summaries.', note: 'Local OpenCode CLI runtime (auto-detects opencode & live models)', placeholder: 'Ask OpenCode…' },
     antigravity: { label: 'Antigravity', badge: '\u25b2', cls: 'is-antigravity', title: 'Google <em>Antigravity</em>', lede: 'Run your local Google Antigravity agent directly inside this workspace, sharing MEMORY.md and cross-tab summaries.', note: 'Local Antigravity runtime (auto-detects agy CLI or google-antigravity SDK)', placeholder: 'Ask Antigravity…' }
   };
   const ALL_VALID_TRACKS = ['arena', 'google', ...Object.keys(EXTRA_TRACK_META)];
+  const LOCAL_AGENT_TRACKS = new Set(['antigravity', 'opencode']);
+
+  function isLocalAgentTrack(track) {
+    return LOCAL_AGENT_TRACKS.has(track);
+  }
 
   function isExtraProviderTrack(track) {
     return Boolean(EXTRA_TRACK_META[track]);
@@ -3645,7 +3654,7 @@ You can start with a more structured option: one script, short captions, and a c
     try { window.localStorage.setItem('ap-provider-models', JSON.stringify(state.providerModelChoice)); } catch { /* optional */ }
     renderModelChips();
     renderComposerContext();
-    if (isExtraProviderTrack(track) && track !== 'antigravity' && idStr) {
+    if (isExtraProviderTrack(track) && !isLocalAgentTrack(track) && idStr) {
       void API.providerSelectModel(track, idStr).catch(() => {});
     }
   }
@@ -3659,7 +3668,7 @@ You can start with a more structured option: one script, short captions, and a c
     _providerModelsReqSeq[track] = seq;
     const startedAt = Date.now();
     state.providerModels[track] = { ...cur, loading: true, error: null };
-    if (state.track === track) { renderModelChips(); renderComposerContext(); }
+    if (state.track === track) { renderModelChips(); renderModelsNavCount(); renderComposerContext(); }
     try {
       const res = await API.providerModels(track, force);
       if (_providerModelsReqSeq[track] !== seq) return providerModelEntry(track).models;
@@ -3681,12 +3690,12 @@ You can start with a more structured option: one script, short captions, and a c
           try { window.localStorage.setItem('ap-provider-models', JSON.stringify(state.providerModelChoice)); } catch { /* optional */ }
         }
       }
-      if (state.track === track) { renderModelChips(); renderComposerContext(); }
+      if (state.track === track) { renderModelChips(); renderModelsNavCount(); renderComposerContext(); }
       return list;
     } catch (error) {
       if (_providerModelsReqSeq[track] !== seq) return providerModelEntry(track).models;
       state.providerModels[track] = { ...cur, loading: false, error: errorMessage(error) };
-      if (state.track === track) { renderModelChips(); renderComposerContext(); }
+      if (state.track === track) { renderModelChips(); renderModelsNavCount(); renderComposerContext(); }
       if (!quiet) toast(errorMessage(error), 'error', `${EXTRA_TRACK_META[track]?.label || track} models`);
       return [];
     }
@@ -3700,26 +3709,65 @@ You can start with a more structured option: one script, short captions, and a c
     const searchInput = el('input', { type: 'search', placeholder: `Filter ${meta.label} models`, autocomplete: 'off', 'aria-label': `Filter ${meta.label} models` });
     searchWrap.appendChild(searchInput);
     content.appendChild(searchWrap);
+    const groupBar = el('div', { class: 'popover-group-tabs', hidden: true });
+    content.appendChild(groupBar);
     const list = el('div', { class: 'popover-list', role: 'listbox', 'aria-label': `${meta.label} models` });
     content.appendChild(list);
     const foot = el('div', { class: 'popover-foot' });
     content.appendChild(foot);
+    let activeGroup = '';
 
     const renderOptions = () => {
+      clear(groupBar);
       clear(list);
       clear(foot);
       const entry = providerModelEntry(track);
       const models = Array.isArray(entry.models) ? entry.models : [];
+      const groupCounts = new Map();
+      models.forEach((m) => {
+        if (m.group) {
+          const g = String(m.group);
+          groupCounts.set(g, (groupCounts.get(g) || 0) + 1);
+        }
+      });
+      if (groupCounts.size > 1) {
+        groupBar.hidden = false;
+        if (activeGroup && !groupCounts.has(activeGroup)) activeGroup = '';
+        const makeTab = (gKey, label) => {
+          const btn = el('button', {
+            class: `popover-group-tab${activeGroup === gKey ? ' is-active' : ''}`,
+            type: 'button',
+            text: label
+          });
+          btn.addEventListener('click', () => {
+            activeGroup = gKey;
+            renderOptions();
+          });
+          return btn;
+        };
+        groupBar.appendChild(makeTab('', `All (${models.length})`));
+        groupCounts.forEach((cnt, gName) => {
+          groupBar.appendChild(makeTab(gName, `${gName} (${cnt})`));
+        });
+      } else {
+        groupBar.hidden = true;
+        activeGroup = '';
+      }
       if (entry.loading && !models.length) {
         list.appendChild(el('div', { class: 'popover-empty' }, el('span', { class: 'loading-block' }, el('span', { class: 'mini-spinner' }), el('span', { text: `Loading ${meta.label} models…` }))));
       } else {
         const q = searchInput.value.trim().toLocaleLowerCase('en');
-        const filtered = models.filter((m) => !q || `${m.name} ${m.id} ${m.org || ''} ${m.description || ''}`.toLocaleLowerCase('en').includes(q));
+        const filtered = models.filter((m) => {
+          if (activeGroup && String(m.group || '') !== activeGroup) return false;
+          return !q || `${m.name} ${m.id} ${m.org || ''} ${m.group || ''} ${m.description || ''}`.toLocaleLowerCase('en').includes(q);
+        });
         if (!filtered.length) {
           list.appendChild(el('div', { class: 'popover-empty', text: models.length ? 'No matching models.' : `No models retrieved from ${meta.label} yet.` }));
         } else {
           const current = selectedProviderModel(track);
-          filtered.forEach((m) => {
+          const fallbackOrgMap = { deepseek: 'deepseek', claude: 'anthropic', chatgpt: 'openai', qwen: 'alibaba', kimi: 'kimi', zai: 'zai', minimax: 'minimax', freebuff: 'freebuff', opencode: 'opencode', antigravity: 'google' };
+          const hasGroups = filtered.some((m) => Boolean(m.group));
+          const renderItem = (m) => {
             const caps = Array.isArray(m.capabilities) ? m.capabilities : [];
             const descParts = [m.org || meta.label, ...caps.slice(0, 3)];
             if (m.description) descParts.push(m.description);
@@ -3734,20 +3782,36 @@ You can start with a more structured option: one script, short captions, and a c
                 closePopover();
               }
             });
-            const fallbackOrgMap = { deepseek: 'deepseek', claude: 'anthropic', chatgpt: 'openai', qwen: 'alibaba', kimi: 'kimi', zai: 'zai', minimax: 'minimax', freebuff: 'freebuff', antigravity: 'google' };
             const orgKey = inferOrgFromModelName(`${m.org || ''} ${m.name || ''} ${m.id || ''}`) || fallbackOrgMap[track] || 'google';
             const avatar = el('span', { class: 'model-avatar has-logo' });
             avatar.innerHTML = orgLogoSvg(orgKey);
             option.insertBefore(avatar, option.firstChild);
             list.appendChild(option);
-          });
+          };
+          if (hasGroups) {
+            const grouped = new Map();
+            filtered.forEach((m) => {
+              const g = String(m.group || 'Other');
+              if (!grouped.has(g)) grouped.set(g, []);
+              grouped.get(g).push(m);
+            });
+            grouped.forEach((items, groupName) => {
+              list.appendChild(el('div', { class: 'popover-group-header' },
+                el('span', { text: groupName }),
+                el('span', { text: String(items.length) })
+              ));
+              items.forEach(renderItem);
+            });
+          } else {
+            filtered.forEach(renderItem);
+          }
         }
       }
       const statusText = entry.loading
         ? 'Refreshing…'
         : entry.live
           ? `Live · ${models.length} model${models.length === 1 ? '' : 's'}`
-          : (track === 'antigravity' ? 'Default list' : 'Default · open window & refresh for live models');
+          : (isLocalAgentTrack(track) ? 'Default list' : 'Default · open window & refresh for live models');
       foot.appendChild(el('span', { class: 'setting-desc', style: { fontSize: '11px', margin: '0' }, text: statusText }));
       foot.appendChild(el('button', {
         class: 'button button-small button-quiet', type: 'button', disabled: Boolean(entry.loading),
@@ -3757,7 +3821,13 @@ You can start with a more structured option: one script, short captions, and a c
 
     searchInput.addEventListener('input', renderOptions);
     renderOptions();
-    openPopover(trigger, content, { className: 'popover-models', align: 'left' });
+    openPopover(trigger, {
+      title: `${meta.label} models`,
+      subtitle: 'Pick a model for this tab',
+      content,
+      wide: true,
+      initialFocus: searchInput
+    });
     void loadProviderModels(track, { force: !providerModelEntry(track).live, quiet: true }).then(renderOptions);
   }
 
@@ -4052,6 +4122,8 @@ You can start with a more structured option: one script, short captions, and a c
     if (next === 'google') void loadGoogleStatus({ silent: true });
     if (isExtraProviderTrack(next)) void loadProviderModels(next, { quiet: true });
     renderChats();
+    renderModelChips();
+    renderModelsNavCount();
     updateComposerState();
     renderChatHead();
     updateAccountUI();
@@ -4744,7 +4816,7 @@ You can start with a more structured option: one script, short captions, and a c
           el('span', { class: `ws-mode-badge ${extraMeta.cls}`, 'aria-hidden': 'true', text: extraMeta.badge }),
           el('span', { text: extraMeta.label }))
       );
-      if (state.track !== 'antigravity') {
+      if (!isLocalAgentTrack(state.track)) {
         const pid = state.track;
         els.chatMeta.append(
           el('button', {
@@ -7103,6 +7175,19 @@ You can start with a more structured option: one script, short captions, and a c
 
   function renderModelsNavCount() {
     if (!els.modelsNavCount) return;
+    if (isExtraProviderTrack(state.track)) {
+      const meta = EXTRA_TRACK_META[state.track];
+      const entry = providerModelEntry(state.track);
+      const count = Array.isArray(entry.models) ? entry.models.length : 0;
+      els.modelsNavCount.textContent = entry.loading && !count ? '…' : (count ? String(count) : '—');
+      if (els.modelsNavBtn) {
+        const disabled = Boolean(state.generating);
+        els.modelsNavBtn.disabled = disabled;
+        els.modelsNavBtn.title = `Select a ${meta?.label || state.track} model`;
+        els.modelsNavBtn.setAttribute('aria-disabled', String(disabled));
+      }
+      return;
+    }
     const manual = allowsManualModels();
     els.modelsNavCount.textContent = manual && state.modelsLoading ? '…' : (manual && state.models.length ? String(state.models.length) : '—');
     if (els.modelsNavBtn) {
@@ -7134,7 +7219,7 @@ You can start with a more structured option: one script, short captions, and a c
       if (els.contextModality.previousElementSibling) els.contextModality.previousElementSibling.hidden = true;
       if (els.contextModel.previousElementSibling) els.contextModel.previousElementSibling.hidden = false;
       els.contextModel.hidden = false;
-      els.contextModel.textContent = selModel ? selModel.name : (state.track === 'antigravity' ? 'Local runtime' : 'Signed-in window');
+      els.contextModel.textContent = selModel ? selModel.name : (isLocalAgentTrack(state.track) ? 'Local runtime' : 'Signed-in window');
       if (els.contextPending) els.contextPending.hidden = !(state.pendingChanges > 0);
       return;
     }
@@ -10390,14 +10475,22 @@ You can start with a more structured option: one script, short captions, and a c
         detail: reason || item.desc, keywords: `work type modality ${item.id} ${item.label}`,
         disabled: Boolean(reason), run: () => changeModality(item.id)
       }));
+      const extraTrack = isExtraProviderTrack(state.track);
       actions.push({
         key: 'action:model', icon: 'layers',
-        title: state.mode === 'side-by-side' ? 'Choose models' : 'Choose model',
-        detail: !allowsManualModels()
-          ? 'Manual model selection is not available in this mode'
-          : reason || 'Open the model picker',
-        keywords: 'model picker select lane', disabled: !allowsManualModels() || Boolean(reason),
-        run: () => openModelPicker('a', els.modelsNavBtn || els.modeButton)
+        title: extraTrack
+          ? `Choose ${EXTRA_TRACK_META[state.track].label} model`
+          : (state.mode === 'side-by-side' ? 'Choose models' : 'Choose model'),
+        detail: extraTrack
+          ? `Open the ${EXTRA_TRACK_META[state.track].label} model picker`
+          : (!allowsManualModels()
+            ? 'Manual model selection is not available in this mode'
+            : reason || 'Open the model picker'),
+        keywords: 'model picker select lane',
+        disabled: extraTrack ? Boolean(state.generating) : (!allowsManualModels() || Boolean(reason)),
+        run: () => extraTrack
+          ? openProviderModelPicker(state.track, els.modelsNavBtn || els.modeButton)
+          : openModelPicker('a', els.modelsNavBtn || els.modeButton)
       });
       actions.push(
         {
@@ -12714,7 +12807,7 @@ You can start with a more structured option: one script, short captions, and a c
       wrap.appendChild(el('h3', { class: 'modal-section-title', text: 'Tab providers (no API keys)' }));
       wrap.appendChild(el('p', {
         class: 'setting-desc',
-        text: 'DeepSeek, Claude, ChatGPT, Qwen, Kimi, Z.AI / GLM, and MiniMax run inside persistent Linux WebKitGTK windows using your own manual sign-in. Antigravity connects to your local agy CLI or google-antigravity SDK. All tabs inside the same workspace share MEMORY.md, workspace read/write tools, and live cross-tab summaries.'
+        text: 'DeepSeek, Claude, ChatGPT, Qwen, Kimi, Z.AI / GLM, MiniMax, and Freebuff run inside persistent Linux WebKitGTK windows using your own manual sign-in. OpenCode and Antigravity connect to your local CLI/SDK runtimes. All tabs inside the same workspace share MEMORY.md, workspace read/write tools, and live cross-tab summaries.'
       }));
       const grid = el('div', { class: 'providers-grid' });
       const list = Array.isArray(state.providers) ? state.providers : [];
@@ -14767,12 +14860,16 @@ You can start with a more structured option: one script, short captions, and a c
       }
     });
     els.modelsNavBtn?.addEventListener('click', () => {
-      if (!allowsManualModels()) {
-        toast("In this mode, model selection is disabled.", 'info');
-        return;
-      }
       if (state.generating) {
         toast("Models can be changed after generation is complete.", 'info');
+        return;
+      }
+      if (isExtraProviderTrack(state.track)) {
+        openProviderModelPicker(state.track, els.modelsNavBtn);
+        return;
+      }
+      if (!allowsManualModels()) {
+        toast("In this mode, model selection is disabled.", 'info');
         return;
       }
       openModelPicker('a', els.modelsNavBtn);

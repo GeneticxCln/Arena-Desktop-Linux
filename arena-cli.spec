@@ -55,6 +55,7 @@ hiddenimports = [
     'arena.providers.zai',
     'arena.providers.minimax',
     'arena.providers.freebuff',
+    'arena.providers.opencode',
     'arena.providers.antigravity',
     'arena.tools',
     'arena.tools.base',

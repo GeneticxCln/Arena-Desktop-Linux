@@ -11,6 +11,7 @@ from arena.providers.deepseek import DeepSeekProvider
 from arena.providers.freebuff import FreebuffProvider
 from arena.providers.kimi import KimiProvider
 from arena.providers.minimax import MiniMaxProvider
+from arena.providers.opencode import OpenCodeProvider
 from arena.providers.qwen import QwenProvider
 from arena.providers.web_engine import get_window_factory, set_window_factory
 from arena.providers.zai import ZaiProvider
@@ -24,6 +25,7 @@ PROVIDERS: dict[str, Provider] = {
     "zai": ZaiProvider(),
     "minimax": MiniMaxProvider(),
     "freebuff": FreebuffProvider(),
+    "opencode": OpenCodeProvider(),
     "antigravity": AntigravityProvider(),
 }
 
@@ -31,7 +33,7 @@ EXTRA_PROVIDER_IDS: tuple[str, ...] = tuple(PROVIDERS.keys())
 ALL_TRACK_IDS: tuple[str, ...] = ("arena", "google", *EXTRA_PROVIDER_IDS)
 
 
-def get_provider(provider_id: str) -> Optional[Provider]:
+def get_provider(provider_id: str) -> Provider | None:
     return PROVIDERS.get(str(provider_id or "").strip().lower())
 
 

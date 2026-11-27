@@ -18,49 +18,59 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
-from typing import Optional
 from urllib.parse import urlparse
 
 import requests
-
-from flask import Flask, Response, jsonify, request, send_file, send_from_directory, stream_with_context
+from flask import (
+    Flask,
+    Response,
+    jsonify,
+    request,
+    send_file,
+    stream_with_context,
+)
 
 # Add parent to path for arena imports
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from arena.config import (
-    BASE_URL,
-    CHATS_DIR,
-    COOKIE_FILE,
-    CONFIG_DIR,
-    ensure_config_dir,
-    load_config,
-    restrict_permissions,
-    save_config,
-)
-from arena.api import ArenaClient, extract_bearer_token, fetch_cookies_via_cdp
-from arena.models import (sync_models, get_models_for_modality, get_router_model,
-                          get_auto_agent_model, model_input_support,
-                          model_can_receive_attachment, ORG_COLOR_MAP)
-from arena.auth import detect_installed_browsers, parse_cookie_input
-from arena import google_http, providers, terminal as pty_terminal
-from arena.deep_links import parse_deep_link
-
 import base64
-import re
-import shutil
-import sqlite3
-import subprocess
-import tempfile
-import uuid
 import codecs
 import functools
 import html
 import http.server
 import io
+import re
+import shutil
+import sqlite3
+import subprocess
+import tempfile
 import urllib.parse
-
+import uuid
 from datetime import datetime, timezone
+
+from arena import google_http, providers
+from arena import terminal as pty_terminal
+from arena.api import ArenaClient, fetch_cookies_via_cdp
+from arena.auth import parse_cookie_input
+from arena.config import (
+    BASE_URL,
+    CHATS_DIR,
+    CONFIG_DIR,
+    COOKIE_FILE,
+    ensure_config_dir,
+    load_config,
+    restrict_permissions,
+    save_config,
+)
+from arena.deep_links import parse_deep_link
+from arena.models import (
+    ORG_COLOR_MAP,
+    get_auto_agent_model,
+    get_models_for_modality,
+    model_can_receive_attachment,
+    model_input_support,
+    sync_models,
+)
 
 
 def _decrypt_cookie_val(enc: bytes, key: bytes):
@@ -144,7 +154,7 @@ def _linux_chromium_key():
     return _derive_linux_chromium_key(b'peanuts')
 
 
-def _linux_chromium_keyring_password(browser_name: str) -> Optional[bytes]:
+def _linux_chromium_keyring_password(browser_name: str) -> bytes | None:
     """Query Linux Secret Service (GNOME Keyring / KWallet) for a browser's
     Safe Storage password via ``secret-tool`` so v11 cookies can be decrypted."""
     tool = shutil.which("secret-tool")
@@ -268,12 +278,22 @@ def _find_preview_url(val):
     return None
 
 
-from arena import agent, components, connectors, contracts, crypto, history_sync, native_agent, permissions, workspace
-from arena.gateway import GatewayManager
-from arena.native_subagents import NativeSubagentPool
+from arena import (
+    agent,
+    components,
+    connectors,
+    contracts,
+    crypto,
+    history_sync,
+    native_agent,
+    permissions,
+    workspace,
+)
 from arena.api import generate_uuidv7
 from arena.auth import get_clipboard_text
 from arena.engine import ENGINE
+from arena.gateway import GatewayManager
+from arena.native_subagents import NativeSubagentPool
 
 _overrides = contracts.load_overrides()
 MODE_API_MAP = dict(contracts.UI_MODES)
@@ -366,7 +386,7 @@ def _stopped() -> bool:
     The per-chat event lives in thread-local storage (set by the SSE
     generator), so parallel chats stop independently; the legacy global
     event still stops everything."""
-    if getattr(_stop, 'is_set')():
+    if _stop.is_set():
         return True
     event = getattr(_tl, "stop_event", None)
     return bool(event is not None and event.is_set())
@@ -384,7 +404,7 @@ def _diag_trace(fn):
     return fn
 
 _API_TOKEN = secrets.token_urlsafe(32)
-_BOOT_NONCE: Optional[str] = None
+_BOOT_NONCE: str | None = None
 _BOOT_COOKIE_NAME = "_arena_boot"
 
 APP_VERSION = "7.4.1"
@@ -407,11 +427,11 @@ def _no_store_ui(resp):
     return resp
 
 # Global client instance
-_client: Optional[ArenaClient] = None
+_client: ArenaClient | None = None
 _conversation_history: list = []
 _ui_mode = 'battle'
 _ui_modality = 'auto'
-_current_chat_id: Optional[str] = None
+_current_chat_id: str | None = None
 
 _UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
 
@@ -499,7 +519,7 @@ def _save_chat(chat_id: str, title: str, messages: list,
         os.replace(tmp_file, chat_file)
 
 
-def _load_chat(chat_id: str) -> Optional[dict]:
+def _load_chat(chat_id: str) -> dict | None:
     if not _validate_chat_id(chat_id):
         return None
     chat_file = CHATS_DIR / chat_id / "chat.json"
@@ -593,7 +613,7 @@ def _orphan_children(parent_id: str) -> None:
                        agent_backend=data.get("agent_backend"), parent_id="")
 
 
-def _find_chat_by_eval(eval_id: str) -> Optional[dict]:
+def _find_chat_by_eval(eval_id: str) -> dict | None:
     if not eval_id:
         return None
     key = str(eval_id)
@@ -643,7 +663,7 @@ def _delete_chat(chat_id: str) -> bool:
     return deleted
 
 
-def _read_cookie_file() -> Optional[str]:
+def _read_cookie_file() -> str | None:
     try:
         if not COOKIE_FILE.exists():
             return None
@@ -705,7 +725,7 @@ def _catalog_models(force: bool = False) -> list:
     return models if isinstance(models, list) else []
 
 
-def _selection_error(ui_mode: str, ui_modality: str) -> Optional[str]:
+def _selection_error(ui_mode: str, ui_modality: str) -> str | None:
     if ui_mode not in MODE_API_MAP:
         return f"Invalid mode: {ui_mode}"
     if ui_modality not in MODALITY_API_MAP:
@@ -724,12 +744,12 @@ def _allowed_model_ids(ui_mode: str, ui_modality: str) -> set:
             if m.get("model_id", m.get("id"))}
 
 
-def _auto_agent_model(preferred_id: str = None, required_inputs: tuple = ()) -> Optional[dict]:
+def _auto_agent_model(preferred_id: str = None, required_inputs: tuple = ()) -> dict | None:
     return get_auto_agent_model(_catalog_models(), preferred_id=preferred_id,
                                 required_inputs=tuple(required_inputs or ()))
 
 
-def _catalog_model_by_id(model_id) -> Optional[dict]:
+def _catalog_model_by_id(model_id) -> dict | None:
     if model_id in (None, ""):
         return None
     target = str(model_id)
@@ -751,7 +771,7 @@ def _attachment_kinds(attachments) -> tuple:
     return tuple(kinds)
 
 
-def _model_attachment_error(model_id, attachments, label="The selected model") -> Optional[str]:
+def _model_attachment_error(model_id, attachments, label="The selected model") -> str | None:
     if not attachments or not model_id:
         return None
     model = _catalog_model_by_id(model_id)
@@ -958,6 +978,7 @@ def _summarize_tab_for_memory(data: dict) -> str:
         "zai": "[Z.AI]",
         "minimax": "[MiniMax]",
         "freebuff": "[Freebuff]",
+        "opencode": "[OpenCode]",
         "antigravity": "[Antigravity]",
     }
     mode_tag = _SRC_TAG.get(str(data.get("source") or "").lower(), "[Arena]")
@@ -1259,7 +1280,7 @@ def _first_account_id(store: dict):
     return accounts[0].get("id") if accounts else None
 
 
-def _register_account(user: dict, cookie: str) -> Optional[str]:
+def _register_account(user: dict, cookie: str) -> str | None:
     """Remember (or refresh) the account that just signed in and make it
     current.  Identity comes from a verified /me response; the cookie is
     stored only on disk and never sent to the frontend."""
@@ -1348,7 +1369,7 @@ def _remove_account(account_id: str):
         _accounts_save(store)
 
 
-def _user_identity(user, fallback: Optional[dict] = None) -> dict:
+def _user_identity(user, fallback: dict | None = None) -> dict:
     """Best email/name/avatar for the signed-in user, from any shape Arena uses.
 
     /api/me and the Supabase session disagree on field names over time
@@ -2954,7 +2975,7 @@ def _safe_upload_token(value, fallback="unknown", limit=64) -> str:
     return text[:limit] or fallback
 
 
-def _safe_upload_image_meta(meta) -> Optional[dict]:
+def _safe_upload_image_meta(meta) -> dict | None:
     if not isinstance(meta, dict):
         return None
     safe = {}
@@ -3172,7 +3193,7 @@ def _media_choice_answer(choice_id):
         return copy.deepcopy((item or {}).get("answer"))
 
 
-def _native_cas_url(media_hash) -> Optional[str]:
+def _native_cas_url(media_hash) -> str | None:
     value = str(media_hash or "")
     return f"/api/native-cas/{value}" if _NATIVE_CAS_HASH_RE.match(value) else None
 
@@ -3462,7 +3483,7 @@ def _export_filename(data: dict) -> str:
 
 def _export_safe_url(raw, image=False):
     value = str(raw or "").strip()
-    if image and re.match(r"data:image/(?:png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=\s]+$", value, re.I):
+    if image and re.match(r"data:image/(?:png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=\s]+$", value, re.IGNORECASE):
         return value
     parsed = urlparse(value)
     if parsed.scheme.lower() in ("http", "https") and parsed.netloc:
@@ -3480,7 +3501,7 @@ _EXPORT_INLINE_RE = re.compile(
     r"(?P<strike>~~(?P<strike_text>.+?)~~)|"
     r"(?P<italic>(?<![\w*])\*(?P<italic_text>[^*\n]+?)\*(?![\w*])|(?<![\w_])_(?P<italic_text2>[^_\n]+?)_(?![\w_]))|"
     r"(?P<autolink>https?://[^\s<>\"]+)",
-    re.S,
+    re.DOTALL,
 )
 
 
@@ -3530,10 +3551,8 @@ def _export_inline(text: str) -> str:
 
 def _export_table_cells(line: str):
     value = line.strip()
-    if value.startswith("|"):
-        value = value[1:]
-    if value.endswith("|"):
-        value = value[:-1]
+    value = value.removeprefix("|")
+    value = value.removesuffix("|")
     return [cell.strip() for cell in value.split("|")]
 
 
@@ -4134,7 +4153,7 @@ def api_automations_run(aid):
     return jsonify({"ok": True})
 
 
-def _archive_agentic_on_arena(session_id: str) -> Optional[str]:
+def _archive_agentic_on_arena(session_id: str) -> str | None:
     """POST /api/chat/{id}/archive (Arena Agent sessions). Error or None."""
     path = contracts.PATHS["chat_archive"].format(
         session_id=urllib.parse.quote(str(session_id)))
@@ -4659,7 +4678,7 @@ def _workspace_dir() -> Path:
     return Path(raw).expanduser() if raw else workspace.PROJECTS_DIR / "workspace"
 
 
-def _chosen_ws() -> Optional[Path]:
+def _chosen_ws() -> Path | None:
     """The folder picked for the track being addressed (Arena by default)."""
     raw = _settings_value("workspace_dir")
     return Path(raw).expanduser() if raw else None
@@ -4699,7 +4718,7 @@ class _HttpStream:
         return self._text
 
 
-def _client_account_id(client) -> Optional[str]:
+def _client_account_id(client) -> str | None:
     account_id = getattr(client, "_arena_account_id", None)
     if account_id and str(account_id) != "current":
         return str(account_id)
@@ -4795,7 +4814,6 @@ class _QuietHandler(http.server.SimpleHTTPRequestHandler):
 
     def list_directory(self, path):
         self.send_error(403, "Directory listing disabled")
-        return None
 
     def _host_allowed(self) -> bool:
         host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip().lower()
@@ -5383,7 +5401,7 @@ def _pacer_lane(key: str) -> dict:
 
 
 class _PacerPermit:
-    __slots__ = ("lane", "counted", "released")
+    __slots__ = ("counted", "lane", "released")
 
     def __init__(self, lane=None, counted=False):
         self.lane, self.counted, self.released = lane, counted, False
@@ -6518,7 +6536,7 @@ def _iter_records_idle(resp, idle_seconds, should_stop=None):
     cycle — and the Stop button — on it.  Reading in a daemon thread lets
     the caller enforce an idle bound and react to Stop within a second.
     """
-    q: "queue.Queue" = queue.Queue()
+    q: queue.Queue = queue.Queue()
 
     def reader():
         try:
@@ -6769,7 +6787,7 @@ def _native_media_choice_hitl(pending: dict):
 _native_image_choice_hitl = _native_media_choice_hitl
 
 
-def _native_apply_media_reveal(result: dict, event: dict) -> Optional[dict]:
+def _native_apply_media_reveal(result: dict, event: dict) -> dict | None:
     """Persist a model reveal onto the matching generate_image tool entry."""
     attribution = event.get("attribution") or []
     if not attribution:
@@ -7699,7 +7717,7 @@ _ACCOUNT_SESSION_CURSOR = 0
 
 
 class _AccountClientLease:
-    __slots__ = ("client", "account_id", "account_name", "released")
+    __slots__ = ("account_id", "account_name", "client", "released")
 
     def __init__(self, client, account_id, account_name=""):
         self.client = client
@@ -8357,7 +8375,7 @@ def _agent_run(client: ArenaClient, message: str, conv: dict):
                     sig = json.dumps([l, call.get("name"), call.get("params") or {}],
                                      sort_keys=True, ensure_ascii=False)
                 except (TypeError, ValueError):
-                    sig = f"{l}:{repr(call)}"
+                    sig = f"{l}:{call!r}"
                 sig_counts[sig] = sig_counts.get(sig, 0) + 1
                 if sig_counts[sig] >= 4:
                     blocked[id(call)] = max(blocked.get(id(call), 0), sig_counts[sig])
@@ -8417,7 +8435,7 @@ def _agent_run(client: ArenaClient, message: str, conv: dict):
                         out_key = json.dumps([l, call["name"], call.get("params") or {}],
                                              sort_keys=True, ensure_ascii=False)
                     except (TypeError, ValueError):
-                        out_key = f"{l}:{repr(call)}"
+                        out_key = f"{l}:{call!r}"
                     cache = conv.setdefault("_output_cache", {})
                     answer = yield from _permit(mode, call["name"], info)
                     if answer != "allow":
@@ -8878,7 +8896,7 @@ def _attachment_media_type(filename: str, declared: str) -> str:
     return declared or by_ext or "application/octet-stream"
 
 
-def _sniff_attachment_media_type(data: bytes) -> Optional[str]:
+def _sniff_attachment_media_type(data: bytes) -> str | None:
     """Identify binary attachments from content, not from a spoofable name."""
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
@@ -8968,9 +8986,7 @@ def _prepare_image_upload(filename: str, media_type: str, data: bytes):
             prepared = ImageOps.exif_transpose(image)
             if "transparency" in prepared.info and prepared.mode == "P":
                 prepared = prepared.convert("RGBA")
-            elif prepared.mode in {"CMYK", "YCCK"}:
-                prepared = prepared.convert("RGB")
-            elif prepared.mode in {"P", "PA", "I", "I;16", "F"}:
+            elif prepared.mode in {"CMYK", "YCCK"} or prepared.mode in {"P", "PA", "I", "I;16", "F"}:
                 prepared = prepared.convert("RGB")
             elif prepared.mode in {"LA", "La"}:
                 prepared = prepared.convert("RGBA")
@@ -9003,7 +9019,7 @@ def _prepare_image_upload(filename: str, media_type: str, data: bytes):
             "Save it again as PNG or JPEG and attach the new file.")
 
 
-def _validate_upload(kind: str, media_type: str, size: int, modality: str) -> Optional[str]:
+def _validate_upload(kind: str, media_type: str, size: int, modality: str) -> str | None:
     """Mirror Arena's attachment rules; returns a friendly refusal or None."""
     if kind == "agent":
         if media_type not in contracts.AGENT_ATTACHMENT_MIME_TYPES:
@@ -9023,7 +9039,7 @@ def _validate_upload(kind: str, media_type: str, size: int, modality: str) -> Op
     return None
 
 
-def _storage_put(upload_url: str, data: bytes, media_type: str) -> Optional[str]:
+def _storage_put(upload_url: str, data: bytes, media_type: str) -> str | None:
     """PUT bytes to Arena's presigned storage URL; returns an error or None."""
     try:
         resp = requests.put(upload_url, data=data,
@@ -9305,7 +9321,7 @@ def _google_http_account(cookie: str = "") -> dict:
 # install one. So the protocol lives on the *executor* side:
 # an Arena Agent chat receives Google's answer as a brief and reports back with
 # "ASK:" lines when it needs material only the planner can supply.
-_ASK_RE = re.compile(r"^[ \t]*ASK(?:-PLANNER)?[ \t]*:[ \t]*(.+?)[ \t]*$", re.M | re.I)
+_ASK_RE = re.compile(r"^[ \t]*ASK(?:-PLANNER)?[ \t]*:[ \t]*(.+?)[ \t]*$", re.MULTILINE | re.IGNORECASE)
 
 
 def _supervisor_questions(text: str) -> list:
@@ -10911,7 +10927,7 @@ def _provider_track_stream(
     message: str,
     workspace_hint: str = "",
     model_id: str = "",
-    tools_enabled: Optional[bool] = None,
+    tools_enabled: bool | None = None,
 ):
     """Stream one turn through a pluggable provider (DeepSeek/Claude/ChatGPT/Antigravity).
 
@@ -11011,7 +11027,7 @@ def _provider_track_stream(
         max_rounds = agent.MAX_ROUNDS if local_tools is not None else 1
         saved = False
 
-        def _persist_turn() -> tuple[str, Optional[dict]]:
+        def _persist_turn() -> tuple[str, dict | None]:
             nonlocal saved
             clean_ans = agent.strip_tool_calls(answer).strip() if local_tools is not None else answer
             ck_id = (conv_ctx.get("_checkpoint_a") or {}).get("id")
@@ -11941,7 +11957,6 @@ def _diag_request_start():
             _diag_mark(request.path)
     except Exception:
         pass
-    return None
 
 
 @app.after_request
@@ -12116,7 +12131,7 @@ def api_doctor():
     return jsonify({"checks": checks, "permission_mode": _perm_mode()})
 
 
-def _allowed_root(raw) -> Optional[Path]:
+def _allowed_root(raw) -> Path | None:
     try:
         p = Path(str(raw or "")).expanduser().resolve()
     except (OSError, ValueError):
@@ -12435,7 +12450,7 @@ def api_workspace_set():
             _workspaces_save_items(cfg, folder_items, "general")
         return jsonify({"ok": True, "workspace": str(_workspace_dir()), "cleared": True,
                         "track": track})
-    raw = ((payload.get("path") or "")).strip().strip('"')
+    raw = (payload.get("path") or "").strip().strip('"')
     if not raw:
         return jsonify({"ok": False, "error": "No folder given"}), 400
     root = Path(raw).expanduser()
@@ -12748,7 +12763,7 @@ def api_workspace_git_commit():
 # Agent below uses local MCP servers instead.
 
 _CONNECTOR_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-_connector_link_pending: Optional[dict] = None
+_connector_link_pending: dict | None = None
 
 _LINK_WIDGET_JS = r"""
 (function () {
@@ -12790,7 +12805,7 @@ def _valid_connector_slug(slug) -> bool:
     return isinstance(slug, str) and bool(_CONNECTOR_SLUG_RE.match(slug))
 
 
-def _normalize_arena_connector(raw, statuses: Optional[dict] = None) -> Optional[dict]:
+def _normalize_arena_connector(raw, statuses: dict | None = None) -> dict | None:
     if not isinstance(raw, dict):
         return None
     slug = raw.get("slug")
