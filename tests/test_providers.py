@@ -97,6 +97,7 @@ def test_provider_registry_lists_all_providers():
         "kimi",
         "zai",
         "minimax",
+        "freebuff",
         "antigravity",
     ]
     for pid in ids:
@@ -702,7 +703,7 @@ def test_audit_fixes_security_stop_history_and_antigravity_stderr(tmp_path, monk
 
     # 4. Flask API `/api/providers/<id>/models` + model_id passthrough on `/api/chat`
     client = web_app.app.test_client()
-    for pid in ("deepseek", "claude", "chatgpt", "qwen", "kimi", "zai", "minimax", "antigravity"):
+    for pid in ("deepseek", "claude", "chatgpt", "qwen", "kimi", "zai", "minimax", "freebuff", "antigravity"):
         r = client.get(f"/api/providers/{pid}/models")
         assert r.status_code == 200
         body = r.get_json()

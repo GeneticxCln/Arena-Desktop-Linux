@@ -5023,6 +5023,10 @@ body[data-track="google"] .ws-tab.is-active {
   background: rgba(20, 184, 166, 0.22);
   color: #5eead4;
 }
+.ws-mode-badge.is-freebuff {
+  background: rgba(34, 197, 94, 0.22);
+  color: #86efac;
+}
 .ws-mode-badge.is-antigravity {
   background: rgba(236, 72, 153, 0.22);
   color: #f9a8d4;
@@ -5057,6 +5061,10 @@ body[data-track="minimax"] .modality-chip,
 body[data-track="minimax"] .mode-chip,
 body[data-track="minimax"] .model-strip,
 body[data-track="minimax"] .agent-integration-chip,
+body[data-track="freebuff"] .modality-chip,
+body[data-track="freebuff"] .mode-chip,
+body[data-track="freebuff"] .model-strip,
+body[data-track="freebuff"] .agent-integration-chip,
 body[data-track="antigravity"] .modality-chip,
 body[data-track="antigravity"] .mode-chip,
 body[data-track="antigravity"] .model-strip,

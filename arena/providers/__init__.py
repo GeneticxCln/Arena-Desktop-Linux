@@ -8,6 +8,7 @@ from arena.providers.base import Provider
 from arena.providers.chatgpt import ChatGPTProvider
 from arena.providers.claude import ClaudeProvider
 from arena.providers.deepseek import DeepSeekProvider
+from arena.providers.freebuff import FreebuffProvider
 from arena.providers.kimi import KimiProvider
 from arena.providers.minimax import MiniMaxProvider
 from arena.providers.qwen import QwenProvider
@@ -22,6 +23,7 @@ PROVIDERS: dict[str, Provider] = {
     "kimi": KimiProvider(),
     "zai": ZaiProvider(),
     "minimax": MiniMaxProvider(),
+    "freebuff": FreebuffProvider(),
     "antigravity": AntigravityProvider(),
 }
 

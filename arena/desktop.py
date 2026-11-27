@@ -412,7 +412,8 @@ def main():
         LOG.info("registered arenadesktop:// for this user")
     instance_token = deep_links.new_instance_token()
     web_app.INSTANCE_TOKEN = instance_token
-    boot_nonce = deep_links.new_instance_token()
+    env_boot_nonce = (os.environ.get("ARENA_BOOT_NONCE") or "").strip()
+    boot_nonce = env_boot_nonce if len(env_boot_nonce) >= 24 else deep_links.new_instance_token()
     web_app._BOOT_NONCE = boot_nonce
 
     for sig in (signal.SIGINT, signal.SIGTERM):

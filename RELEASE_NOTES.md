@@ -4,6 +4,8 @@ Comprehensive security, reliability, streaming, and UI bug-fix release covering 
 
 ### Highlights in 7.4.1
 
+- **Freebuff Web Provider (`freebuff.com/chat`)**:
+  - Added **Freebuff (`F`)** as a signed-in WebKitGTK provider tab (`arena/providers/freebuff.py`) with `/api/auth/session` + NextAuth sign-in verification, live model discovery, multi-format SSE observation, and shared workspace `MEMORY.md`, skills, and read/write tools.
 - **Security & Permission Hardening**:
   - Added per-launch desktop `?boot=<nonce>` cookie gate on `GET /` so unauthenticated local processes cannot scrape `<meta name="api-token">`.
   - Closed Auto-mode safe-command bypasses (newline/NUL injection, `git diff --output`/`--ext-diff`/`--textconv`, `git branch -[dDmMcCf]`, and sensitive path arguments), expanded catastrophic `rm` detection, scoped `PermissionBroker._always` per chat (excluding Agent Gateway), and defaulted Agent Gateway to off (`gateway_enabled is True`).
@@ -20,7 +22,7 @@ Comprehensive security, reliability, streaming, and UI bug-fix release covering 
 ### Verification
 
 - Static checks (`ruff check --select F821,F811,F823,B006,B023`, `node --check`, `bash -n`, `python -m compileall`, Cyrillic UI hygiene, `qwen.py` untouched) pass.
-- Full non-browser test suite: **507 passed** (including 26 new audit regression tests).
+- Full non-browser test suite: **513 passed** (including 26 audit regression tests and 6 Freebuff provider tests).
 
 ---
 

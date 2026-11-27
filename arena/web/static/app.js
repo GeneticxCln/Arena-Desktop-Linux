@@ -248,7 +248,7 @@
     if (ORG_LOGOS[key]) return ORG_LOGOS[key];
     const rawInitial = (key || '?')[0].toUpperCase();
     const initial = /^[A-Z0-9]$/.test(rawInitial) ? rawInitial : '?';
-    const colors = { kimi: '#0EA5E9', minimax: '#14B8A6', zai: '#8B5CF6', stepfun: '#EC4899', bytedance: '#00D1FF', tencent: '#2B82EE', amazon: '#FF9900', microsoft: '#00BCF2', ibm: '#054ADA', cohere: '#F43F5E' };
+    const colors = { kimi: '#0EA5E9', minimax: '#14B8A6', freebuff: '#22C55E', zai: '#8B5CF6', stepfun: '#EC4899', bytedance: '#00D1FF', tencent: '#2B82EE', amazon: '#FF9900', microsoft: '#00BCF2', ibm: '#054ADA', cohere: '#F43F5E' };
     const fill = colors[key] || '#3a4040';
     return `<svg viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="12" r="10" fill="${fill}"/><text x="12" y="16" text-anchor="middle" fill="#e8f0ea" font-size="11" font-weight="700" font-family="sans-serif">${initial}</text></svg>`;
   }
@@ -268,6 +268,7 @@
     if (/nvidia|nemotron/.test(text)) return 'nvidia';
     if (/command|cohere/.test(text)) return 'cohere';
     if (/minimax|abab/.test(text)) return 'minimax';
+    if (/freebuff|codebuff/.test(text)) return 'freebuff';
     return '';
   }
 
@@ -1743,6 +1744,7 @@
           { id: 'kimi', name: 'Kimi', short_name: 'Kimi', badge: 'K', badge_class: 'is-kimi', description: 'kimi.ai/en signed-in window', kind: 'webview', available: false, signed_in: false, open: false, detail: 'Demo mode' },
           { id: 'zai', name: 'Z.AI / GLM', short_name: 'Z.AI', badge: 'Z', badge_class: 'is-zai', description: 'chat.z.ai signed-in window', kind: 'webview', available: false, signed_in: false, open: false, detail: 'Demo mode' },
           { id: 'minimax', name: 'MiniMax', short_name: 'MiniMax', badge: 'M', badge_class: 'is-minimax', description: 'agent.minimax.io signed-in window', kind: 'webview', available: false, signed_in: false, open: false, detail: 'Demo mode' },
+          { id: 'freebuff', name: 'Freebuff', short_name: 'Freebuff', badge: 'F', badge_class: 'is-freebuff', description: 'freebuff.com/chat signed-in window', kind: 'webview', available: false, signed_in: false, open: false, detail: 'Demo mode' },
           { id: 'antigravity', name: 'Antigravity', short_name: 'Antigravity', badge: '\u25b2', badge_class: 'is-antigravity', description: 'Local Google Antigravity runtime', kind: 'local_agent', available: false, signed_in: false, open: false, detail: 'Demo mode' }
         ],
         demo: true
@@ -2411,7 +2413,7 @@ You can start with a more structured option: one script, short captions, and a c
       modality: validModality(raw.modality),
       agent_backend: raw.agent_backend === 'arena' ? 'arena' : raw.agent_backend === 'local' ? 'local' : null,
       pinned: Boolean(raw.pinned ?? raw.starred),
-      source: ['arena', 'google', 'deepseek', 'claude', 'chatgpt', 'qwen', 'kimi', 'zai', 'minimax', 'antigravity'].includes(raw.source)
+      source: ['arena', 'google', 'deepseek', 'claude', 'chatgpt', 'qwen', 'kimi', 'zai', 'minimax', 'freebuff', 'antigravity'].includes(raw.source)
         ? raw.source
         : 'local',
       workspace: typeof raw.workspace === 'string' ? raw.workspace : '',
@@ -3584,6 +3586,7 @@ You can start with a more structured option: one script, short captions, and a c
     kimi: { label: 'Kimi', badge: 'K', cls: 'is-kimi', title: '<em>Kimi</em> AI', lede: 'Chat with Kimi (kimi.ai/en) inside your signed-in Linux WebKitGTK session, sharing workspace memory and read/write tools with sibling tabs.', note: 'Pure WebKitGTK signed-in window · no CLI or API key required', placeholder: 'Ask Kimi…' },
     zai: { label: 'Z.AI / GLM', badge: 'Z', cls: 'is-zai', title: '<em>Z.AI</em> / GLM', lede: 'Chat with Z.AI / GLM (chat.z.ai) inside your signed-in Linux WebKitGTK session, sharing workspace memory and read/write tools with sibling tabs.', note: 'Pure WebKitGTK signed-in window · no CLI or API key required', placeholder: 'Ask Z.AI / GLM…' },
     minimax: { label: 'MiniMax', badge: 'M', cls: 'is-minimax', title: 'Mini<em>Max</em>', lede: 'Chat with MiniMax (agent.minimax.io) inside your signed-in Linux WebKitGTK session, sharing workspace memory and read/write tools with sibling tabs.', note: 'Pure WebKitGTK signed-in window · no CLI or API key required', placeholder: 'Ask MiniMax…' },
+    freebuff: { label: 'Freebuff', badge: 'F', cls: 'is-freebuff', title: '<em>Freebuff</em> Chat', lede: 'Chat with Freebuff (freebuff.com/chat) inside your signed-in Linux WebKitGTK session, sharing workspace memory, skills, and read/write tools with sibling tabs.', note: 'Pure WebKitGTK signed-in window · no CLI or API key required', placeholder: 'Ask Freebuff…' },
     antigravity: { label: 'Antigravity', badge: '\u25b2', cls: 'is-antigravity', title: 'Google <em>Antigravity</em>', lede: 'Run your local Google Antigravity agent directly inside this workspace, sharing MEMORY.md and cross-tab summaries.', note: 'Local Antigravity runtime (auto-detects agy CLI or google-antigravity SDK)', placeholder: 'Ask Antigravity…' }
   };
   const ALL_VALID_TRACKS = ['arena', 'google', ...Object.keys(EXTRA_TRACK_META)];
@@ -3731,7 +3734,7 @@ You can start with a more structured option: one script, short captions, and a c
                 closePopover();
               }
             });
-            const fallbackOrgMap = { deepseek: 'deepseek', claude: 'anthropic', chatgpt: 'openai', qwen: 'alibaba', kimi: 'kimi', zai: 'zai', minimax: 'minimax', antigravity: 'google' };
+            const fallbackOrgMap = { deepseek: 'deepseek', claude: 'anthropic', chatgpt: 'openai', qwen: 'alibaba', kimi: 'kimi', zai: 'zai', minimax: 'minimax', freebuff: 'freebuff', antigravity: 'google' };
             const orgKey = inferOrgFromModelName(`${m.org || ''} ${m.name || ''} ${m.id || ''}`) || fallbackOrgMap[track] || 'google';
             const avatar = el('span', { class: 'model-avatar has-logo' });
             avatar.innerHTML = orgLogoSvg(orgKey);

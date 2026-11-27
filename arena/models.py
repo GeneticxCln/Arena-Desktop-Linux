@@ -36,6 +36,7 @@ ORG_COLOR_MAP = {
     "zai": "#8B5CF6",          # Violet
     "stepfun": "#EC4899",      # Pink
     "minimax": "#14B8A6",      # Teal
+    "freebuff": "#22C55E",     # Freebuff Emerald
     "cohere": "#F43F5E",       # Rose
     "nvidia": "#76B900",       # Nvidia Green
     "boss-bandit": "#EAB308",  # Router Gold

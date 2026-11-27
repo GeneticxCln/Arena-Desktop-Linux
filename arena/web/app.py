@@ -957,6 +957,7 @@ def _summarize_tab_for_memory(data: dict) -> str:
         "kimi": "[Kimi]",
         "zai": "[Z.AI]",
         "minimax": "[MiniMax]",
+        "freebuff": "[Freebuff]",
         "antigravity": "[Antigravity]",
     }
     mode_tag = _SRC_TAG.get(str(data.get("source") or "").lower(), "[Arena]")

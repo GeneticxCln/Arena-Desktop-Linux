@@ -9,10 +9,13 @@ must both be attached). Exits non-zero on failure; useful under xvfb-run in CI.
 import json
 import os
 import re
+import secrets
 import signal
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 
 
@@ -33,14 +36,17 @@ def _stop(proc):
 def main() -> int:
     binary = sys.argv[1] if len(sys.argv) > 1 else "dist/Arena-Desktop"
     port = int(os.environ.get("ARENA_SMOKE_PORT") or 43871)
-    env = dict(os.environ, ARENA_PORT=str(port))
+    boot_nonce = secrets.token_urlsafe(32)
+    env = dict(os.environ, ARENA_PORT=str(port), ARENA_BOOT_NONCE=boot_nonce)
     proc = subprocess.Popen(
         [binary], env=env, start_new_session=True,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
     base = f"http://127.0.0.1:{port}"
+    boot_url = f"{base}/?{urllib.parse.urlencode({'boot': boot_nonce})}"
     try:
         html = None
+        last_err = None
         deadline = time.time() + 90
         while time.time() < deadline:
             if proc.poll() is not None:
@@ -48,12 +54,21 @@ def main() -> int:
                 print(output, file=sys.stderr)
                 raise SystemExit(f"binary exited with {proc.returncode} before serving the UI")
             try:
-                html = urllib.request.urlopen(base + "/", timeout=2).read().decode("utf-8", "replace")
+                html = urllib.request.urlopen(boot_url, timeout=2).read().decode("utf-8", "replace")
                 break
-            except Exception:
+            except Exception as exc:
+                last_err = exc
                 time.sleep(0.5)
         if not html:
-            raise SystemExit("local UI did not start within 90 seconds")
+            raise SystemExit(f"local UI did not start within 90 seconds (last error: {last_err})")
+
+        # Verify unauthenticated GET / (without boot nonce) is rejected with 403.
+        try:
+            urllib.request.urlopen(base + "/", timeout=2).read()
+            raise SystemExit("GET / without boot nonce unexpectedly succeeded (expected 403)")
+        except urllib.error.HTTPError as exc:
+            if exc.code != 403:
+                raise SystemExit(f"GET / without boot nonce returned HTTP {exc.code} (expected 403)")
 
         match = re.search(r'name="api-token" content="([^"]+)"', html)
         if not match:
