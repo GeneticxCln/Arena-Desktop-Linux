@@ -3621,7 +3621,7 @@ You can start with a more structured option: one script, short captions, and a c
   }
 
   function providerModelEntry(track) {
-    return state.providerModels[track] || { models: [], active_model: '', live: false, loading: false, error: null };
+    return state.providerModels[track] || { models: [], active_model: '', live: false, source: 'default', fetchedAt: 0, loading: false, error: null };
   }
 
   function selectedProviderModel(track) {
@@ -3655,7 +3655,13 @@ You can start with a more structured option: one script, short captions, and a c
     renderModelChips();
     renderComposerContext();
     if (isExtraProviderTrack(track) && !isLocalAgentTrack(track) && idStr) {
-      void API.providerSelectModel(track, idStr).catch(() => {});
+      const label = EXTRA_TRACK_META[track]?.label || track;
+      void API.providerSelectModel(track, idStr).catch((error) => {
+        // The id is not in the provider's list (it changed since this picker
+        // loaded): reload it so the stale entry disappears.
+        toast(errorMessage(error), 'error', `${label} models`);
+        if (error?.details?.code === 'unknown_model') void loadProviderModels(track, { force: true, syncActive: true });
+      });
     }
   }
 
@@ -3677,12 +3683,15 @@ You can start with a more structured option: one script, short captions, and a c
         models: list,
         active_model: String(res?.active_model || ''),
         live: Boolean(res?.live),
+        source: String(res?.source || (res?.live ? 'live' : 'default')),
+        fetchedAt: Number(res?.fetched_at || 0),
         loading: false,
         error: res?.ok === false ? String(res?.error || 'Could not load models') : null,
       };
       const pickedDuringFetch = (_providerModelSelectedAt[track] || 0) >= startedAt;
+      const isLiveList = Boolean(res?.live);
       const missingChoice = state.providerModelChoice[track] === undefined
-        || !list.some((m) => String(m.id) === String(state.providerModelChoice[track]));
+        || (isLiveList && !list.some((m) => String(m.id) === String(state.providerModelChoice[track])));
       if (list.length && !pickedDuringFetch && (syncActive || missingChoice)) {
         const def = list.find((m) => m.active) || list.find((m) => String(m.id) === String(res?.active_model)) || list[0];
         if (def) {
@@ -3807,11 +3816,14 @@ You can start with a more structured option: one script, short captions, and a c
           }
         }
       }
+      const count = `${models.length} model${models.length === 1 ? '' : 's'}`;
       const statusText = entry.loading
         ? 'Refreshing…'
         : entry.live
-          ? `Live · ${models.length} model${models.length === 1 ? '' : 's'}`
-          : (isLocalAgentTrack(track) ? 'Default list' : 'Default · open window & refresh for live models');
+          ? `Live · ${count}`
+          : entry.source === 'cached'
+            ? `Cached · ${count} from ${entry.fetchedAt ? relativeTime(entry.fetchedAt * 1000) : 'earlier'} · ${meta.label} did not answer now`
+            : (isLocalAgentTrack(track) ? 'Default list' : 'Default · open window & refresh for live models');
       foot.appendChild(el('span', { class: 'setting-desc', style: { fontSize: '11px', margin: '0' }, text: statusText }));
       foot.appendChild(el('button', {
         class: 'button button-small button-quiet', type: 'button', disabled: Boolean(entry.loading),
@@ -12882,7 +12894,7 @@ You can start with a more structured option: one script, short captions, and a c
           const list = await loadProviderModels(p.id, { force: true, quiet: false });
           const entry = providerModelEntry(p.id);
           refreshPanel();
-          toast(`${p.name}: ${list.length} model${list.length === 1 ? '' : 's'} (${entry.live ? 'live' : 'default'}).`,
+          toast(`${p.name}: ${list.length} model${list.length === 1 ? '' : 's'} (${entry.live ? 'live' : entry.source === 'cached' ? 'cached' : 'default'}).`,
             entry.live ? 'success' : 'info', p.name);
         }));
         actions.appendChild(settingsActionButton(`New ${p.short_name} tab`, 'plus', async () => {
@@ -12891,7 +12903,7 @@ You can start with a more structured option: one script, short captions, and a c
         }));
         const mEntry = providerModelEntry(p.id);
         const mSummary = mEntry.models.length
-          ? `${mEntry.models.length} model${mEntry.models.length === 1 ? '' : 's'} (${mEntry.live ? 'live' : 'default'})`
+          ? `${mEntry.models.length} model${mEntry.models.length === 1 ? '' : 's'} (${mEntry.live ? 'live' : mEntry.source === 'cached' ? 'cached' : 'default'})`
           : '';
         grid.appendChild(el('div', { class: 'provider-card' },
           el('div', { class: 'provider-card-head' },
