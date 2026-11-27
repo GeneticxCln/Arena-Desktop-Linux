@@ -227,7 +227,8 @@ def _try_chromium_cookies(ud, browser_name: str = ""):
             shutil.copy2(cdb, tmp)
             conn = sqlite3.connect(tmp)
             rows = conn.execute(
-                "SELECT name, encrypted_value FROM cookies WHERE host_key LIKE '%arena.ai%'"
+                "SELECT name, encrypted_value FROM cookies "
+                "WHERE host_key = 'arena.ai' OR host_key = '.arena.ai' OR host_key LIKE '%.arena.ai'"
             ).fetchall()
             conn.close()
         except Exception:
@@ -307,6 +308,8 @@ def _generation_finished(chat_id: str = None) -> None:
         if chat_id:
             _active_chat_ids.discard(str(chat_id))
     if chat_id:
+        with _chat_file_lock:
+            _deleted_chats.discard(str(chat_id))
         _notify("Arena Desktop", "A chat finished generating.", "done")
 
 
@@ -381,8 +384,10 @@ def _diag_trace(fn):
     return fn
 
 _API_TOKEN = secrets.token_urlsafe(32)
+_BOOT_NONCE: Optional[str] = None
+_BOOT_COOKIE_NAME = "_arena_boot"
 
-APP_VERSION = "7.4.0"
+APP_VERSION = "7.4.1"
 
 # One tick of every polling loop that waits on something outside the request
 # (a question the person has to answer, a permission, a preview URL). It is a
@@ -425,6 +430,10 @@ def _norm_workspace_path(folder) -> str:
         return str(folder)
 
 
+_deleted_chats: set = set()
+_eval_chat_index: dict = {}
+
+
 def _save_chat(chat_id: str, title: str, messages: list,
                mode: str = 'battle', modality: str = 'auto',
                model_a: str = None, model_b: str = None, eval_id: str = None,
@@ -436,7 +445,7 @@ def _save_chat(chat_id: str, title: str, messages: list,
                account_id: str = None, supervisor_of: str = None,
                workspace_dir: str = None, external_url: str = None):
     with _chat_file_lock:
-        if not _validate_chat_id(chat_id):
+        if not _validate_chat_id(chat_id) or chat_id in _deleted_chats:
             return
         chat_dir = CHATS_DIR / chat_id
         chat_dir.mkdir(parents=True, exist_ok=True)
@@ -478,6 +487,11 @@ def _save_chat(chat_id: str, title: str, messages: list,
             "external_url": external_url if external_url is not None else existing.get("external_url"),
             "messages": messages,
         }
+        for preserve_key in ("imported", "external_id", "sources"):
+            if preserve_key in existing and preserve_key not in data:
+                data[preserve_key] = existing[preserve_key]
+        if eval_id:
+            _eval_chat_index[str(eval_id)] = chat_id
         # Atomic replace: readers (chat list, parallel chats) never see a
         # half-written file.
         tmp_file = chat_dir / "chat.json.tmp"
@@ -582,8 +596,16 @@ def _orphan_children(parent_id: str) -> None:
 def _find_chat_by_eval(eval_id: str) -> Optional[dict]:
     if not eval_id:
         return None
-    direct = _load_chat(eval_id)
+    key = str(eval_id)
+    cached_id = _eval_chat_index.get(key)
+    if cached_id:
+        hit = _load_chat(cached_id)
+        if hit and hit.get("eval_id") == eval_id:
+            return hit
+        _eval_chat_index.pop(key, None)
+    direct = _load_chat(key)
     if direct and direct.get("eval_id") == eval_id:
+        _eval_chat_index[key] = key
         return direct
     if not CHATS_DIR.exists():
         return None
@@ -591,19 +613,34 @@ def _find_chat_by_eval(eval_id: str) -> Optional[dict]:
         if not directory.is_dir():
             continue
         data = _load_chat(directory.name)
-        if data and data.get("eval_id") == eval_id:
-            return data
+        if data:
+            ev = data.get("eval_id")
+            if ev:
+                _eval_chat_index[str(ev)] = directory.name
+            if ev == eval_id:
+                return data
     return None
 
 
 def _delete_chat(chat_id: str) -> bool:
     if not _validate_chat_id(chat_id):
         return False
-    chat_dir = CHATS_DIR / chat_id
-    if chat_dir.exists() and chat_dir.is_dir():
-        shutil.rmtree(chat_dir)
-        return True
-    return False
+    generating = _chat_generating(chat_id)
+    with _chat_file_lock:
+        if generating:
+            _deleted_chats.add(chat_id)
+        for ev_k in [k for k, v in _eval_chat_index.items() if v == chat_id]:
+            _eval_chat_index.pop(ev_k, None)
+        chat_dir = CHATS_DIR / chat_id
+        deleted = False
+        if chat_dir.exists() and chat_dir.is_dir():
+            shutil.rmtree(chat_dir)
+            deleted = True
+    try:
+        BROKER.reset_always(chat_id)
+    except Exception:
+        pass
+    return deleted
 
 
 def _read_cookie_file() -> Optional[str]:
@@ -744,9 +781,22 @@ def favicon():
 
 @app.route("/")
 def index():
+    nonce = _BOOT_NONCE
+    set_cookie = False
+    if nonce:
+        q_boot = request.args.get("boot") or ""
+        c_boot = request.cookies.get(_BOOT_COOKIE_NAME) or ""
+        if q_boot and hmac.compare_digest(q_boot, nonce):
+            set_cookie = True
+        elif not (c_boot and hmac.compare_digest(c_boot, nonce)):
+            return "Unauthorized", 403, {"Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store"}
     page = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     page = page.replace("</head>", f'<meta name="api-token" content="{_API_TOKEN}">\n</head>', 1)
-    return page, 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"}
+    resp = Response(page, status=200, mimetype="text/html")
+    resp.headers["Cache-Control"] = "no-store"
+    if set_cookie and nonce:
+        resp.set_cookie(_BOOT_COOKIE_NAME, nonce, httponly=True, samesite="Strict", path="/")
+    return resp
 
 
 # ---------- API routes ----------
@@ -1097,7 +1147,7 @@ def _digest_block(digest: str) -> str:
 def _append_digest_to_memory(chat: dict, digest: str):
     """Save the compaction digest into the project memory file, so the work
     is available to future chats in this folder too, not only this one."""
-    folder = _chosen_ws()
+    folder = chat.get("workspace") or _chosen_ws()
     if not folder or not _memory_enabled():
         return None
     path = Path(folder) / MEMORY_FILE_NAME
@@ -1445,7 +1495,7 @@ def _check_integrity() -> dict:
 
 
 def _check_accounts() -> dict:
-    """Check all saved Arena and Google accounts on startup; pass if at least one is valid."""
+    """Read-only check of saved Arena and Google accounts on startup; pass if at least one is valid."""
     started = time.time()
     client = get_client()
     problems = []
@@ -1453,15 +1503,19 @@ def _check_accounts() -> dict:
     deadline = time.time() + 4.5
 
     arena_signed = bool(getattr(client, "user", None) is not None)
+    if not arena_signed and _engine_on():
+        try:
+            arena_signed = bool(ENGINE.has_session())
+        except Exception:
+            arena_signed = False
     if not arena_signed and client.cookie_str and time.time() < deadline:
         user, _err = _check_session(client, force=False)
         if isinstance(user, dict) and (user.get("email") or user.get("id")):
-            client.user = user
             arena_signed = True
     if arena_signed:
         detail.append("Arena account signed in")
 
-    # If current Arena cookie failed or was empty, check other saved Arena accounts
+    # Read-only check of other saved Arena accounts (never mutate account/cookie files on GET /api/readiness)
     if not arena_signed:
         store = _accounts_load()
         for rec in store.get("accounts") or []:
@@ -1475,13 +1529,8 @@ def _check_accounts() -> dict:
                 r = tmp_client.session.get(f"{BASE_URL}/api/me", timeout=2.5)
                 u = r.json().get("user") if r.status_code == 200 else None
                 if isinstance(u, dict) and (u.get("email") or u.get("id")):
-                    client.set_cookie(ck)
-                    client.user = u
-                    _write_cookie_file(ck)
-                    store["current"] = rec.get("id")
-                    _accounts_save(store)
-                    _me_cache.update(t=time.time(), user=u, err=None)
                     arena_signed = True
+                    detail.append("Arena account signed in")
                     break
             except Exception:
                 continue
@@ -1503,10 +1552,6 @@ def _check_accounts() -> dict:
             info = {}
         if info.get("signed_in"):
             google_signed = True
-            if g_store.get("current") != rec.get("id"):
-                g_store["current"] = rec.get("id")
-                _google_accounts_save(g_store)
-            _google_flag_account(str(rec.get("id") or ""), ok=True)
             break
 
     if not google_signed:
@@ -1673,8 +1718,10 @@ def _check_models() -> dict:
     # Empty catalog: blame the network only if the network is really down.
     online = True
     try:
-        client = get_client()
-        online = bool(getattr(client, "reachable", True))
+        r = requests.head(BASE_URL, timeout=2.0)
+        online = r.status_code > 0
+    except requests.RequestException:
+        online = False
     except Exception:
         online = True
 
@@ -2558,25 +2605,29 @@ def api_chat_refresh(chat_id):
         if local_messages and not remote_messages:
             return jsonify({"ok": False, "error": "Arena did not return a readable Agent transcript.",
                             "code": "arena_refresh"}), 422
-        merged, added = history_sync.merge_messages(local_messages, remote_messages)
-        title = history_sync.agentic_title(session) or data.get("title") or "Arena Agent"
-        cursor = history_sync.agentic_last_event_id(session)
-        # The snapshot cursor may lag the locally consumed one by a few
-        # control records; rewinding to it replays the previous turn's
-        # turn-complete into the next continuation (instant empty reply).
-        cursor = _native_cursor_max(native.get("last_event_id"), cursor)
-        native_out = dict(native)
-        native_out.update({
-            "backend": "arena",
-            "session_id": str(remote_id),
-            "trigger_address": native.get("trigger_address") or str(remote_id),
-            "last_event_id": cursor,
-            "needs_drain": False if cursor else bool(native.get("needs_drain")),
-        })
-        _save_chat(chat_id, title=title, messages=merged, mode="agent", modality="text",
-                   model_a=None, model_b=None, eval_id=str(remote_id),
-                   source=data.get("source") or "arena", agent_backend="arena",
-                   native=native_out)
+        with _chat_file_lock:
+            if _chat_generating(chat_id):
+                return jsonify({"error": "This chat started generating during refresh. Try again when it finishes.",
+                                "code": "busy"}), 409
+            latest = _load_chat(chat_id) or data
+            latest_msgs = latest.get("messages") if isinstance(latest.get("messages"), list) else []
+            latest_native = latest.get("native") if isinstance(latest.get("native"), dict) else native
+            merged, added = history_sync.merge_messages(latest_msgs, remote_messages)
+            title = history_sync.agentic_title(session) or latest.get("title") or "Arena Agent"
+            cursor = history_sync.agentic_last_event_id(session)
+            cursor = _native_cursor_max(latest_native.get("last_event_id"), cursor)
+            native_out = dict(latest_native)
+            native_out.update({
+                "backend": "arena",
+                "session_id": str(remote_id),
+                "trigger_address": latest_native.get("trigger_address") or str(remote_id),
+                "last_event_id": cursor,
+                "needs_drain": False if cursor else bool(latest_native.get("needs_drain")),
+            })
+            _save_chat(chat_id, title=title, messages=merged, mode="agent", modality="text",
+                       model_a=None, model_b=None, eval_id=str(remote_id),
+                       source=latest.get("source") or "arena", agent_backend="arena",
+                       native=native_out)
         kind = "agentic"
     else:
         session, error, status = _arena_get_json(
@@ -2594,14 +2645,20 @@ def api_chat_refresh(chat_id):
         if local_messages and not remote_messages:
             return jsonify({"ok": False, "error": "Arena did not return a readable transcript.",
                             "code": "arena_refresh"}), 422
-        merged, added = history_sync.merge_messages(local_messages, remote_messages)
-        title = converted.get("title") or data.get("title") or "Arena chat"
-        _save_chat(chat_id, title=title, messages=merged,
-                   mode=data.get("mode") or converted.get("mode") or "battle",
-                   modality=data.get("modality") or converted.get("modality") or "text",
-                   model_a=data.get("model_a") or converted.get("model_a"),
-                   model_b=data.get("model_b") or converted.get("model_b"),
-                   eval_id=str(remote_id), source=data.get("source") or "arena")
+        with _chat_file_lock:
+            if _chat_generating(chat_id):
+                return jsonify({"error": "This chat started generating during refresh. Try again when it finishes.",
+                                "code": "busy"}), 409
+            latest = _load_chat(chat_id) or data
+            latest_msgs = latest.get("messages") if isinstance(latest.get("messages"), list) else []
+            merged, added = history_sync.merge_messages(latest_msgs, remote_messages)
+            title = converted.get("title") or latest.get("title") or "Arena chat"
+            _save_chat(chat_id, title=title, messages=merged,
+                       mode=latest.get("mode") or converted.get("mode") or "battle",
+                       modality=latest.get("modality") or converted.get("modality") or "text",
+                       model_a=latest.get("model_a") or converted.get("model_a"),
+                       model_b=latest.get("model_b") or converted.get("model_b"),
+                       eval_id=str(remote_id), source=latest.get("source") or "arena")
         kind = "evaluation"
 
     if _current_chat_id == chat_id:
@@ -2734,13 +2791,20 @@ _update_cache = {"t": 0.0, "data": None}
 
 
 def _version_tuple(v) -> tuple:
-    parts = []
-    for bit in str(v or "").lstrip("v").split("."):
+    raw = str(v or "").strip().lstrip("v")
+    core_str, _, pre = raw.partition("-")
+    core_str = core_str.split("+", 1)[0]
+    core = []
+    for bit in core_str.split("."):
         try:
-            parts.append(int(bit))
+            core.append(int(bit))
         except ValueError:
-            parts.append(0)
-    return tuple(parts) or (0,)
+            core.append(0)
+    while len(core) < 3:
+        core.append(0)
+    # Semver: a release (1) sorts higher than any prerelease (0, pre) of the same core.
+    pre_parts = tuple(int(p) if p.isdigit() else p for p in re.split(r"[.-]", pre)) if pre else ()
+    return (tuple(core), 0 if pre else 1, pre_parts)
 
 
 @app.route("/api/update-check")
@@ -2783,9 +2847,22 @@ def api_update_check():
     return jsonify(dict(data, enabled=enabled))
 
 
-def _settings_bundle() -> dict:
+def _strip_mcp_secrets(raw_mcp):
+    """Strip secret env values from MCP config before settings export."""
+    if not isinstance(raw_mcp, dict):
+        return raw_mcp
+    cleaned = copy.deepcopy(raw_mcp)
+    servers = cleaned.get("mcpServers")
+    if isinstance(servers, dict):
+        for _name, entry in servers.items():
+            if isinstance(entry, dict) and isinstance(entry.get("env"), dict):
+                entry["env"] = {str(k): "" for k in entry["env"].keys()}
+    return cleaned
+
+
+def _settings_bundle(*, include_secrets: bool = False) -> dict:
     """Everything Settings export carries: config, memory files, MCP config.
-    Account cookies are never part of it."""
+    Account cookies and MCP secrets are never part of user exports."""
     cfg = load_config()
     google_mem = GLOBAL_MEMORY_FILE.with_name("memory-google.md")
     bundle = {"app": "Arena Desktop", "version": 1,
@@ -2797,7 +2874,8 @@ def _settings_bundle() -> dict:
         _read_memory_file(Path(folder) / MEMORY_FILE_NAME, 100_000) if folder else None)
     try:
         mcp_file = connectors._config_path()
-        bundle["mcp"] = json.loads(mcp_file.read_text(encoding="utf-8")) if mcp_file.exists() else None
+        raw_mcp = json.loads(mcp_file.read_text(encoding="utf-8")) if mcp_file.exists() else None
+        bundle["mcp"] = raw_mcp if include_secrets else _strip_mcp_secrets(raw_mcp)
     except Exception:
         bundle["mcp"] = None
     return bundle
@@ -2805,7 +2883,7 @@ def _settings_bundle() -> dict:
 
 @app.route("/api/settings/export")
 def api_settings_export():
-    return jsonify(_settings_bundle())
+    return jsonify(_settings_bundle(include_secrets=False))
 
 
 @app.route("/api/settings/import", methods=["POST"])
@@ -2819,12 +2897,16 @@ def api_settings_import():
     try:
         backup_dir.mkdir(parents=True, exist_ok=True)
         (backup_dir / f"settings-{stamp}.json").write_text(
-            json.dumps(_settings_bundle(), ensure_ascii=False, indent=1), encoding="utf-8")
+            json.dumps(_settings_bundle(include_secrets=False), ensure_ascii=False, indent=1), encoding="utf-8")
     except OSError as e:
         return jsonify({"error": f"Could not back up the current settings first: {e}",
                         "code": "backup_failed"}), 500
+    imported_cfg = {key: value for key, value in data["config"].items() if key in _SETTINGS_ALLOWLIST}
+    # Never let an imported settings file silently turn on bypassPermissions.
+    if imported_cfg.get("permission_mode") == "bypassPermissions" and not data.get("allow_unsafe_permissions"):
+        imported_cfg["permission_mode"] = "default"
     cfg = load_config()
-    cfg.update({key: value for key, value in data["config"].items() if key in _SETTINGS_ALLOWLIST})
+    cfg.update(imported_cfg)
     save_config(cfg)
     try:
         if isinstance(data.get("memory_global"), str):
@@ -2837,7 +2919,7 @@ def api_settings_import():
         folder = _chosen_ws()
         if folder and isinstance(data.get("memory_workspace"), str):
             (Path(folder) / MEMORY_FILE_NAME).write_text(data["memory_workspace"], encoding="utf-8")
-        if isinstance(data.get("mcp"), (dict, list)):
+        if isinstance(data.get("mcp"), (dict, list)) and data.get("import_mcp", True):
             mcp_file = connectors._config_path()
             mcp_file.parent.mkdir(parents=True, exist_ok=True)
             mcp_file.write_text(json.dumps(data["mcp"], ensure_ascii=False, indent=1), encoding="utf-8")
@@ -2846,12 +2928,12 @@ def api_settings_import():
     return jsonify({"ok": True, "backup": stamp})
 
 
-_URL_RE = re.compile(r"(https?://[A-Za-z0-9.\-]+)(/[^\s'\"]*)?")
+_URL_RE = re.compile(r"(https?://)(?:[^/\s'\"@]+@)?([A-Za-z0-9.\-]+(?::\d+)?)(/[^\s'\"]*)?")
 
 
 def _redact_urls(line: str) -> str:
-    """Reduce URLs in a log line to scheme+host+path (never the query)."""
-    return _URL_RE.sub(lambda m: m.group(1) + (m.group(2) or "").split("?")[0], line)
+    """Reduce URLs in a log line to scheme+host[:port]+path (never credentials or query)."""
+    return _URL_RE.sub(lambda m: m.group(1) + m.group(2) + (m.group(3) or "").split("?", 1)[0].split("#", 1)[0], line)
 
 
 _UPLOAD_DIAGNOSTICS_LOCK = threading.Lock()
@@ -3335,9 +3417,15 @@ def api_search():
         return jsonify([])
     ql = q.lower()
     results = []
+    all_summaries = []
     for summary in _list_chats():
         if not isinstance(summary, dict):
             continue
+        all_summaries.append(summary)
+        for child in summary.get("children") or []:
+            if isinstance(child, dict):
+                all_summaries.append(child)
+    for summary in all_summaries:
         cid = summary.get("id") or summary.get("chat_id")
         if not cid:
             continue
@@ -3710,7 +3798,10 @@ def api_chat_fork(chat_id):
                messages=copied, mode=data.get("mode") or "direct",
                modality=data.get("modality") or "text",
                model_a=data.get("model_a"), model_b=data.get("model_b"),
-               eval_id=None, native=None, memory_hash="", pending_digest=digest,
+               eval_id=None, source=data.get("source"),
+               agent_backend=data.get("agent_backend"),
+               workspace_dir=data.get("workspace"),
+               native=None, memory_hash="", pending_digest=digest,
                parent_id=data.get("parent_id"))
     return jsonify({"ok": True, "chat_id": new_id})
 
@@ -3738,6 +3829,13 @@ def api_workspace_snapshot():
             for fp in sorted(target.rglob("*")):
                 if len(files) >= 40:
                     break
+                if fp.is_symlink():
+                    try:
+                        resolved_fp = fp.resolve()
+                    except OSError:
+                        continue
+                    if resolved_fp != root and root not in resolved_fp.parents:
+                        continue
                 if fp.is_file() and ".git" not in fp.parts and ".arena-artifacts" not in fp.parts:
                     files.append(fp)
     parts = ["[Attached workspace files]"]
@@ -3999,8 +4097,11 @@ def api_automations_save():
             items[i] = entry
             break
     else:
+        if len(items) >= 25:
+            return jsonify({"error": "Maximum of 25 automations reached. Delete one first.",
+                            "code": "limit_reached"}), 400
         items.append(entry)
-    cfg["automations"] = items[:25]
+    cfg["automations"] = items
     save_config(cfg)
     return jsonify({"ok": True, "item": entry})
 
@@ -4134,6 +4235,9 @@ def api_chat_delete(chat_id):
     if not _validate_chat_id(chat_id) or not (CHATS_DIR / chat_id).is_dir():
         return jsonify({"error": "Chat not found"}), 404
     chat = _load_chat(chat_id) or {}
+    # Stop any active generation on this chat first so it cannot recreate the file on finish.
+    if _chat_generating(chat_id):
+        _chat_stop_event(chat_id).set()
     # Deleting a still-running sub-agent's chat stops that child first, so
     # it cannot recreate or keep writing into a chat that is going away.
     try:
@@ -4197,8 +4301,10 @@ def _evaluation_pair_message_ids(eval_id, pair_pos):
         if msg.get("id"):
             pairs[key][lane] = str(msg["id"])
     complete = [pairs[key] for key in order if pairs[key].get("a") and pairs[key].get("b")]
-    if isinstance(pair_pos, int) and 0 <= pair_pos < len(complete):
-        return complete[pair_pos]["a"], complete[pair_pos]["b"]
+    if isinstance(pair_pos, int):
+        if 0 <= pair_pos < len(complete):
+            return complete[pair_pos]["a"], complete[pair_pos]["b"]
+        return None, None
     if complete:
         return complete[-1]["a"], complete[-1]["b"]
     return None, None
@@ -4224,6 +4330,9 @@ def api_chat_vote(chat_id):
     chat = _load_chat(chat_id)
     if not chat:
         return jsonify({"error": "Chat not found"}), 404
+    if _chat_generating(chat_id):
+        return jsonify({"error": "Wait until the current answer finishes before voting.",
+                        "code": "busy"}), 409
     if chat.get("mode") not in ("battle", "side-by-side"):
         return jsonify({"error": "Voting is available only in Battle and Side by Side.",
                         "code": "unsupported_selection"}), 400
@@ -4245,9 +4354,16 @@ def api_chat_vote(chat_id):
             if ids.get("a") == req_a and ids.get("b") == req_b:
                 target = i
                 break
+        if target is None:
+            return jsonify({"error": "Requested message pair was not found in this chat.",
+                            "code": "not_found"}), 404
     pair_pos = data.get("pair_index")
-    if target is None and isinstance(pair_pos, int) and 0 <= pair_pos < len(dual_indexes):
-        target = dual_indexes[pair_pos]
+    if target is None and isinstance(pair_pos, int):
+        if 0 <= pair_pos < len(dual_indexes):
+            target = dual_indexes[pair_pos]
+        else:
+            return jsonify({"error": "Requested answer pair index is out of range.",
+                            "code": "bad_request"}), 400
     if target is None:
         target = dual_indexes[-1]
     msg = messages[target]
@@ -4518,9 +4634,10 @@ def _sse(obj) -> str:
     return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
 
-def _sse_wrap(gen, chat_id=None):
+def _sse_wrap(gen, chat_id=None, *, already_reserved: bool = False):
     """A crash must not end the stream silently: report it as an error event."""
-    _generation_started(chat_id)
+    if not already_reserved:
+        _generation_started(chat_id)
     # Per-chat stop: /api/stop sets this exact event for this chat only.
     _tl.stop_event = _chat_stop_event(chat_id) if chat_id else None
     _tl.chat_id = chat_id
@@ -4637,7 +4754,13 @@ def _wait_for(check, seconds: int):
 def _permit(mode: str, tool: str, info: dict):
     """Apply the permission mode to one action, asking the user when needed.
     Yields SSE events; returns "allow", "deny" (the user said no) or "blocked" (the mode forbids it)."""
-    verdict = BROKER.check(mode, tool, info.get("inside", True), info.get("command", ""))
+    if isinstance(BROKER, permissions.PermissionBroker):
+        verdict = BROKER.check(
+            mode, tool, info.get("inside", True), info.get("command", ""),
+            chat_id=getattr(_tl, "chat_id", None),
+        )
+    else:
+        verdict = BROKER.check(mode, tool, info.get("inside", True), info.get("command", ""))
     if verdict == "allow":
         return "allow"
     if verdict == "deny":
@@ -4661,31 +4784,79 @@ def _permit(mode: str, tool: str, info: dict):
     return answer
 
 
+_preview = {"port": None, "server": None, "roots": {}, "by_path": {}}
+_preview_lock = threading.Lock()
+
+
 class _QuietHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+    def list_directory(self, path):
+        self.send_error(403, "Directory listing disabled")
+        return None
 
-_preview = {"port": None, "server": None}
-_preview_lock = threading.Lock()
+    def _host_allowed(self) -> bool:
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip().lower()
+        return host in ("127.0.0.1", "localhost", "[::1]")
+
+    def do_GET(self):
+        if not self._host_allowed():
+            self.send_error(403, "Forbidden host")
+            return
+        super().do_GET()
+
+    def do_HEAD(self):
+        if not self._host_allowed():
+            self.send_error(403, "Forbidden host")
+            return
+        super().do_HEAD()
+
+    def translate_path(self, path):
+        parsed = urllib.parse.urlparse(path).path
+        parts = [p for p in parsed.split("/") if p]
+        if len(parts) < 2 or parts[0] != "p":
+            return os.path.join(self.directory, "__nonexistent__")
+        token = parts[1]
+        with _preview_lock:
+            root = _preview["roots"].get(token)
+        if root is None:
+            return os.path.join(self.directory, "__nonexistent__")
+        rel_parts = [urllib.parse.unquote(p) for p in parts[2:]]
+        target = (root / Path(*rel_parts)).resolve() if rel_parts else root
+        if target != root and root not in target.parents:
+            return os.path.join(str(root), "__nonexistent__")
+        return str(target)
 
 
 def _preview_url(root: Path):
-    """Serve generated sites from a separate port (a separate origin) so their scripts cannot call this app's API."""
-    if not (Path(root) / "index.html").is_file():
-        return None
-    base = workspace.PROJECTS_DIR.resolve()
-    try:
-        rel = Path(root).resolve().relative_to(base).as_posix()
-    except ValueError:
+    """Serve generated sites from a separate port and unguessable per-project token
+    so their scripts cannot call this app's API or enumerate sibling workspaces."""
+    resolved = Path(root).expanduser().resolve()
+    if not (resolved / "index.html").is_file():
         return None
     with _preview_lock:
         if _preview["port"] is None:
-            srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(_QuietHandler, directory=str(base)))
+            srv = http.server.ThreadingHTTPServer(
+                ("127.0.0.1", 0),
+                functools.partial(_QuietHandler, directory=str(workspace.PROJECTS_DIR.resolve())),
+            )
             _preview["port"] = srv.server_address[1]
             _preview["server"] = srv
             threading.Thread(target=srv.serve_forever, daemon=True).start()
-    return f"http://127.0.0.1:{_preview['port']}/{urllib.parse.quote(rel)}/index.html"
+        key = str(resolved)
+        token = _preview["by_path"].get(key)
+        if not token:
+            token = secrets.token_urlsafe(12)
+            _preview["by_path"][key] = token
+            _preview["roots"][token] = resolved
+            if len(_preview["roots"]) > 64:
+                old_tok = next(iter(_preview["roots"]))
+                old_root = _preview["roots"].pop(old_tok, None)
+                if old_root is not None:
+                    _preview["by_path"].pop(str(old_root), None)
+        port = _preview["port"]
+    return f"http://127.0.0.1:{port}/p/{token}/index.html"
 
 
 def _save_webdev(lane: str, files: list, conv: dict):
@@ -4760,7 +4931,8 @@ def _webdev_event(lane: str, item: dict, conv: dict):
     event = item.get("event")
     if event == "title" and isinstance(item.get("title"), str):
         conv["title"] = item["title"][:80]
-    yield _sse({"type": "webdev", "model": lane, "event": event, "data": item})
+    ev_id = str(item.get("id") or f"webdev-{lane}-{event or 'step'}")
+    yield _sse({"type": "webdev", "id": ev_id, "model": lane, "event": event, "data": item})
     files = workspace.webdev_files(item)
     if files:
         _last_webdev[(conv["chat_id"], lane)] = {"title": conv["title"], "files": files}
@@ -5261,6 +5433,9 @@ def _pacer_acquire(conv):
                 wait_needed = cooldown_left
             elif lane["in_flight"] >= concurrency:
                 wait_needed = 0.2
+            elif interval == 0:
+                lane["in_flight"] += 1
+                return _PacerPermit(lane, counted=True)
             elif (lane["tokens"] or 0.0) >= 1.0:
                 lane["tokens"] -= 1.0
                 lane["in_flight"] += 1
@@ -5773,7 +5948,10 @@ def _gateway_approve(server, tool, read_only, arguments) -> bool:
     else:
         permission_tool = "read_file" if read_only else "run_cmd"
         summary = f"Agent Gateway MCP {server}: {tool}"
-    verdict = BROKER.check(_perm_mode(), permission_tool, inside=True, command=command)
+    if isinstance(BROKER, permissions.PermissionBroker):
+        verdict = BROKER.check(_perm_mode(), permission_tool, inside=True, command=command, gateway=True)
+    else:
+        verdict = BROKER.check(_perm_mode(), permission_tool, inside=True, command=command)
     if verdict == "allow":
         return True
     if verdict in ("deny", "blocked"):
@@ -5783,7 +5961,10 @@ def _gateway_approve(server, tool, read_only, arguments) -> bool:
             "rel": server, "path": json.dumps(arguments, ensure_ascii=False)[:300]}
     pid = BROKER.ask(info)
     LOG.info("gateway: approval requested for %s:%s", server, tool)
-    return BROKER.wait(pid, 180) == "allow"
+    ans = BROKER.wait(pid, 180)
+    if ans != "allow" and hasattr(BROKER, "cancel"):
+        BROKER.cancel(pid)
+    return ans == "allow"
 
 
 def _gateway():
@@ -5801,7 +5982,7 @@ def _gateway():
 
 def _gateway_enabled(cfg=None) -> bool:
     try:
-        return (cfg if cfg is not None else load_config()).get("gateway_enabled") is not False
+        return (cfg if cfg is not None else load_config()).get("gateway_enabled") is True
     except Exception:
         return False
 
@@ -5919,6 +6100,8 @@ def _turn_auto(client, content, conv):
 
     def merged(o):
         if o is None:
+            if accumulated["a"] or accumulated["b"]:
+                return dict(accumulated)
             return None
         return {"a": accumulated["a"] + (o.get("a") or ""),
                 "b": accumulated["b"] + (o.get("b") or "")}
@@ -6082,11 +6265,19 @@ def _native_probe_out(client, address, pat):
             LOG.info("native probe: %s -> error %s", url, e)
             continue
         code = probe.status_code
+        head = ""
         try:
-            head = " ".join((probe.text or "").split())[:120]
+            raw_head = b""
+            if code != 200:
+                for chunk in probe.iter_content(chunk_size=512):
+                    raw_head += chunk
+                    if len(raw_head) >= 512:
+                        break
+            head = " ".join(raw_head.decode("utf-8", "replace").split())[:120]
         except Exception:
             head = ""
-        probe.close()
+        finally:
+            probe.close()
         LOG.info("native probe: %s -> HTTP %s %s", url, code, head)
         if code == 200:
             while len(_NATIVE_OUT_OVERRIDE) >= 200:
@@ -6330,7 +6521,13 @@ def _iter_records_idle(resp, idle_seconds, should_stop=None):
 
     def reader():
         try:
-            for record in native_agent.iter_sse_records(resp.iter_lines(decode_unicode=True)):
+            def _utf8_lines():
+                for raw_line in resp.iter_lines(decode_unicode=False):
+                    if isinstance(raw_line, bytes):
+                        yield raw_line.decode("utf-8", "replace")
+                    else:
+                        yield str(raw_line)
+            for record in native_agent.iter_sse_records(_utf8_lines()):
                 q.put(record)
         except Exception:
             pass
@@ -6399,15 +6596,17 @@ def _native_ask_user_hitl(pending: dict):
                 "custom": custom, "lane": "a", "subagent": None,
                 "answer": None,
             }
-        yield _sse({"type": "question", "id": qid, "lane": "a", "model": "a",
-                    "kind": "question", "question": question["question"],
-                    "options": display_options, "custom": custom,
-                    "chat_id": chat_id, "subagent": None})
-        _notify("Arena Desktop", "Arena Agent is waiting for your answer.", "question")
-        answer_text = yield from _wait_for(
-            lambda qid=qid: _question_answer(qid), QUESTION_TIMEOUT)
-        with _questions_lock:
-            _QUESTIONS.pop(qid, None)
+        try:
+            yield _sse({"type": "question", "id": qid, "lane": "a", "model": "a",
+                        "kind": "question", "question": question["question"],
+                        "options": display_options, "custom": custom,
+                        "chat_id": chat_id, "subagent": None})
+            _notify("Arena Desktop", "Arena Agent is waiting for your answer.", "question")
+            answer_text = yield from _wait_for(
+                lambda qid=qid: _question_answer(qid), QUESTION_TIMEOUT)
+        finally:
+            with _questions_lock:
+                _QUESTIONS.pop(qid, None)
         yield _sse({"type": "question_done", "id": qid, "lane": "a",
                     "answer": answer_text or ""})
         if _stopped():
@@ -6497,15 +6696,17 @@ def _native_media_choice_hitl(pending: dict):
             "tool_call_id": pending.get("tool_call_id"),
             "media_choice": copy.deepcopy(public), "answer": None,
         }
-    yield _sse({"type": "media_choice", "id": choice_id, "model": "a",
-                "lane": "a", "chat_id": chat_id, "tool": tool,
-                "tool_call_id": pending.get("tool_call_id"),
-                "media_choice": copy.deepcopy(public)})
-    _notify("Arena Desktop", f"Arena Agent is waiting for you to choose a {noun}.", "question")
-    answer = yield from _wait_for(
-        lambda choice_id=choice_id: _media_choice_answer(choice_id), QUESTION_TIMEOUT)
-    with _media_choices_lock:
-        _MEDIA_CHOICES.pop(choice_id, None)
+    try:
+        yield _sse({"type": "media_choice", "id": choice_id, "model": "a",
+                    "lane": "a", "chat_id": chat_id, "tool": tool,
+                    "tool_call_id": pending.get("tool_call_id"),
+                    "media_choice": copy.deepcopy(public)})
+        _notify("Arena Desktop", f"Arena Agent is waiting for you to choose a {noun}.", "question")
+        answer = yield from _wait_for(
+            lambda choice_id=choice_id: _media_choice_answer(choice_id), QUESTION_TIMEOUT)
+    finally:
+        with _media_choices_lock:
+            _MEDIA_CHOICES.pop(choice_id, None)
     candidate_indexes = [item.get("index") for item in public.get("candidates") or []
                          if isinstance(item, dict)]
     if _stopped():
@@ -7001,11 +7202,13 @@ def _native_agent_run(client, message: str, existing: dict, timezone, result=Non
         if resp.status_code != 200:
             status = resp.status_code
             resp.close()
-            if cycles >= 3:
+            stream_failures += 1
+            if stream_failures >= 3:
                 yield fail(f"The agent stream is unavailable (HTTP {status}).")
                 break
             time.sleep(2)
             continue
+        stream_failures = 0
         settled = resp.headers.get("X-Session-Settled") == "true"
         version = resp.headers.get("X-Stream-Version") or "v1"
         got_record = False
@@ -7193,7 +7396,7 @@ def _native_agent_run(client, message: str, existing: dict, timezone, result=Non
             yield fail("The agent has not started responding in this session — the previous turn may still be "
                        "running on Arena. The session is saved; try again a little later.")
             break
-    if not turn_done and not _stopped() and result["error"] is None and cycles >= 24:
+    if not turn_done and not _stopped() and result["error"] is None and (cycles >= 24 or time.monotonic() >= deadline):
         yield fail("The agent did not finish the turn in time. The session is saved — "
                    "the next message will pick it up.")
     publish_native()
@@ -7215,17 +7418,27 @@ def _native_file_bridge(files, native_state):
                     "text": f"Arena Agent created file(s): {names}. Choose a folder on this "
                             "computer to have them downloaded automatically (Workspace Sync)."})
         return written
-    if native_state.get("file_sync_ok") is None:
+    if not native_state.get("file_sync_ok"):
         info = {"tool": "write_file", "inside": True, "path": str(root),
                 "summary": f"Download {len(files)} file(s) from Arena Agent into {root.name}"}
-        native_state["file_sync_ok"] = (yield from _permit(_perm_mode(), "write_file", info)) == "allow"
-    if not native_state.get("file_sync_ok"):
-        return written
+        if (yield from _permit(_perm_mode(), "write_file", info)) != "allow":
+            return written
+        native_state["file_sync_ok"] = True
     synced = dict(native_state.get("synced_files") or {})
+    used_names: set[str] = set()
     for item in files:
-        name = Path(str(item.get("title") or "")).name
-        if not name or name in (".", ".."):
-            name = "agent-file"
+        base_name = Path(str(item.get("title") or "")).name
+        if not base_name or base_name in (".", ".."):
+            base_name = "agent-file"
+        name = base_name
+        if name in used_names:
+            stem = Path(base_name).stem or "agent-file"
+            suffix = Path(base_name).suffix
+            n = 2
+            while name in used_names:
+                name = f"{stem}-{n}{suffix}"
+                n += 1
+        used_names.add(name)
         try:
             r = requests.get(item["url"], timeout=120)
             r.raise_for_status()
@@ -7298,7 +7511,8 @@ def _checkpoint_capture(conv, lane, info):
                     base = target.parent
                 ck_dir = base / ".arena-artifacts" / "checkpoints" / ck_id
                 (ck_dir / "files").mkdir(parents=True, exist_ok=True)
-                state = {"id": ck_id, "dir": str(ck_dir), "entries": [], "seen": []}
+                state = {"id": ck_id, "dir": str(ck_dir), "root": str(base.resolve()),
+                         "entries": [], "seen": [], "truncated": False}
                 conv[f"_checkpoint_{lane}"] = state
             targets = []
             if target.is_dir():
@@ -7306,6 +7520,7 @@ def _checkpoint_capture(conv, lane, info):
                     if fp.is_file():
                         targets.append(fp)
                     if len(targets) >= 200:
+                        state["truncated"] = True
                         break
             else:
                 targets = [target]
@@ -7331,8 +7546,10 @@ def _checkpoint_capture(conv, lane, info):
                             entry["skipped"] = "unreadable"
                     else:
                         entry["skipped"] = "checkpoint size cap"
+                        state["truncated"] = True
                 state["entries"].append(entry)
             manifest = {"id": state["id"], "lane": lane, "chat_id": conv.get("chat_id"),
+                        "root": state.get("root"), "truncated": bool(state.get("truncated")),
                         "created": int(time.time()), "entries": state["entries"]}
             (Path(state["dir"]) / "manifest.json").write_text(
                 json.dumps(manifest, indent=1), encoding="utf-8")
@@ -7345,37 +7562,90 @@ def api_checkpoint_restore(cid):
     """Undo one agent turn's file changes from its checkpoint snapshot."""
     if not re.fullmatch(r"[A-Za-z0-9-]{6,80}", cid or ""):
         return jsonify({"error": "Bad checkpoint id", "code": "bad_request"}), 400
+    body = request.get_json(silent=True) or {}
+    candidate_roots = []
     ws = _chosen_ws()
-    manifest = ck_dir = None
     if ws:
-        root = Path(ws)
-        for base in (root, root / "option-a", root / "option-b"):
+        candidate_roots.append(Path(ws))
+    chat_id = str(body.get("chat_id") or "")
+    if chat_id and _validate_chat_id(chat_id):
+        ch = _load_chat(chat_id) or {}
+        if ch.get("workspace"):
+            candidate_roots.append(Path(ch["workspace"]))
+    candidate_roots.append(_workspace_dir())
+    manifest = ck_dir = ck_base = None
+    seen_roots: set[str] = set()
+    for root in candidate_roots:
+        try:
+            rkey = str(root.expanduser().resolve())
+        except OSError:
+            continue
+        if rkey in seen_roots:
+            continue
+        seen_roots.add(rkey)
+        for base in (Path(rkey), Path(rkey) / "option-a", Path(rkey) / "option-b"):
             mpath = base / ".arena-artifacts" / "checkpoints" / cid / "manifest.json"
             if mpath.is_file():
                 try:
                     manifest = json.loads(mpath.read_text(encoding="utf-8"))
-                    ck_dir = mpath.parent
+                    ck_dir = mpath.parent.resolve()
+                    ck_base = base.resolve()
                 except (OSError, ValueError):
                     manifest = None
                 break
-    if not manifest or ck_dir is None:
+        if manifest:
+            break
+    if not manifest or ck_dir is None or ck_base is None:
         return jsonify({"error": "Checkpoint not found", "code": "gone"}), 404
-    restored = removed = 0
+    files_dir = (ck_dir / "files").resolve()
+    restored = removed = skipped = 0
     for entry in manifest.get("entries") or []:
-        dest = Path(str(entry.get("abs") or ""))
-        if not dest.is_absolute():
+        raw_abs = str(entry.get("abs") or "")
+        if not raw_abs:
+            continue
+        try:
+            dest = Path(raw_abs).resolve()
+        except OSError:
+            skipped += 1
+            continue
+        if not dest.is_absolute() or (dest != ck_base and ck_base not in dest.parents):
+            LOG.warning("checkpoint restore blocked path outside workspace: %s", dest)
+            skipped += 1
+            continue
+        try:
+            rel_parts = dest.relative_to(ck_base).parts
+        except ValueError:
+            skipped += 1
+            continue
+        if len(rel_parts) >= 2 and rel_parts[0] == ".git" and rel_parts[1] in ("config", "hooks"):
+            skipped += 1
             continue
         try:
             if entry.get("existed") and entry.get("store"):
+                store_name = str(entry["store"])
+                if not re.fullmatch(r"f\d+", store_name):
+                    skipped += 1
+                    continue
+                src_blob = (files_dir / store_name).resolve()
+                if files_dir not in src_blob.parents or not src_blob.is_file():
+                    skipped += 1
+                    continue
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes((ck_dir / "files" / str(entry["store"])).read_bytes())
+                dest.write_bytes(src_blob.read_bytes())
                 restored += 1
             elif not entry.get("existed") and dest.is_file():
                 dest.unlink()
                 removed += 1
         except OSError:
             LOG.exception("checkpoint restore failed for %s", dest)
-    return jsonify({"ok": True, "restored": restored, "removed": removed})
+            skipped += 1
+    return jsonify({
+        "ok": True,
+        "restored": restored,
+        "removed": removed,
+        "skipped": skipped,
+        "truncated": bool(manifest.get("truncated")),
+    })
 
 
 def _delegate_is_research(call) -> bool:
@@ -7401,7 +7671,8 @@ def _parallel_partner(lane_calls, call, precomputed):
 def _fresh_client(client):
     """Independent ArenaClient for a worker thread (Sessions are not thread-safe)."""
     try:
-        clone = ArenaClient(cookie_str=getattr(client, "cookie_str", None))
+        sink = getattr(client, "_cookie_sink", None) or getattr(client, "cookie_sink", None)
+        clone = ArenaClient(cookie_str=getattr(client, "cookie_str", None), cookie_sink=sink)
         clone.session.cookies.update(client.session.cookies)
         clone.active_mode = client.active_mode
         clone.active_modality = client.active_modality
@@ -7595,8 +7866,10 @@ def _run_parallel_research(client, conv, call, partner, lane, child_id, precompu
     yield _sse(dict(pinfo, type="tool_call"))
     events_q: queue.Queue = queue.Queue()
     results: dict = {}
+    child_stop = threading.Event()
+    parent_stop = getattr(_tl, "stop_event", None)
     parent_tl = {"chat_id": getattr(_tl, "chat_id", None),
-                 "stop_event": getattr(_tl, "stop_event", None),
+                 "stop_event": child_stop,
                  "perm_override": getattr(_tl, "perm_override", None)}
 
     def drive(key, c, cid):
@@ -7606,6 +7879,8 @@ def _run_parallel_research(client, conv, call, partner, lane, child_id, precompu
         try:
             gen = _run_subagent_scheduled(client, conv, c, lane, cid)
             while True:
+                if parent_stop is not None and parent_stop.is_set():
+                    child_stop.set()
                 try:
                     events_q.put(next(gen))
                 except StopIteration as stop:
@@ -7622,20 +7897,26 @@ def _run_parallel_research(client, conv, call, partner, lane, child_id, precompu
     for t in threads:
         t.start()
     done = idle = 0
-    while done < 2:
-        try:
-            ev = events_q.get(timeout=1)
-        except queue.Empty:
-            idle += 1
-            if idle % 10 == 0:
-                yield _sse({"type": "ping"})
-            continue
-        if ev is None:
-            done += 1
-        else:
-            yield ev
-    for t in threads:
-        t.join(timeout=5)
+    try:
+        while done < 2:
+            if parent_stop is not None and parent_stop.is_set():
+                child_stop.set()
+            try:
+                ev = events_q.get(timeout=1)
+            except queue.Empty:
+                idle += 1
+                if idle % 10 == 0:
+                    yield _sse({"type": "ping"})
+                continue
+            if ev is None:
+                done += 1
+            else:
+                yield ev
+    finally:
+        if done < 2:
+            child_stop.set()
+        for t in threads:
+            t.join(timeout=5)
     ok_b, status_b, output_b, extra_b = results.get("b") or (
         False, "error", "sub-agent produced no result", {"child_id": partner_child})
     precomputed[id(partner)] = {
@@ -7658,8 +7939,10 @@ def _run_children_pair(client, conv: dict, jobs: list, lane: str):
     """
     events_q: queue.Queue = queue.Queue()
     results: dict = {}
+    child_stop = threading.Event()
+    parent_stop = getattr(_tl, "stop_event", None)
     parent_tl = {"chat_id": getattr(_tl, "chat_id", None),
-                 "stop_event": getattr(_tl, "stop_event", None),
+                 "stop_event": child_stop,
                  "perm_override": getattr(_tl, "perm_override", None)}
 
     def drive(index, c, cid):
@@ -7669,6 +7952,8 @@ def _run_children_pair(client, conv: dict, jobs: list, lane: str):
         try:
             gen = _run_subagent_scheduled(client, conv, c, lane, cid)
             while True:
+                if parent_stop is not None and parent_stop.is_set():
+                    child_stop.set()
                 try:
                     events_q.put(next(gen))
                 except StopIteration as stop:
@@ -7684,15 +7969,27 @@ def _run_children_pair(client, conv: dict, jobs: list, lane: str):
                for i in range(2)]
     for t in threads:
         t.start()
-    finished = 0
-    while finished < 2:
-        item = events_q.get()
-        if item is None:
-            finished += 1
-            continue
-        yield item
-    for t in threads:
-        t.join(timeout=5)
+    finished = idle = 0
+    try:
+        while finished < 2:
+            if parent_stop is not None and parent_stop.is_set():
+                child_stop.set()
+            try:
+                item = events_q.get(timeout=1)
+            except queue.Empty:
+                idle += 1
+                if idle % 10 == 0:
+                    yield _sse({"type": "ping"})
+                continue
+            if item is None:
+                finished += 1
+                continue
+            yield item
+    finally:
+        if finished < 2:
+            child_stop.set()
+        for t in threads:
+            t.join(timeout=5)
     return [results.get(i, (False, "error", "", {})) for i in range(2)]
 
 
@@ -7768,13 +8065,18 @@ MAX_SUBAGENTS = 3
 _subagent_lock = threading.Lock()
 
 
-def _delegate_models() -> list:
-    """[(id, name)] of text models a parent model may pick for a sub-agent."""
+def _all_delegate_models() -> list:
+    """Full [(id, name)] catalog of allowed direct text models for sub-agent/fan-out resolution."""
     try:
         ids = _allowed_model_ids("direct", "text")
     except Exception:
         ids = set()
-    return [(mid, _model_name(mid) or mid) for mid in sorted(ids)[:14]]
+    return [(mid, _model_name(mid) or mid) for mid in sorted(ids)]
+
+
+def _delegate_models() -> list:
+    """Compact [(id, name)] sample shown in the parent agent's prompt."""
+    return _all_delegate_models()[:14]
 
 
 _LIGHT_MODEL_TOKENS = ("mini", "flash", "lite", "haiku", "nano")
@@ -7797,19 +8099,35 @@ def _cheap_subagents_on() -> bool:
 def _resolve_delegate_model(raw, mode="research") -> tuple:
     """Resolve a parent's <model> choice to (model_id, display_name, auto)."""
     text = str(raw or "").strip()
+    primary_models = _delegate_models()
+    all_models = None
+
+    def _catalog():
+        nonlocal all_models
+        if all_models is None:
+            seen_ids = {str(mid) for mid, _ in primary_models}
+            all_models = list(primary_models) + [
+                (mid, name) for mid, name in _all_delegate_models() if str(mid) not in seen_ids
+            ]
+        return all_models
+
     if text:
         low = text.lower()
-        models = _delegate_models()
-        for mid, name in models:
-            if low == str(mid).lower() or low == name.lower():
-                return mid, name, False
-        for mid, name in models:
-            if low in name.lower() or low in str(mid).lower():
-                return mid, name, False
+        for pool in (primary_models, _catalog()):
+            for mid, name in pool:
+                if low == str(mid).lower() or low == name.lower():
+                    return mid, name, False
+        for pool in (primary_models, _catalog()):
+            for mid, name in pool:
+                if low in name.lower() or low in str(mid).lower():
+                    return mid, name, False
     if str(mode or "research").lower() != "work" and _cheap_subagents_on():
         # Research grunt work on a light model by default (v5.1.5): the
         # parent can always name a stronger model explicitly.
-        for mid, name in _delegate_models():
+        for mid, name in primary_models:
+            if _light_model(mid, name):
+                return mid, name, True
+        for mid, name in _catalog():
             if _light_model(mid, name):
                 return mid, name, True
     auto = _auto_agent_model()
@@ -8035,22 +8353,22 @@ def _agent_run(client: ArenaClient, message: str, conv: dict):
         for l in lanes:
             for call in calls[l]:
                 try:
-                    sig = json.dumps([call.get("name"), call.get("params") or {}],
+                    sig = json.dumps([l, call.get("name"), call.get("params") or {}],
                                      sort_keys=True, ensure_ascii=False)
                 except (TypeError, ValueError):
-                    sig = repr(call)
+                    sig = f"{l}:{repr(call)}"
                 sig_counts[sig] = sig_counts.get(sig, 0) + 1
                 if sig_counts[sig] >= 4:
                     blocked[id(call)] = max(blocked.get(id(call), 0), sig_counts[sig])
                 cparams = call.get("params") or {}
-                target_key = (call.get("name") or "tool",
+                target_key = (l, call.get("name") or "tool",
                               str(cparams.get("path") or cparams.get("pattern")
                                   or (cparams.get("cmd") or "")[:40]))
                 key_counts[target_key] = key_counts.get(target_key, 0) + 1
                 if key_counts[target_key] == 3:
                     loop_notes.append(
-                        f"[Arena Desktop] Notice: you have called {target_key[0]} on "
-                        f"'{target_key[1]}' three times. If it is not working, change "
+                        f"[Arena Desktop] Notice: you have called {target_key[1]} on "
+                        f"'{target_key[2]}' three times. If it is not working, change "
                         "approach instead of repeating it.")
                 elif key_counts[target_key] >= 5:
                     blocked[id(call)] = max(blocked.get(id(call), 0), key_counts[target_key])
@@ -8095,10 +8413,10 @@ def _agent_run(client: ArenaClient, message: str, conv: dict):
                     info = dict(tools[l].describe(call), model=l)
                     yield _sse(dict(info, type="tool_call"))
                     try:
-                        out_key = json.dumps([call["name"], call.get("params") or {}],
+                        out_key = json.dumps([l, call["name"], call.get("params") or {}],
                                              sort_keys=True, ensure_ascii=False)
                     except (TypeError, ValueError):
-                        out_key = repr(call)
+                        out_key = f"{l}:{repr(call)}"
                     cache = conv.setdefault("_output_cache", {})
                     answer = yield from _permit(mode, call["name"], info)
                     if answer != "allow":
@@ -8180,7 +8498,7 @@ def _agent_run(client: ArenaClient, message: str, conv: dict):
                                         sig = (st.st_mtime_ns, st.st_size)
                                     except OSError:
                                         sig = None
-                                ckey = (str(target), str(ranged.get("start_line") or ""),
+                                ckey = (l, str(target), str(ranged.get("start_line") or ""),
                                         str(ranged.get("end_line") or ""))
                                 if sig is not None and cache.get(ckey) == sig:
                                     segments.append(f"== {rel} ==\n[unchanged since your last read - content not repeated]"
@@ -8234,7 +8552,7 @@ def _agent_run(client: ArenaClient, message: str, conv: dict):
                                         "chat_id": parent_chat,
                                         "subagent": _QUESTIONS[qid]["subagent"]})
                             _notify("Arena Desktop", "The model is waiting for your answer.", "question")
-                            answer_text = yield from _wait_for(lambda: _question_answer(qid), QUESTION_TIMEOUT)
+                            answer_text = yield from _wait_for(lambda qid=qid: _question_answer(qid), QUESTION_TIMEOUT)
                         finally:
                             with _questions_lock:
                                 _QUESTIONS.pop(qid, None)
@@ -8284,7 +8602,7 @@ def _agent_run(client: ArenaClient, message: str, conv: dict):
                                         "chat_id": parent_chat,
                                         "subagent": _QUESTIONS[qid]["subagent"]})
                             _notify("Arena Desktop", "The model proposed a plan for your review.", "question")
-                            answer_text = yield from _wait_for(lambda: _question_answer(qid), QUESTION_TIMEOUT)
+                            answer_text = yield from _wait_for(lambda qid=qid: _question_answer(qid), QUESTION_TIMEOUT)
                         finally:
                             with _questions_lock:
                                 _QUESTIONS.pop(qid, None)
@@ -8456,19 +8774,21 @@ def _agent_run(client: ArenaClient, message: str, conv: dict):
                             except Exception as e:
                                 ok, output = False, f"{type(e).__name__}: {e}"
                             status = "ok" if ok else "error"
+                            if annotations.get("readOnlyHint") is not True:
+                                conv.pop("_output_cache", None)
                         else:
                             ok, output = False, ""
                             status = ("blocked: plan mode is read-only" if mode == "plan" else "blocked by safety rules") \
                                 if answer == "blocked" else "denied by the user"
                 elif call["name"] not in permissions.KIND:
-                    ok, output = tools[l].run(call)
+                    ok, output = tools[l].run(call, stop_event=getattr(_tl, "stop_event", None))
                     status = "error"
                 else:
                     answer = yield from _permit(mode, call["name"], info)
                     if answer == "allow":
                         if call["name"] in ("write_file", "edit_file", "delete"):
                             _checkpoint_capture(conv, l, info)
-                        ok, output = tools[l].run(call)
+                        ok, output = tools[l].run(call, stop_event=getattr(_tl, "stop_event", None))
                         status = "ok" if ok else "error"
                         if call["name"] == "run_cmd":
                             conv.pop("_output_cache", None)
@@ -8878,9 +9198,15 @@ _GOOGLE_HTTP_ACCOUNT = {"key": None, "at": 0.0, "info": None}
 _GOOGLE_ACCOUNT_TTL = 45.0  # seconds: a status poll must not hammer Google
 
 
+_GOOGLE_JAR_LOCK = threading.Lock()
+_GOOGLE_JAR_STALLED_AT = 0.0
+_GOOGLE_JAR_STALL_COOLDOWN = 20.0
+
+
 @_diag_trace
 def _google_current_cookie() -> str:
     """The cookie header of the Google account in use, or "" when none."""
+    global _GOOGLE_JAR_STALLED_AT
     store = _google_accounts_load()
     record = None
     for acc in store.get("accounts") or []:
@@ -8894,31 +9220,33 @@ def _google_current_cookie() -> str:
         # "no Google session" while the person is visibly signed in.
         engine = _google_engine()
         if (engine is not None and getattr(engine, "window", None) is not None
-                and not getattr(engine, "quiet_now", lambda: False)()):
-            # engine.cookies() reads Edge cookies via WebView2 on the UI thread;
-            # a stalled window can hold the GIL waiting on DCOM and freeze the
-            # process. Read on a separate thread with a hard timeout.
-            import threading as _threading
-            _jar_box: dict = {}
+                and not getattr(engine, "quiet_now", lambda: False)()
+                and (time.monotonic() - _GOOGLE_JAR_STALLED_AT) >= _GOOGLE_JAR_STALL_COOLDOWN
+                and _GOOGLE_JAR_LOCK.acquire(blocking=False)):
+            try:
+                _jar_box: dict = {}
 
-            def _read_jar():
-                try:
-                    _jar_box["jar"] = engine.cookies(tries=1)
-                except Exception:
-                    _jar_box["jar"] = ""
+                def _read_jar():
+                    try:
+                        _jar_box["jar"] = engine.cookies(tries=1)
+                    except Exception:
+                        _jar_box["jar"] = ""
 
-            _t = _threading.Thread(target=_read_jar, daemon=True, name="google-jar")
-            _t.start()
-            _t.join(2.5)
-            jar = _jar_box.get("jar", "")
-            if _t.is_alive():
-                LOG.info("google current cookie: jar read stalled; skipping")
-                jar = ""
-            if jar:
-                record["cookie"] = jar
-                _google_accounts_save(store)
-                LOG.info("google account %s: cookie recovered from the window",
-                         record.get("id"))
+                _t = threading.Thread(target=_read_jar, daemon=True, name="google-jar")
+                _t.start()
+                _t.join(2.5)
+                jar = _jar_box.get("jar", "")
+                if _t.is_alive():
+                    _GOOGLE_JAR_STALLED_AT = time.monotonic()
+                    LOG.info("google current cookie: jar read stalled; skipping")
+                    jar = ""
+                if jar:
+                    record["cookie"] = jar
+                    _google_accounts_save(store)
+                    LOG.info("google account %s: cookie recovered from the window",
+                             record.get("id"))
+            finally:
+                _GOOGLE_JAR_LOCK.release()
     accounts = [a for a in (store.get("accounts") or [])
                 if isinstance(a, dict) and a.get("cookie")]
     if not accounts:
@@ -9208,25 +9536,52 @@ def _google_save_prefs(patch: dict) -> dict:
     return prefs
 
 
+_google_accounts_lock = threading.RLock()
+
+
 def _google_accounts_load() -> dict:
-    path = GOOGLE_ACCOUNTS_FILE()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(data, dict) and isinstance(data.get("accounts"), list):
-            return {"current": data.get("current"), "accounts": data["accounts"]}
-    except (OSError, ValueError):
-        pass
-    return {"current": None, "accounts": []}
+    with _google_accounts_lock:
+        path = GOOGLE_ACCOUNTS_FILE()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("accounts"), list):
+                accounts = []
+                for raw in data["accounts"]:
+                    if not isinstance(raw, dict):
+                        continue
+                    rec = dict(raw)
+                    ck = rec.get("cookie")
+                    if isinstance(ck, str) and ck:
+                        rec["cookie"] = crypto.decode_cookie(ck) or ""
+                    accounts.append(rec)
+                return {"current": data.get("current"), "accounts": accounts}
+        except (OSError, ValueError):
+            pass
+        return {"current": None, "accounts": []}
 
 
 def _google_accounts_save(store: dict):
-    path = GOOGLE_ACCOUNTS_FILE()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(store, ensure_ascii=False, indent=1), encoding="utf-8")
-        path.chmod(0o600)
-    except OSError:
-        LOG.exception("could not save google accounts")
+    with _google_accounts_lock:
+        path = GOOGLE_ACCOUNTS_FILE()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            encoded = {"current": store.get("current"), "accounts": []}
+            for raw in (store.get("accounts") or []):
+                if not isinstance(raw, dict):
+                    continue
+                rec = dict(raw)
+                ck = rec.get("cookie")
+                if isinstance(ck, str) and ck:
+                    rec["cookie"] = crypto.protect_text(ck)
+                encoded["accounts"].append(rec)
+            payload = json.dumps(encoded, ensure_ascii=False, indent=1)
+            tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+            tmp.write_text(payload, encoding="utf-8")
+            tmp.chmod(0o600)
+            os.replace(tmp, path)
+            path.chmod(0o600)
+        except OSError:
+            LOG.exception("could not save google accounts")
 
 
 GOOGLE_AUTH_COOKIES = ("SID", "HSID", "SSID", "APISID", "SAPISID",
@@ -9687,7 +10042,7 @@ def _google_track_stream(chat_id, message):
     )
 
 
-def _google_call_bounded(fn, fallback, limit: float = 2.5):
+def _google_call_bounded(fn, fallback, limit: float = 2.5, reraise=()):
     """Run ``fn`` on a worker thread and give up after ``limit`` seconds.
 
     The status endpoint is polled while a person clicks around, and every one
@@ -9711,6 +10066,8 @@ def _google_call_bounded(fn, fallback, limit: float = 2.5):
         LOG.info("google status: a lookup is still running after %.1fs; answering without it", limit)
         return fallback
     if "error" in box:
+        if reraise and isinstance(box["error"], reraise):
+            raise box["error"]
         LOG.info("google status: lookup failed: %s", box["error"])
         return fallback
     return box.get("value", fallback)
@@ -9833,16 +10190,18 @@ def _google_window_diagnosis(engine) -> dict:
             "action": None}
 
 
+_GOOGLE_STATUS_COOKIE_EXPORT_AT = 0.0
+
+
 @app.route("/api/google/status")
 def api_google_status():
+    global _GOOGLE_STATUS_COOKIE_EXPORT_AT
     engine = _google_engine()
     state = engine.state() if engine is not None else {"attached": False, "ready": False}
     box = _google_account_state()
     has_stored_cookie = bool(_google_current_cookie())
     fallback = {
-        # Не объявляем signed_in=true по одному наличию сохранённых кук:
-        # живое подтверждение должно прийти от сервера, иначе галочка
-        # зажжётся сразу при открытии окна, ещё до входа.
+        # Never claim signed_in=true from saved cookies alone; require live confirmation.
         "signed_in": False,
         "email": box["current_account"] if has_stored_cookie else "",
         "name": box["current_account"] if has_stored_cookie else "",
@@ -9859,14 +10218,13 @@ def api_google_status():
     # saved account in step, so the profile button tells the truth without the
     # person having to click anything.
     if live.get("signed_in"):
-        if not has_stored_cookie and engine is not None:
+        now_m = time.monotonic()
+        if (not has_stored_cookie and engine is not None
+                and (now_m - _GOOGLE_STATUS_COOKIE_EXPORT_AT) >= 15.0):
+            _GOOGLE_STATUS_COOKIE_EXPORT_AT = now_m
             # Window is already signed in, but cookies were not yet exported
             # into google_accounts.json (e.g. after upgrading or a missed read).
-            exported = ""
-            try:
-                exported = engine.cookies(tries=1)
-            except Exception:
-                LOG.exception("google status cookie auto-export failed")
+            exported = _google_call_bounded(lambda: engine.cookies(tries=1), "", limit=2.5)
             if exported and _google_has_auth_cookie(exported):
                 _google_store_account(live, "window", cookie=exported)
                 has_stored_cookie = True
@@ -10129,10 +10487,13 @@ def _google_import_chats(items: list) -> dict:
         if url in known:
             chat_id, data = known[url]
             if title != (data.get("title") or ""):
-                data["title"] = title
-                data["updated_at"] = now
-                (CHATS_DIR / chat_id / "chat.json").write_text(
-                    json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+                with _chat_file_lock:
+                    data["title"] = title
+                    data["updated_at"] = now
+                    target_f = CHATS_DIR / chat_id / "chat.json"
+                    tmp_f = target_f.with_name("chat.json.tmp")
+                    tmp_f.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+                    os.replace(tmp_f, target_f)
                 updated += 1
             continue
         chat_id = str(uuid.uuid4())
@@ -10144,10 +10505,12 @@ def _google_import_chats(items: list) -> dict:
             "external_id": str((raw or {}).get("mtid") or _google_thread_mtid(url)),
             "messages": [],
         }
-        chat_dir = CHATS_DIR / chat_id
-        chat_dir.mkdir(parents=True, exist_ok=True)
-        (chat_dir / "chat.json").write_text(
-            json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8")
+        with _chat_file_lock:
+            chat_dir = CHATS_DIR / chat_id
+            chat_dir.mkdir(parents=True, exist_ok=True)
+            tmp_f = chat_dir / "chat.json.tmp"
+            tmp_f.write_text(json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8")
+            os.replace(tmp_f, chat_dir / "chat.json")
         known[url] = (chat_id, record)
         added += 1
     return {"added": added, "updated": updated}
@@ -10169,7 +10532,12 @@ def api_google_threads():
     # after switching to Google mode, and a 45 s socket wait there read as
     # "the app hung". Google's own thread service answers in a second or two.
     try:
-        items = _google_call_bounded(lambda: client.threads(limit=40), None, limit=12.0)
+        items = _google_call_bounded(
+            lambda: client.threads(limit=40),
+            None,
+            limit=12.0,
+            reraise=(google_http.GoogleHTTPError,),
+        )
     except google_http.GoogleHTTPError as exc:
         code = 503 if exc.code == "network" else 400
         return jsonify({"ok": False, "entries": [], "code": exc.code,
@@ -10282,8 +10650,10 @@ def api_google_thread_open():
                     if result.get("sources"):
                         record["sources"] = result["sources"]
                     record["updated_at"] = datetime.now(timezone.utc).isoformat()
-                    (CHATS_DIR / chat_id / "chat.json").write_text(
-                        json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8")
+                    with _chat_file_lock:
+                        tmp_f = CHATS_DIR / chat_id / "chat.json.tmp"
+                        tmp_f.write_text(json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8")
+                        os.replace(tmp_f, CHATS_DIR / chat_id / "chat.json")
     return jsonify({"ok": True, "chat_id": chat_id, "imported": imported,
                     "messages": len(record.get("messages") or [])})
 
@@ -10807,7 +11177,7 @@ def _provider_track_stream(
                                             "question": question, "options": options, "custom": custom,
                                             "chat_id": chat_id, "subagent": None})
                                 _notify("Arena Desktop", "The model is waiting for your answer.", "question")
-                                answer_text = yield from _wait_for(lambda: _question_answer(qid), QUESTION_TIMEOUT)
+                                answer_text = yield from _wait_for(lambda qid=qid: _question_answer(qid), QUESTION_TIMEOUT)
                             finally:
                                 with _questions_lock:
                                     _QUESTIONS.pop(qid, None)
@@ -10854,7 +11224,7 @@ def _provider_track_stream(
                                             "options": plan_options, "custom": True,
                                             "chat_id": chat_id, "subagent": None})
                                 _notify("Arena Desktop", "The model proposed a plan for your review.", "question")
-                                answer_text = yield from _wait_for(lambda: _question_answer(qid), QUESTION_TIMEOUT)
+                                answer_text = yield from _wait_for(lambda qid=qid: _question_answer(qid), QUESTION_TIMEOUT)
                             finally:
                                 with _questions_lock:
                                     _QUESTIONS.pop(qid, None)
@@ -11048,6 +11418,8 @@ def _api_chat_impl():
         if _chat_generating(pid_chat):
             return jsonify({"error": "This chat is still working on the previous message.",
                             "code": "busy"}), 409
+        _stop.clear()
+        _chat_stop_event(pid_chat).clear()
         req_model = str(data.get("model_id") or data.get("model_a") or data.get("model") or "").strip()
         req_tools = data.get("tools")
         return _provider_track_stream(extra_prov, pid_chat, message,
@@ -11068,6 +11440,8 @@ def _api_chat_impl():
         if _chat_generating(google_id):
             return jsonify({"error": "This chat is still working on the previous message.",
                             "code": "busy"}), 409
+        _stop.clear()
+        _chat_stop_event(google_id).clear()
         return _google_track_stream(google_id, message)
     if not _signed_in_somewhere(client):
         return jsonify({"error": "Not signed in. Press Sign in first.", "code": "auth"}), 401
@@ -12154,9 +12528,14 @@ def _git_run(root: Path, args, check=True, timeout=30):
         raise _GitError("Git is not installed or is not available on PATH.", 501)
     env = dict(os.environ)
     env.update({"GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"})
+    safe_flags = [
+        "-c", "core.fsmonitor=false",
+        "-c", "core.sshCommand=false",
+        "-c", "protocol.ext.allow=never",
+    ]
     try:
         result = subprocess.run(
-            [executable, "-C", str(root), *args],
+            [executable, *safe_flags, "-C", str(root), *args],
             cwd=str(root), capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
@@ -12194,6 +12573,9 @@ def _git_validate_paths(values, root: Path):
         if not isinstance(value, str) or not value.strip() or value.strip() == ".":
             raise _GitError("One Git path is empty or invalid.", 400)
         try:
+            raw_cand = root / value.strip()
+            if raw_cand.is_symlink():
+                raise PermissionError("Refusing to operate on a symlink in Git.")
             target, checked_root = _workspace_panel_path(value)
         except PermissionError as exc:
             raise _GitError(str(exc), 403)
@@ -12762,6 +13144,43 @@ def api_connector_delete(name):
         return _connector_error(e)
 
 
+def _is_public_https_url(url: str) -> bool:
+    """Validate an HTTPS URL points solely to a public, non-loopback, non-private IP."""
+    import ipaddress
+    import socket
+    u = urllib.parse.urlparse(url)
+    host = (u.hostname or "").strip().lower()
+    if u.scheme != "https" or not host or host in ("localhost", "localhost.localdomain"):
+        return False
+    cgnat = ipaddress.ip_network("100.64.0.0/10")
+
+    def _ip_ok(ip_str: str) -> bool:
+        try:
+            addr = ipaddress.ip_address(ip_str)
+        except ValueError:
+            return False
+        if (addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_multicast or addr.is_unspecified or addr.is_reserved):
+            return False
+        if isinstance(addr, ipaddress.IPv4Address) and addr in cgnat:
+            return False
+        return True
+
+    try:
+        # Direct IP literal check first
+        ipaddress.ip_address(host)
+        return _ip_ok(host)
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(host, u.port or 443, type=socket.SOCK_STREAM)
+    except OSError:
+        return False
+    if not infos:
+        return False
+    return all(_ip_ok(info[4][0]) for info in infos)
+
+
 @app.route("/api/media/save", methods=["POST"])
 def api_media_save():
     """Download a generated image, video or audio file into the projects folder."""
@@ -12773,19 +13192,34 @@ def api_media_save():
             mime = head[5:].split(";")[0]
             blob, stem = base64.b64decode(payload), "media"
         else:
-            u = urllib.parse.urlparse(url)
-            host = (u.hostname or "").lower()
-            if u.scheme != "https" or not host or host == "localhost" or host.startswith(("127.", "10.", "192.168.", "169.254.")):
-                return jsonify({"ok": False, "error": "Only https media links can be saved."}), 400
-            r = requests.get(url, timeout=60, stream=True)
-            r.raise_for_status()
-            blob = b""
-            for chunk in r.iter_content(1 << 16):
-                blob += chunk
-                if len(blob) > 300 * 1024 * 1024:
-                    return jsonify({"ok": False, "error": "File is larger than 300 MB."}), 413
-            mime = r.headers.get("Content-Type", "").split(";")[0]
-            stem = Path(u.path).stem or "media"
+            cur_url = url
+            r = None
+            for _hop in range(6):
+                if not _is_public_https_url(cur_url):
+                    return jsonify({"ok": False, "error": "Only public https media links can be saved."}), 400
+                r = requests.get(cur_url, timeout=60, stream=True, allow_redirects=False)
+                if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("Location"):
+                    next_url = urllib.parse.urljoin(cur_url, r.headers["Location"])
+                    r.close()
+                    cur_url = next_url
+                    continue
+                break
+            if r is None:
+                return jsonify({"ok": False, "error": "Too many redirects."}), 400
+            try:
+                r.raise_for_status()
+                chunks = []
+                total_len = 0
+                for chunk in r.iter_content(1 << 16):
+                    chunks.append(chunk)
+                    total_len += len(chunk)
+                    if total_len > 300 * 1024 * 1024:
+                        return jsonify({"ok": False, "error": "File is larger than 300 MB."}), 413
+                blob = b"".join(chunks)
+                mime = r.headers.get("Content-Type", "").split(";")[0]
+                stem = Path(urllib.parse.urlparse(cur_url).path).stem or "media"
+            finally:
+                r.close()
     except (requests.RequestException, ValueError) as e:
         return jsonify({"ok": False, "error": f"Download failed: {e}"}), 502
     ext = mimetypes.guess_extension(mime) or Path(urllib.parse.urlparse(url).path).suffix or ".bin"
@@ -12835,6 +13269,10 @@ def shutdown_runtime() -> dict:
         report["terminals_closed"] = TERMINAL_MANAGER.shutdown_all()
     except Exception:
         LOG.exception("shutdown: terminal shutdown failed")
+    try:
+        report["shell_procs_killed"] = agent.shutdown_shell_procs()
+    except Exception:
+        LOG.exception("shutdown: shell procs shutdown failed")
     try:
         with _preview_lock:
             srv = _preview.get("server")

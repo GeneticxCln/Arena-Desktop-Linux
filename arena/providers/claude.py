@@ -305,14 +305,34 @@ class ClaudeProvider(WebChatEngine):
             return ""
         if want.lower().startswith("claude-"):
             return want
-        slug = self._model_label_to_slug.get(want.lower(), "")
+
+        def _lookup(label: str) -> str:
+            low = label.lower()
+            exact = self._model_label_to_slug.get(low, "")
+            if exact:
+                return exact
+            # Token-normalized match so DOM labels like "Sonnet 4.5" match "claude-sonnet-4-5-..."
+            toks = [t for t in re.split(r"[\s\-_.]+", low) if t and t not in ("claude", "extended", "medium", "low", "high")]
+            if not toks:
+                return ""
+            for k, slug in self._model_label_to_slug.items():
+                hay = set(re.split(r"[\s\-_.]+", f"{k} {slug}".lower()))
+                if all(t in hay for t in toks):
+                    return slug
+            return ""
+
+        slug = _lookup(want)
         if not slug and not self._model_label_to_slug:
-            # Populate label->slug map lazily if user persisted a UI label from a prior session
+            # Populate label->slug map lazily from bootstrap/account/org endpoints
             try:
+                for endpoint in ("/api/bootstrap", "/api/account"):
+                    resp = self.fetch_json(endpoint, timeout=4.0)
+                    if resp.get("ok") and isinstance(resp.get("data"), (dict, list)):
+                        self._collect_claude_models_from_json(resp["data"], lambda *_: None)
                 _, org_obj = self._get_org_info()
                 if org_obj:
                     self._collect_claude_models_from_json(org_obj, lambda *_: None)
-                slug = self._model_label_to_slug.get(want.lower(), "")
+                slug = _lookup(want)
             except Exception:
                 pass
         return slug
@@ -440,13 +460,12 @@ class ClaudeProvider(WebChatEngine):
                             }
                             return
                 elif ev_kind == "error":
-                    if not emitted_any:
-                        yield {
-                            "type": "error",
-                            "code": "claude_stream",
-                            "message": f"Claude stream interrupted: {item.get('error')}",
-                            "open_window": True,
-                        }
+                    yield {
+                        "type": "error",
+                        "code": "claude_stream",
+                        "message": f"Claude stream interrupted: {item.get('error')}",
+                        "open_window": True,
+                    }
                     return
                 elif ev_kind == "end":
                     # Flush any trailing SSE line lacking a final newline
@@ -462,11 +481,24 @@ class ClaudeProvider(WebChatEngine):
                                 if pkt.get("type") == "content_block_delta":
                                     delta = pkt.get("delta") or {}
                                     if delta.get("type") == "text_delta" and delta.get("text"):
+                                        emitted_any = True
                                         yield {"type": "text", "text": str(delta["text"])}
                                     elif delta.get("type") == "thinking_delta" and delta.get("thinking"):
+                                        emitted_any = True
                                         yield {"type": "reasoning", "text": str(delta["thinking"])}
                                 elif pkt.get("completion"):
+                                    emitted_any = True
                                     yield {"type": "text", "text": str(pkt["completion"])}
+                    if not emitted_any:
+                        yield {
+                            "type": "error",
+                            "code": "claude_empty",
+                            "message": (
+                                f"Claude returned an empty response (HTTP {status_code or 200}). "
+                                "Check the Claude window in case sign-in or verification is needed."
+                            ),
+                            "open_window": True,
+                        }
                     return
 
         return _gen()

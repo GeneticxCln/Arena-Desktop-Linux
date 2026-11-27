@@ -168,7 +168,7 @@
     return '';
   }
 
-  function safeUrl(raw, { image = false } = {}) {
+  function safeUrl(raw, { image = false, externalOnly = false } = {}) {
     if (typeof raw !== 'string') return null;
     const value = raw.trim();
     if (!value) return null;
@@ -184,12 +184,26 @@
       return null;
     }
     if (image && /^blob:/i.test(value)) return value;
-    if (value.startsWith('/') && !value.startsWith('//')) return value;
+    if (!externalOnly && value.startsWith('/') && !value.startsWith('//')) return value;
     try {
-      const parsed = new URL(value, window.location.href);
+      const parsed = externalOnly ? new URL(value) : new URL(value, window.location.href);
       if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.href;
     } catch { /* invalid URL */ }
     return null;
+  }
+
+  function esc(text) {
+    return escapeHtml(text);
+  }
+
+  function isUuidText(value) {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || '').trim());
+  }
+
+  function closeModal() {
+    if (state.activeModal && typeof state.activeModal.close === 'function') {
+      state.activeModal.close();
+    }
   }
 
   function hostOf(raw) {
@@ -566,7 +580,7 @@
       }
       let response;
       const __t0 = performance.now();
-      DIAG.event('request', `${method} ${path}`);
+      if (window.__ARENA_DIAG_VERBOSE) DIAG.event('request', `${method} ${path}`);
       try {
         response = await fetch(path, options);
       } catch (error) {
@@ -575,10 +589,10 @@
         throw new ApiError("The local application server is unavailable. Check that the application is running and try again.", 0, error);
       }
       const __ms = performance.now() - __t0;
-      // A request that takes seconds is the smell of the freeze: name it.
+      // Only log slow calls or failures to avoid 2x POST /api/diag traffic on every request.
       if (__ms >= 1500) {
         DIAG.slow(`${method} ${path}`, __ms);
-      } else {
+      } else if (!response.ok || window.__ARENA_DIAG_VERBOSE) {
         DIAG.event('response', `${method} ${path} ${response.status} ${Math.round(__ms)}ms`);
       }
       const payload = await parseResponsePayload(response);
@@ -649,7 +663,7 @@
     answerMediaChoice(id, body) { return this.request(`/api/media-choices/${encodeURIComponent(id)}`, { method: 'POST', body }); },
     searchChats(q) { return this.request(`/api/search?q=${encodeURIComponent(q)}`); },
     forkChat(id, messageIndex) { return this.request(`/api/chats/${encodeURIComponent(id)}/fork`, { method: 'POST', body: { message_index: messageIndex } }); },
-    restoreCheckpoint(id) { return this.request(`/api/checkpoints/${encodeURIComponent(id)}/restore`, { method: 'POST', body: {} }); },
+    restoreCheckpoint(id, chatId = null) { return this.request(`/api/checkpoints/${encodeURIComponent(id)}/restore`, { method: 'POST', body: chatId ? { chat_id: chatId } : (state.activeChatId ? { chat_id: state.activeChatId } : {}) }); },
     workspaceSnapshot(paths) { return this.request('/api/workspace/snapshot', { method: 'POST', body: { paths } }); },
     getElo() { return this.request('/api/elo'); },
     getAutomations() { return this.request('/api/automations' + settingsQuery()); },
@@ -791,6 +805,7 @@
       const parser = new SSEParser(onEvent, (raw) => {
         onEvent({ type: 'notice', message: "A damaged flow event was missed." });
       });
+      let finishedNormally = false;
       try {
         while (true) {
           const { value, done } = await reader.read();
@@ -799,7 +814,11 @@
         }
         parser.push(decoder.decode());
         parser.flush();
+        finishedNormally = true;
       } finally {
+        if (!finishedNormally) {
+          try { await reader.cancel(); } catch { /* already cancelled */ }
+        }
         try { reader.releaseLock(); } catch { /* already released */ }
       }
     }
@@ -1209,7 +1228,7 @@
         permission_mode: demoStore.permissionMode,
         workspace: demoStore.workspace,
         workspace_chosen: true,
-        app_version: '7.4.0',
+        app_version: '7.4.1',
         pending_permissions: demoStore.pendingPermissions.length,
         demo: true
       };
@@ -2548,11 +2567,11 @@ You can start with a more structured option: one script, short captions, and a c
         const linkMatch = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
         if (linkMatch) {
           const label = linkMatch[1];
-          const url = safeUrl(linkMatch[2]);
+          const url = safeUrl(linkMatch[2], { externalOnly: true });
           if (url) {
             parent.appendChild(el('a', {
               href: url,
-              target: url.startsWith('/') ? '_self' : '_blank',
+              target: '_blank',
               rel: 'noopener noreferrer',
               title: url,
               text: label
@@ -3089,7 +3108,7 @@ You can start with a more structured option: one script, short captions, and a c
       if (!id || !els.prompt) return false;
       els.prompt.value = link.text;
       state.draft = link.text;
-      saveDraft();
+      saveComposerDraft();
       resizePrompt();
       updateComposerState();
       focusComposer();
@@ -3319,7 +3338,10 @@ You can start with a more structured option: one script, short captions, and a c
     return loadStatus({ quiet: true });
   }
 
+  let loadChatsSeq = 0;
+
   async function loadChats({ silent = false } = {}) {
+    const seq = ++loadChatsSeq;
     if (!silent) {
       state.chatsLoading = true;
       state.chatsError = null;
@@ -3333,6 +3355,7 @@ You can start with a more structured option: one script, short captions, and a c
     }
     try {
       const raw = await API.getChats();
+      if (seq !== loadChatsSeq) return state.chats;
       const list = Array.isArray(raw) ? raw : (Array.isArray(raw?.chats) ? raw.chats : []);
       const serverChats = list.map(normalizeChat).filter(Boolean);
       const serverIds = new Set(serverChats.map((chat) => chat.id));
@@ -3815,7 +3838,14 @@ You can start with a more structured option: one script, short captions, and a c
     stopGoogleSignInWatch();
     let verifyAttempted = false;
     let sawWindow = false;
+    let ticks = 0;
+    const MAX_TICKS = 375; // ~5 minutes max
     googleSignInTimer = window.setInterval(async () => {
+      ticks += 1;
+      if (ticks > MAX_TICKS) {
+        stopGoogleSignInWatch();
+        return;
+      }
       try {
         const data = await API.getGoogleStatus();
         const diag = (data && data.diagnosis) || {};
@@ -3829,10 +3859,11 @@ You can start with a more structured option: one script, short captions, and a c
           data?.signed_in ||
           (data?.configured && data?.has_cookie)
         );
+        const windowClosed = sawWindow && (!data?.window?.open && (diag.state === 'closed' || diag.state === 'none' || !diag.state));
         if (!signed && !expired && !verifyAttempted && (
           data?.has_cookie ||
           data?.configured ||
-          (sawWindow && diag.state === 'closed')
+          windowClosed
         )) {
           verifyAttempted = true;
           try {
@@ -3865,8 +3896,10 @@ You can start with a more structured option: one script, short captions, and a c
           }
           if (typeof updateBootUI === 'function') updateBootUI();
           if (typeof renderLoginGate === 'function') renderLoginGate();
-          showToast(`Signed in to Google${data?.account?.email ? `: ${data.account.email}` : ''}.`,
+          toast(`Signed in to Google${data?.account?.email ? `: ${data.account.email}` : ''}.`,
             'success', 'Google sign-in');
+        } else if (windowClosed && verifyAttempted) {
+          stopGoogleSignInWatch();
         }
       } catch (_) {}
     }, 800);
@@ -3966,7 +3999,11 @@ You can start with a more structured option: one script, short captions, and a c
 
   function setTrack(track, { silent = false, keepActive = false } = {}) {
     const next = ALL_VALID_TRACKS.includes(track) ? track : 'arena';
-    const changed = state.track !== next;
+    const prev = state.track;
+    const changed = prev !== next;
+    if (prev === 'arena' && next !== 'arena' && state.mode) {
+      state.lastArenaMode = state.mode;
+    }
     state.track = next;
     try { window.localStorage.setItem('ap-track', next); } catch { /* optional */ }
     document.body?.setAttribute('data-track', next);
@@ -3974,6 +4011,8 @@ You can start with a more structured option: one script, short captions, and a c
     if (next !== 'arena' && state.mode !== 'direct') {
       state.mode = 'direct';
       state.selectionTouched = true;
+    } else if (next === 'arena' && prev !== 'arena' && state.lastArenaMode) {
+      state.mode = state.lastArenaMode;
     }
     if (changed && !keepActive) {
       const active = state.chats.find((chat) => String(chat.id) === String(state.activeChatId));
@@ -4382,6 +4421,7 @@ You can start with a more structured option: one script, short captions, and a c
         state.messages = [];
         state.artifacts = [];
         state.view = 'welcome';
+        syncGenerationState();
         renderChatArea();
         setView('welcome');
       }
@@ -4877,8 +4917,7 @@ You can start with a more structured option: one script, short captions, and a c
     if (!text || chatIsGenerating(key) || state.starting || state.historyLoading) return;
     queuedMessages.delete(key);
     renderQueuedBar();
-    if (els.prompt) els.prompt.value = text;
-    void sendMessage();
+    void sendMessage({ overrideText: text });
   }
 
   let doneAudio = null;
@@ -5009,7 +5048,8 @@ You can start with a more structured option: one script, short captions, and a c
     shown.forEach((item) => {
       const name = String(item.name || item.filename || 'File');
       const media = String(item.contentType || item.mediaType || '');
-      const src = item.previewUrl || (media.startsWith('image/') ? safeUrl(item.url, { image: true }) : null);
+      const rawImgUrl = media.startsWith('image/') && item.url && !String(item.url).startsWith('/api/') ? safeUrl(item.url, { image: true }) : null;
+      const src = item.previewUrl || rawImgUrl;
       if (src) {
         wrap.appendChild(el('img', { class: 'user-attachment-image', src, alt: name, title: name, loading: 'lazy' }));
         return;
@@ -5591,11 +5631,12 @@ You can start with a more structured option: one script, short captions, and a c
   }
 
   async function submitVote(turn, pairIndex, value) {
-    if (!state.activeChatId || !turn || turn.vote || turn.voteBusy) return;
+    const voteChatId = state.activeChatId ? String(state.activeChatId) : '';
+    if (!voteChatId || !turn || turn.vote || turn.voteBusy) return;
     turn.voteBusy = true;
     renderMessages();
     try {
-      const result = await API.vote(state.activeChatId, {
+      const result = await API.vote(voteChatId, {
         value,
         pair_index: pairIndex >= 0 ? pairIndex : null,
         message_a_id: turn.arenaIds?.a || null,
@@ -5604,7 +5645,10 @@ You can start with a more structured option: one script, short captions, and a c
       turn.vote = result?.vote || value;
       const names = result?.names || {};
       if (names.a || names.b) {
-        state.messages.forEach((item) => {
+        const targetTurns = String(state.activeChatId) === voteChatId
+          ? state.messages
+          : (state.chatTurns[voteChatId] || []);
+        targetTurns.forEach((item) => {
           if (!item || typeof item !== 'object') return;
           if (item.lanes?.a && names.a) item.lanes.a.modelName = names.a;
           if (item.lanes?.b && names.b) item.lanes.b.modelName = names.b;
@@ -5618,7 +5662,7 @@ You can start with a more structured option: one script, short captions, and a c
       toast(errorMessage(error), 'error', "Vote not sent");
     } finally {
       turn.voteBusy = false;
-      renderMessages();
+      if (String(state.activeChatId) === voteChatId) renderMessages();
     }
   }
 
@@ -5757,7 +5801,7 @@ You can start with a more structured option: one script, short captions, and a c
       const changed = state.nativeSubagentsChat !== chatId || JSON.stringify(children) !== JSON.stringify(state.nativeSubagents);
       state.nativeSubagentsChat = chatId;
       state.nativeSubagents = children;
-      if (changed) renderMessages();
+      if (changed) scheduleChatRender();
       if (children.some((item) => item.state === 'starting' || item.state === 'running')) {
         void loadQuestions();
         void loadMediaChoices();
@@ -7710,6 +7754,7 @@ You can start with a more structured option: one script, short captions, and a c
         state.modality = selection.modality;
         state.selectionTouched = true;
         if (chat.agent_backend) state.agentKind = chat.agent_backend === 'arena' ? 'native' : 'local';
+        pruneAttachmentsForSelection();
         state.historyChars = Number(chat.raw?.history_chars || 0);
         // Restore manual selections saved by Flask only on Arena chats; for
         // extra providers restore providerModelChoice without clobbering Arena's modelAId.
@@ -7906,6 +7951,12 @@ You can start with a more structured option: one script, short captions, and a c
               state.cloudChats = (state.cloudChats || []).filter((item) =>
                 String(item.local_chat_id || '') !== String(chatId)
                 && (!chat.eval_id || String(item.eval_id || item.id || '') !== String(chat.eval_id)));
+              const runningGen = state.generations.get(String(chatId));
+              if (runningGen) {
+                runningGen.stopRequested = true;
+                try { runningGen.controller?.abort(); } catch { /* already closed */ }
+                state.generations.delete(String(chatId));
+              }
               if (String(state.activeChatId) === String(chatId)) {
                 state.activeChatId = null;
                 state.activeChatTitle = '';
@@ -7914,9 +7965,12 @@ You can start with a more structured option: one script, short captions, and a c
                 state.historyError = null;
                 state.historyLoading = false;
                 state.challenge = null;
+                syncGenerationState();
                 updateArtifactCount();
                 renderWelcomeState();
                 updateComposerState();
+              } else {
+                syncGenerationState();
               }
               renderChats();
               if (outcome?.arena === 'archived') {
@@ -8206,11 +8260,12 @@ You can start with a more structured option: one script, short captions, and a c
     return event?.model === 'b' || event?.lane === 'b' ? 'b' : 'a';
   }
 
-  function addArtifactRecord(artifact, laneKey) {
+  function addArtifactRecord(artifact, laneKey, chatId = state.activeChatId) {
     if (!artifact) return;
-    const key = `${artifact.kind}:${artifact.path || artifact.url || artifact.name}`;
-    if (state.artifacts.some((item) => `${item.kind}:${item.path || item.url || item.name}` === key)) return;
-    state.artifacts.push({ ...artifact, chatId: state.activeChatId, lane: laneKey });
+    const ownerChatId = chatId ? String(chatId) : null;
+    const key = `${ownerChatId || ''}:${artifact.kind}:${artifact.path || artifact.url || artifact.name}`;
+    if (state.artifacts.some((item) => `${item.chatId || ''}:${item.kind}:${item.path || item.url || item.name}` === key)) return;
+    state.artifacts.push({ ...artifact, chatId: ownerChatId, lane: laneKey });
     updateArtifactCount();
   }
 
@@ -8531,17 +8586,21 @@ You can start with a more structured option: one script, short captions, and a c
       return;
     }
     if (type === 'webdev') {
+      const evName = String(event.event || '').toLowerCase();
+      const isTerminal = evName === 'preview-ready' || evName === 'done' || evName === 'complete' || evName === 'deployed';
+      const isErr = evName === 'error' || evName === 'failed';
       addActivity(turn, lane, {
         ...event,
+        id: event.id || `webdev-${key}-${evName || 'step'}`,
         name: event.title ?? "Web development",
-        status: event.status || 'running',
+        status: event.status || (isErr ? 'error' : isTerminal ? 'done' : 'running'),
         detail: event.message ?? event.description ?? event.output ?? event.url ?? ''
       }, 'webdev');
       if (event.url) {
         const artifact = normalizeArtifact({ ...event, title: event.title ?? "Preview" }, 'preview');
         if (artifact) {
           lane.artifacts.push(artifact);
-          addArtifactRecord(artifact, key);
+          addArtifactRecord(artifact, key, generation.chatId);
         }
       }
       scheduleChatRender();
@@ -8553,7 +8612,7 @@ You can start with a more structured option: one script, short captions, and a c
         const artifact = normalizeArtifact(file, 'file');
         if (!artifact) return;
         lane.artifacts.push(artifact);
-        addArtifactRecord(artifact, key);
+        addArtifactRecord(artifact, key, generation.chatId);
       });
       if (list.length) {
         lane.notices.push(`The server reported ${list.length} ${list.length === 1 ? "in the file" : "files"}. Artifacts are available, but full workspace synchronization is not guaranteed.`);
@@ -8572,7 +8631,7 @@ You can start with a more structured option: one script, short captions, and a c
       }, 'preview');
       if (artifact) {
         lane.artifacts.push(artifact);
-        addArtifactRecord(artifact, key);
+        addArtifactRecord(artifact, key, generation.chatId);
       }
       scheduleChatRender();
       return;
@@ -8625,7 +8684,10 @@ You can start with a more structured option: one script, short captions, and a c
         const n = Number(dropped[k]) || 0;
         if (n > 0) {
           const lobj = turnLane(turn, k);
-          if (lobj.text) lobj.text = lobj.text.slice(0, Math.max(0, lobj.text.length - n));
+          if (lobj.text) {
+            const cps = Array.from(lobj.text);
+            lobj.text = cps.slice(0, Math.max(0, cps.length - n)).join('');
+          }
         }
       });
       const msg = `The reply was interrupted — auto-continuing (${event.attempt || 1}/${event.max || 2})…`;
@@ -8643,14 +8705,11 @@ You can start with a more structured option: one script, short captions, and a c
     }
     if (type === 'error') {
       const message = textValue(event.message ?? event.error ?? event.detail ?? 'The server reported an error.');
-      generation.hadError = true;
+      const isLaneScoped = event.model === 'a' || event.model === 'b' || event.lane === 'a' || event.lane === 'b' || event.ui_lane === 'a' || event.ui_lane === 'b';
       // Nothing is being written any more: drop the live status the failed
       // turn was showing, so the error is the last word on the card.
       if (Array.isArray(lane.agentStages)) lane.agentStages.length = 0;
       if (event.code === 'rate_limit' && Number(event.wait) > 0) {
-        // Informational only (v5.1): drives the switch-account hint.
-        // Sending is never blocked - the limit may be per-modality or
-        // already reset, and the user decides when to continue.
         state.rateLimitUntil = Date.now() + Number(event.wait) * 1000;
         if (!state._rateLimitTimer) {
           state._rateLimitTimer = window.setInterval(() => {
@@ -8663,7 +8722,7 @@ You can start with a more structured option: one script, short captions, and a c
           }, 1000);
         }
       }
-      if (event.model === 'a' || event.model === 'b' || event.lane === 'a' || event.lane === 'b' || event.ui_lane === 'a' || event.ui_lane === 'b') {
+      if (isLaneScoped) {
         // Lane-scoped error: only this model's card fails. A surviving
         // Battle lane keeps streaming to its own terminal event.
         lane.error = true;
@@ -8675,13 +8734,20 @@ You can start with a more structured option: one script, short captions, and a c
         }
         lane.streaming = false;
         lane.done = true;
-      } else if (!turn.error) {
-        // Global backend error: show it once at turn level instead of
-        // attributing it to Model A or pretending a card generated it.
-        turn.error = message;
-        if (event.sign_in) turn.errorAction = 'sign_in';
-        else if (event.window) turn.errorAction = 'open_window';
-        if (event.provider) turn.errorProvider = String(event.provider);
+        const laneList = Object.values(turn.lanes || {});
+        if (laneList.length <= 1 || laneList.every((l) => l.error)) {
+          generation.hadError = true;
+        }
+      } else {
+        generation.hadError = true;
+        if (!turn.error) {
+          // Global backend error: show it once at turn level instead of
+          // attributing it to Model A or pretending a card generated it.
+          turn.error = message;
+          if (event.sign_in) turn.errorAction = 'sign_in';
+          else if (event.window) turn.errorAction = 'open_window';
+          if (event.provider) turn.errorProvider = String(event.provider);
+        }
       }
       toast(message, 'error', 'Generation error');
       scheduleChatRender();
@@ -9163,9 +9229,10 @@ You can start with a more structured option: one script, short captions, and a c
     updateComposerState();
   }
 
-  async function sendMessage() {
+  async function sendMessage({ overrideText = null } = {}) {
     if (state.starting) return;
-    if (chatIsGenerating(state.activeChatId)) {
+    const isOverride = typeof overrideText === 'string';
+    if (!isOverride && chatIsGenerating(state.activeChatId)) {
       const queuedText = els.prompt?.value.trim() || '';
       if (queuedText && state.activeChatId) {
         queuedMessages.set(String(state.activeChatId), queuedText);
@@ -9178,12 +9245,14 @@ You can start with a more structured option: one script, short captions, and a c
       }
       return;
     }
-    const text = els.prompt?.value.trim() || '';
+    const text = (isOverride ? overrideText : (els.prompt?.value || '')).trim();
     if (!text) {
       focusComposer();
       updateComposerState();
       return;
     }
+    const capturedChatId = state.activeChatId ? String(state.activeChatId) : null;
+    const capturedTrack = state.track;
     if (attachmentsBusy()) {
       toast('Files are still uploading. The message sends when they finish — try again in a moment.', 'info', 'Uploading files');
       return;
@@ -9236,7 +9305,10 @@ You can start with a more structured option: one script, short captions, and a c
         toast(state.serverError, 'error', "Server unavailable");
         return;
       }
-      const isArenaTrack = state.track === 'arena';
+      if ((state.activeChatId ? String(state.activeChatId) : null) !== capturedChatId || state.track !== capturedTrack) {
+        return;
+      }
+      const isArenaTrack = capturedTrack === 'arena';
       if (isArenaTrack && !requiredModelsReady()) {
         if (state.mode !== 'battle') {
           toast(state.modelsError || (state.modelsLoading ? "Wait for the models to load." : "Select a model to send."), 'warning', "Model is not ready");
@@ -9325,10 +9397,12 @@ You can start with a more structured option: one script, short captions, and a c
         if (chat) chat.unsent = false;
       }
       state.messages.push(turn);
-      state.artifacts = state.artifacts.filter((artifact) => artifact.chatId !== null || artifact.chatId === chatId);
-      if (els.prompt) els.prompt.value = '';
-      state.draft = '';
-      saveComposerDraft();
+      state.artifacts = state.artifacts.filter((artifact) => artifact.chatId === String(chatId));
+      if (!isOverride) {
+        if (els.prompt) els.prompt.value = '';
+        state.draft = '';
+        saveComposerDraft();
+      }
       // The turn keeps its own preview URLs; the composer starts clean.
       state.attachments = [];
       renderAttachmentStrip();
@@ -9356,7 +9430,8 @@ You can start with a more structured option: one script, short captions, and a c
           Object.values(turn.lanes).forEach((lane) => { lane.stopped = true; lane.streaming = false; });
         }
       } finally {
-        if (generation.hadError) restoreFailedSend(generation);
+        const anyLaneSucceeded = Object.values(turn.lanes || {}).some((l) => (l.text || '').trim() && !l.error);
+        if (generation.hadError && !anyLaneSucceeded) restoreFailedSend(generation);
         finishGeneration(generation, { aborted: controller.signal.aborted });
       }
     } catch (error) {
@@ -15101,586 +15176,12 @@ You can start with a more structured option: one script, short captions, and a c
     };
   }
 
-  // Escape HTML for safe injection into step rows.
+  // Escape HTML for safe injection into markup strings.
   function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text == null ? '' : String(text);
     return div.innerHTML;
   }
-
-  const BOOT_STEPS = [
-  { id: "dependencies", title: "Dependencies" },
-  { id: "integrity", title: "File integrity" },
-  { id: "accounts", title: "Accounts" },
-  { id: "arena_chats", title: "Arena chats" },
-  { id: "google_chats", title: "Google chats" },
-  { id: "models", title: "Models" },
-        ];
-
-window.bootState = window.bootState || {
-  items: {},
-  running: false,
-};
-
-function _bootSleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function _bootEscape(str) {
-  return String(str ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
-function _bootHeaders() {
-  const token =
-    (typeof API_TOKEN !== "undefined" && API_TOKEN) ||
-    window.__ARENA_API_TOKEN ||
-    document.querySelector('meta[name="api-token"]')?.getAttribute("content") ||
-    "";
-  return token ? { "X-Arena-Token": token } : {};
-}
-
-// Ensures DOM rows exist in #bootSteps for all 6 boot stages
-function ensureBootStepRows() {
-  const list =
-    document.getElementById("bootSteps") ||
-    document.querySelector(".boot-steps");
-  if (!list) return null;
-
-  for (const step of BOOT_STEPS) {
-    let row = list.querySelector(`.boot-step[data-step-id="${step.id}"]`);
-    if (!row) {
-      row = document.createElement("div");
-      row.className = "boot-step is-pending";
-      row.dataset.stepId = step.id;
-      list.appendChild(row);
-    }
-    if (!row.innerHTML.trim()) {
-      renderBootStepRow(
-        row,
-        { id: step.id, title: step.title, detail: "Waiting…" },
-        "pending"
-      );
-    }
-  }
-  return list;
-}
-
-function renderBootStepRow(row, item, stateName) {
-  if (!row) return;
-  const title =
-    item.title ||
-    (BOOT_STEPS.find((s) => s.id === item.id) || {}).title ||
-    item.id;
-  const icon =
-    stateName === "ok"
-      ? "✓"
-      : stateName === "checking"
-      ? "…"
-      : stateName === "pending"
-      ? "•"
-      : "✕";
-  const spinClass = stateName === "checking" ? " is-spinning" : "";
-
-  row.dataset.stepId = item.id;
-  row.className = `boot-step is-${stateName}`;
-  row.innerHTML = `
-    <span class="boot-step-icon" aria-hidden="true">${icon}</span>
-    <div class="boot-step-body">
-      <div class="boot-step-header">
-        <span class="boot-step-title">${_bootEscape(title)}</span>
-        <button type="button" class="boot-step-reload${spinClass}" title="Reload this step" aria-label="Reload ${_bootEscape(title)}">
-          <span class="boot-step-reload-icon" aria-hidden="true">↻</span>
-        </button>
-      </div>
-      <div class="boot-step-detail">${_bootEscape(item.detail || "")}</div>
-      ${
-        item.action && stateName === "failed"
-          ? `<div class="boot-step-action-text">${_bootEscape(item.action)}</div>`
-          : ""
-      }
-    </div>
-  `;
-
-  const reloadBtn = row.querySelector(".boot-step-reload");
-  if (reloadBtn) {
-    reloadBtn.onclick = (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      reloadSingleBootStep(item.id);
-    };
-  }
-
-  bootAddActions(row, item, stateName);
-}
-
-function bootSetState(rowOrId, itemOrState, stateOrDetail, actionText) {
-  let row, item, stateName;
-  if (typeof rowOrId === "string") {
-    row = document.querySelector(`.boot-step[data-check-id="${rowOrId}"]`);
-    stateName = itemOrState;
-    item = {
-      id: rowOrId,
-      detail: stateOrDetail || "",
-      action: actionText || "",
-    };
-  } else {
-    row = rowOrId;
-    item = itemOrState || {};
-    stateName = stateOrDetail;
-  }
-  if (!row) return;
-  row.dataset.checkId = item.id;
-  row.className = `boot-step is-${stateName}`;
-
-  const iconEl = row.querySelector(".boot-step-icon");
-  if (iconEl) {
-    iconEl.textContent =
-      stateName === "ok" ? "✓" : stateName === "checking" ? "…" : "✕";
-  }
-
-  const titleEl = row.querySelector(".boot-step-title");
-  if (titleEl && item.title) {
-    titleEl.textContent = item.title;
-  }
-
-  const detailEl = row.querySelector(".boot-step-detail");
-  if (detailEl) {
-    detailEl.textContent = item.detail || "";
-  }
-
-  const reloadBtn = row.querySelector(".boot-step-reload");
-  if (reloadBtn) {
-    reloadBtn.classList.toggle("is-spinning", stateName === "checking");
-    reloadBtn.disabled = stateName === "checking";
-  }
-
-  const oldAction = row.querySelector(".boot-step-action");
-  if (oldAction) oldAction.remove();
-  if (item.action && stateName === "failed") {
-    const act = document.createElement("div");
-    act.className = "boot-step-action";
-    act.textContent = item.action;
-    const body = row.querySelector(".boot-step-body");
-    if (body) body.appendChild(act);
-  }
-
-  bootAddActions(row, item, stateName);
-}
-
-function bootAddActions(rowOrId, item, stateName) {
-  const row =
-    typeof rowOrId === "string"
-      ? document.querySelector(`.boot-step[data-check-id="${rowOrId}"]`)
-      : rowOrId;
-  if (!row || !item) return;
-
-  const old = row.querySelector(".boot-step-actions");
-  if (old) old.remove();
-  if (item.id !== "accounts") return;
-
-  const arenaOk = Boolean(
-    item.arena_signed_in ||
-      (window.state?.me && (window.state.me.signed_in || window.state.me.authenticated))
-  );
-  const googleOk = Boolean(
-    item.google_signed_in ||
-      (typeof googleSignedIn === "function" && googleSignedIn())
-  );
-
-  const actions = document.createElement("div");
-  actions.className = "boot-step-actions";
-
-  if (!arenaOk) {
-    const btnArena = document.createElement("button");
-    btnArena.type = "button";
-    btnArena.className = "boot-action-btn primary";
-    btnArena.dataset.provider = "arena";
-    btnArena.textContent = "Sign in to Arena";
-    btnArena.onclick = async () => {
-      btnArena.disabled = true;
-      try {
-        await API.login();
-      } catch (error) {
-        toast(errorMessage(error), 'error', 'Arena sign-in');
-        btnArena.disabled = false;
-        return;
-      }
-      toast('Finish signing in inside the Arena window. This screen updates by itself.',
-        'info', 'Arena sign-in');
-      let done = false;
-      for (let attempt = 0; attempt < 600; attempt += 1) {
-        await new Promise((resolve) => window.setTimeout(resolve, 1000));
-        let result = null;
-        try {
-          result = await API.loginPoll();
-        } catch (error) {
-          btnArena.disabled = false;
-          return;
-        }
-        if (result?.cancelled || (result?.error && result?.done !== false)) {
-          btnArena.disabled = false;
-          return;
-        }
-        if (result?.done === true || result?.authenticated === true || result?.status === 'done') {
-          done = result?.ok !== false;
-          break;
-        }
-      }
-      if (!done) {
-        btnArena.disabled = false;
-        return;
-      }
-      await runBootGate();
-    };
-    actions.appendChild(btnArena);
-  }
-
-  if (!googleOk) {
-    const btnGoogle = document.createElement("button");
-    btnGoogle.type = "button";
-    btnGoogle.className = "boot-action-btn";
-    btnGoogle.dataset.provider = "google";
-    btnGoogle.textContent = "Sign in to Google";
-    btnGoogle.onclick = async () => {
-      btnGoogle.disabled = true;
-      try {
-        await API.googleSignIn();
-      } catch (error) {
-        toast(errorMessage(error), 'error', 'Google sign-in');
-        btnGoogle.disabled = false;
-        return;
-      }
-      toast('Finish signing in inside the Google window. It closes by itself when done. This is a separate window from Arena sign-in.',
-        'info', 'Google sign-in');
-      btnGoogle.disabled = false;
-    };
-    actions.appendChild(btnGoogle);
-  }
-
-  if (actions.children.length > 0) {
-    const body = row.querySelector(".boot-step-body");
-    if (body) body.appendChild(actions);
-  }
-}
-
-// Fetch one boot step with 2 retries (1s delay) + ?step= / ?check= compatibility
-async function fetchBootStepWithRetries(stepId, maxRetries = 2, delayMs = 1000) {
-  const stepMeta = BOOT_STEPS.find((s) => s.id === stepId) || {
-    id: stepId,
-    title: stepId,
-  };
-  let lastItem = null;
-
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 7000);
-    try {
-      const queryStep = encodeURIComponent(stepId);
-      const res = await fetch(
-        `/api/readiness?step=${queryStep}&check=${queryStep}`,
-        { cache: "no-store", signal: controller.signal }
-      );
-      const data = await res.json();
-      const items = Array.isArray(data?.items) ? data.items : [];
-      let found = items.find((x) => x && x.id === stepId);
-
-      // Fallback if the server still returns a single combined "chats" readiness step
-      if (!found && (stepId === "arena_chats" || stepId === "google_chats")) {
-        const legacyChats = items.find((x) => x && x.id === "chats");
-        if (legacyChats) {
-          found = {
-            ...legacyChats,
-            id: stepId,
-            title: stepMeta.title,
-          };
-        }
-      }
-      if (!found && items.length === 1) {
-        found = { ...items[0], id: stepId, title: stepMeta.title };
-      }
-
-      if (found) {
-        lastItem = { ...found, id: stepId, title: found.title || stepMeta.title };
-        if (lastItem.ok || lastItem.optional) {
-          return lastItem;
-        }
-      } else {
-        lastItem = {
-          id: stepId,
-          title: stepMeta.title,
-          ok: false,
-          detail: "Step did not return status",
-          action: "Reload this step.",
-        };
-      }
-    } catch (err) {
-      lastItem = {
-        id: stepId,
-        title: stepMeta.title,
-        ok: false,
-        detail:
-          err && err.name === "AbortError"
-            ? "Check timed out after 7s"
-            : String(err && err.message ? err.message : "Network error"),
-        action: "Check your connection and reload this step.",
-      };
-    } finally {
-      clearTimeout(timer);
-    }
-
-    // Skip extra retries when the user simply has not signed in yet
-    if (stepId === "accounts" && lastItem && !lastItem.ok) {
-      break;
-    }
-    if (attempt < maxRetries) {
-      await _bootSleep(delayMs);
-    }
-  }
-
-  return (
-    lastItem || {
-      id: stepId,
-      title: stepMeta.title,
-      ok: false,
-      detail: "Check failed",
-      action: "Reload this step.",
-    }
-  );
-}
-
-async function reloadSingleBootStep(stepId) {
-  const list = ensureBootStepRows();
-  if (!list) return;
-
-  const targetIds =
-    stepId === "accounts"
-      ? ["accounts", "arena_chats", "google_chats", "models"]
-      : [stepId];
-
-  for (const id of targetIds) {
-    const row = list.querySelector(`.boot-step[data-step-id="${id}"]`);
-    const title = (BOOT_STEPS.find((s) => s.id === id) || {}).title || id;
-    renderBootStepRow(row, { id, title, detail: "Checking…" }, "checking");
-
-    const item = await fetchBootStepWithRetries(id, 2, 1000);
-    window.bootState.items[id] = item;
-    renderBootStepRow(row, item, item.ok || item.optional ? "ok" : "failed");
-  }
-
-  updateBootFooterControls();
-}
-
-function updateBootFooterControls() {
-  const acc = window.bootState.items.accounts || {};
-  const anySignedIn = Boolean(
-    acc.arena_signed_in ||
-      acc.google_signed_in ||
-      state.me?.signed_in ||
-      state.me?.authenticated ||
-      googleSignedIn()
-  );
-
-  const allPassed =
-    anySignedIn &&
-    BOOT_STEPS.every((s) => {
-      const it = window.bootState.items[s.id];
-      return it && (it.ok || it.optional);
-    });
-
-  const continueBtn = document.getElementById("bootContinue");
-  const noteEl = document.getElementById("bootHint");
-
-  if (allPassed) {
-    if (continueBtn) continueBtn.hidden = true;
-    dismissBootGate();
-    return;
-  }
-
-  if (continueBtn) {
-    continueBtn.hidden = !anySignedIn;
-    continueBtn.classList.add("boot-continue-btn");
-    continueBtn.onclick = () => {
-      if (anySignedIn) dismissBootGate();
-    };
-  }
-
-  if (noteEl) {
-    noteEl.textContent = anySignedIn
-      ? "Signed in. Some checks failed — reload them or continue anyway."
-      : "Sign in to Arena or Google to continue.";
-  }
-}
-
-function dismissBootGate() {
-  const gate =
-    document.getElementById("bootGate") ||
-    document.querySelector(".boot-gate");
-  if (gate) {
-    gate.hidden = true;
-    gate.style.display = "none";
-  }
-  if (typeof startApp === "function" && !window._appStarted) {
-    window._appStarted = true;
-    startApp();
-  }
-}
-
-async function runBootGate() {
-  if (window.bootState.running) return;
-  window.bootState.running = true;
-  try {
-    const list = ensureBootStepRows();
-    if (!list) return;
-
-    const bar = document.getElementById("bootProgressFill");
-    const total = BOOT_STEPS.length;
-
-    for (let i = 0; i < total; i++) {
-      const step = BOOT_STEPS[i];
-      const row = list.querySelector(`.boot-step[data-step-id="${step.id}"]`);
-      renderBootStepRow(
-        row,
-        { id: step.id, title: step.title, detail: "Checking…" },
-        "checking"
-      );
-      if (bar) {
-        bar.style.width = `${Math.round(((i + 0.35) / total) * 100)}%`;
-      }
-
-      const item = await fetchBootStepWithRetries(step.id, 2, 1000);
-      window.bootState.items[step.id] = item;
-      renderBootStepRow(row, item, item.ok || item.optional ? "ok" : "failed");
-
-      if (bar) {
-        bar.style.width = `${Math.round(((i + 1) / total) * 100)}%`;
-      }
-    }
-
-    updateBootFooterControls();
-  } finally {
-    window.bootState.running = false;
-  }
-}
-
-async function bootSignInArena(row, btn) {
-  if (btn) btn.disabled = true;
-  let hintEl = row.querySelector(".boot-signin-hint");
-  if (!hintEl) {
-    hintEl = document.createElement("div");
-    hintEl.className = "boot-signin-hint";
-    row.querySelector(".boot-step-body")?.appendChild(hintEl);
-  }
-  hintEl.textContent = "Waiting for you to finish signing in to Arena…";
-  try {
-    const res = await fetch("/api/login", {
-      method: "POST",
-      headers: Object.assign({ "Content-Type": "application/json" }, _bootHeaders()),
-      body: JSON.stringify({ method: "window" }),
-    });
-    const startRes = await res.json();
-    if (!startRes || startRes.ok === false) {
-      hintEl.textContent =
-        (startRes && startRes.error) || "Could not open Arena sign-in window.";
-      if (btn) btn.disabled = false;
-      return;
-    }
-  } catch (_) {
-    hintEl.textContent = "Failed to start Arena sign-in.";
-    if (btn) btn.disabled = false;
-    return;
-  }
-  const pollTimer = setInterval(async () => {
-    try {
-      const r = await fetch("/api/login/poll", {
-        headers: _bootHeaders(),
-        cache: "no-store",
-      });
-      const poll = await r.json();
-      if (poll && poll.hint && !poll.done) {
-        hintEl.textContent = poll.hint;
-      }
-      if (poll && poll.done) {
-        clearInterval(pollTimer);
-        if (poll.ok) {
-          hintEl.remove();
-          if (btn) btn.remove();
-          state.me = Object.assign({}, state.me || {}, poll, { signed_in: true });
-          if (typeof updateAccountUI === "function") updateAccountUI();
-          await reloadSingleBootStep("accounts");
-        } else {
-          hintEl.textContent =
-            poll.error || "Sign-in window was closed before finishing.";
-          if (btn) btn.disabled = false;
-        }
-      }
-    } catch (_) {}
-  }, 900);
-}
-
-async function bootSignInGoogle(row, btn) {
-  if (btn) btn.disabled = true;
-  let hintEl = row.querySelector(".boot-signin-hint");
-  if (!hintEl) {
-    hintEl = document.createElement("div");
-    hintEl.className = "boot-signin-hint";
-    row.querySelector(".boot-step-body")?.appendChild(hintEl);
-  }
-  hintEl.textContent = "Waiting for you to finish signing in to Google…";
-  try {
-    const res = await fetch("/api/google/sign-in", {
-      method: "POST",
-      headers: Object.assign({ "Content-Type": "application/json" }, _bootHeaders()),
-      body: JSON.stringify({ fresh: true }),
-    });
-    const startRes = await res.json();
-    if (!startRes || startRes.ok === false) {
-      hintEl.textContent =
-        (startRes && startRes.error) || "Could not open Google sign-in window.";
-      if (btn) btn.disabled = false;
-      return;
-    }
-  } catch (_) {
-    hintEl.textContent = "Failed to start Google sign-in.";
-    if (btn) btn.disabled = false;
-    return;
-  }
-  const pollTimer = setInterval(async () => {
-    try {
-      const r = await fetch("/api/google/status", {
-        headers: _bootHeaders(),
-        cache: "no-store",
-      });
-      const st = await r.json();
-      const acc = (st && st.account) || {};
-      const signed = Boolean(
-        acc.signed_in ||
-          st?.signed_in ||
-          (st?.configured && st?.has_cookie && !st?.session_expired)
-      );
-      if (signed) {
-        clearInterval(pollTimer);
-        hintEl.remove();
-        if (btn) btn.remove();
-        state.google = Object.assign({}, state.google || {}, st, {
-          signed_in: true,
-        });
-        if (typeof updateAccountUI === "function") updateAccountUI();
-        await reloadSingleBootStep("accounts");
-        return;
-      }
-      if (st?.diagnosis?.state === "closed" || st?.diagnosis?.state === "failed") {
-        clearInterval(pollTimer);
-        hintEl.textContent =
-          st.diagnosis.message || "Google sign-in window was closed.";
-        if (btn) btn.disabled = false;
-      }
-    } catch (_) {}
-  }, 900);
-}
 
 let APP_STARTED = false;
 

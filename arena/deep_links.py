@@ -191,12 +191,28 @@ def register_protocol(executable: Optional[str] = None) -> bool:
 
 
 def _register_linux_protocol(executable: Optional[str] = None) -> bool:
-    exe = str(Path(executable or sys.executable).resolve())
+    # For AppImages, sys.executable lives inside ephemeral /tmp/.mount_*; use $APPIMAGE instead.
+    appimage = (os.environ.get("APPIMAGE") or "").strip()
+    raw_exe = executable or appimage or sys.executable
+    exe = str(Path(raw_exe).resolve())
     try:
         data_home = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
         apps = data_home / "applications"
         apps.mkdir(parents=True, exist_ok=True)
         desktop = apps / "arena-desktop.desktop"
+        # Respect an already-installed system package entry (/usr/share/applications) or valid user entry.
+        sys_desktop = Path("/usr/share/applications/arena-desktop.desktop")
+        if executable is None and sys_desktop.is_file() and not desktop.exists():
+            return True
+        if executable is None and desktop.is_file():
+            try:
+                existing_text = desktop.read_text(encoding="utf-8")
+                if "/tmp/.mount_" not in existing_text and f"x-scheme-handler/{SCHEME}" in existing_text:
+                    return True
+            except OSError:
+                pass
+        if "/tmp/.mount_" in exe and not executable:
+            return False
         desktop.write_text(
             "[Desktop Entry]\n"
             "Type=Application\n"

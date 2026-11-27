@@ -228,6 +228,19 @@ def _media_tools_from_parts(parts: Any, known_inputs: Optional[Dict[str, Any]] =
     return tools
 
 
+def _parse_created_at(value: Any) -> Tuple[int, float, str]:
+    """Parse ISO-8601 timestamps to epoch seconds so mixed fractional precisions sort accurately."""
+    s = str(value or "").strip()
+    if not s:
+        return (1, 0.0, "")
+    try:
+        from datetime import datetime
+        iso = s[:-1] + "+00:00" if s.endswith("Z") else s
+        return (0, datetime.fromisoformat(iso).timestamp(), "")
+    except Exception:
+        return (1, 0.0, s)
+
+
 def agentic_messages(session: Any) -> List[Dict[str, Any]]:
     """Best-effort local messages for one cloud Arena Agent (agentic) session.
 
@@ -241,7 +254,7 @@ def agentic_messages(session: Any) -> List[Dict[str, Any]]:
     if not isinstance(raw_messages, list):
         return []
     indexed = list(enumerate(raw_messages))
-    indexed.sort(key=lambda pair: (str((pair[1] or {}).get("createdAt") or "") if isinstance(pair[1], dict) else "", pair[0]))
+    indexed.sort(key=lambda pair: (_parse_created_at((pair[1] or {}).get("createdAt")) if isinstance(pair[1], dict) else (1, 0.0, ""), pair[0]))
     messages: List[Dict[str, Any]] = []
     known_media_inputs: Dict[str, Any] = {}
     pending_media_turn = False
@@ -305,7 +318,7 @@ def session_to_local(session: Dict[str, Any],
     if not isinstance(raw_messages, list):
         raw_messages = []
     indexed = list(enumerate(raw_messages))
-    indexed.sort(key=lambda pair: (str((pair[1] or {}).get("createdAt") or ""), pair[0]))
+    indexed.sort(key=lambda pair: (_parse_created_at((pair[1] or {}).get("createdAt")) if isinstance(pair[1], dict) else (1, 0.0, ""), pair[0]))
 
     messages: List[Dict[str, Any]] = []
     current_assistant: Optional[Dict[str, Any]] = None
@@ -433,13 +446,12 @@ def merge_messages(local_messages: Any, remote_messages: Any) -> Tuple[List[Dict
         merged.extend(remote[len(local):])
         return merged, len(remote) - len(local)
     seen = Counter(local_sigs)
-    merged = local
+    merged = list(local)
     added = 0
     for message, signature in zip(remote, remote_sigs):
         if seen[signature] > 0:
             seen[signature] -= 1
             continue
         merged.append(message)
-        seen[signature] += 1
         added += 1
     return merged, added

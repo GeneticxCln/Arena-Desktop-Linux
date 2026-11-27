@@ -437,6 +437,7 @@ def _ensure_sink() -> None:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         target = os.path.normcase(os.path.abspath(str(CONFIG_DIR / "desktop.log")))
 
+        level = logging.DEBUG if os.environ.get("ARENA_DIAG_DEBUG") == "1" else logging.INFO
         root_logger = logging.getLogger()
         for handler in root_logger.handlers:
             if not isinstance(handler, logging.FileHandler):
@@ -444,18 +445,21 @@ def _ensure_sink() -> None:
             # Windows paths differ in case and separator style between the
             # config module and logging, so compare normalised absolute paths.
             if os.path.normcase(os.path.abspath(handler.baseFilename)) == target:
-                handler.setLevel(logging.DEBUG)
-                if root_logger.level > logging.DEBUG or not root_logger.level:
-                    root_logger.setLevel(logging.DEBUG)
+                handler.setLevel(level)
+                if root_logger.level > level or not root_logger.level:
+                    root_logger.setLevel(level)
+                for noisy in ("werkzeug", "urllib3", "urllib3.connectionpool", "requests"):
+                    logging.getLogger(noisy).setLevel(logging.WARNING)
                 return
 
         handler = logging.FileHandler(target, encoding="utf-8")
-        handler.setLevel(logging.DEBUG)
+        handler.setLevel(level)
         handler.setFormatter(logging.Formatter(
             "%(asctime)s %(levelname)-7s [%(threadName)s] %(message)s"))
         root_logger.addHandler(handler)
-        root_logger.setLevel(logging.DEBUG)
-        logging.getLogger("werkzeug").setLevel(logging.WARNING)
+        root_logger.setLevel(level)
+        for noisy in ("werkzeug", "urllib3", "urllib3.connectionpool", "requests"):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
         LOG.info("diagnostics sink ready: %s", target)
     except Exception:
         LOG.exception("could not attach the diagnostics file")

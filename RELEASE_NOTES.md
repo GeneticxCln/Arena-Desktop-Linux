@@ -1,3 +1,29 @@
+## Arena Desktop v7.4.1 (Native Linux)
+
+Comprehensive security, reliability, streaming, and UI bug-fix release covering all Critical, Medium, and Low findings from the full codebase audit.
+
+### Highlights in 7.4.1
+
+- **Security & Permission Hardening**:
+  - Added per-launch desktop `?boot=<nonce>` cookie gate on `GET /` so unauthenticated local processes cannot scrape `<meta name="api-token">`.
+  - Closed Auto-mode safe-command bypasses (newline/NUL injection, `git diff --output`/`--ext-diff`/`--textconv`, `git branch -[dDmMcCf]`, and sensitive path arguments), expanded catastrophic `rm` detection, scoped `PermissionBroker._always` per chat (excluding Agent Gateway), and defaulted Agent Gateway to off (`gateway_enabled is True`).
+  - Protected `.git/config`, `.git/hooks/*`, and `.arena-artifacts/checkpoints/*` from agent writes, prevented symlink deletion from `rmtree`-ing external targets, validated checkpoint restore paths and blob names, hardened `_git_run` flags and symlink staging, locked/encrypted Google cookies at rest, stripped MCP `env` secrets on settings export, scoped local preview server routes by unguessable project tokens with directory listing disabled, and tightened `/api/media/save` SSRF redirect/IPv6/CGNAT checks.
+  - Hardened CLI tools with workspace boundary enforcement, gated `browser_exec_js` behind explicit opt-in, stopped auto-loading Brave MCP from untrusted `cwd` (passing `BRAVE_API_KEY` via `env`), stripped fenced code blocks from XML tool parsers, and escaped Rich markup in tool output.
+- **Engine, Providers & Backend Streaming**:
+  - Aborted in-flight streams cleanly on page navigation/stop and tagged `_drive_queue` probes with `probeId`.
+  - Added non-destructive cursor-based stream draining, inactivity deadline resets, `text_replace` forwarding, observed-SSE vs DOM deduplication, OAuth popup host titles, and WAF cookie filtering in `WebChatEngine`.
+  - Fixed Claude model slug resolution and mid-stream/empty error handling, DeepSeek `response/fragments` routing, Kimi incremental Connect JSON parsing, ChatGPT duplicate stub removal, explicit `bool` returns from `_apply_model_selection`, and Antigravity SDK `permission_mode`/cancellation + CLI timeouts/non-zero exit reporting.
+  - Fixed chat refresh race conditions, full-catalog sub-agent/fan-out model resolution beyond the first 14 models, duplicate preservation and ISO timestamp sorting in `history_sync`, empty-catalog cache clobbering, `RateLimit-Reset` parsing, lock-free MCP startup with failure backoff, Battle/Side-by-Side per-lane caches, strict UTF-8 SSE line splitting, and `shutdown_runtime()` shell cleanup.
+- **Frontend Fixes**:
+  - Defined missing frontend helpers (`esc`, `isUuidText`, `closeModal`), fixed `saveDraft()` and `showToast()` call sites, bound `sendMessage`, `submitVote`, and `addArtifactRecord` to their originating chat, preserved Arena mode across track switches, bounded Google sign-in polling, prevented relative markdown links from navigating away from the SPA, fixed single-lane Battle error handling, fixed emoji-safe retry trimming, added sequence guards to `loadChats`, and removed dead `#bootGate` code.
+
+### Verification
+
+- Static checks (`ruff check --select F821,F811,F823,B006,B023`, `node --check`, `bash -n`, `python -m compileall`, Cyrillic UI hygiene, `qwen.py` untouched) pass.
+- Full non-browser test suite: **507 passed** (including 26 new audit regression tests).
+
+---
+
 ## Arena Desktop v7.3.0 (Native Linux)
 
 Adds pluggable **Multi-Provider Tabs** (**DeepSeek**, **Claude**, **ChatGPT**, and **Google Antigravity**), live per-provider AI model retrieval & selection, and shared-workspace read/write tools with full `PermissionBroker` controls across every provider.

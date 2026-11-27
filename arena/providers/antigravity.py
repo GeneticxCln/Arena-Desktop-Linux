@@ -241,34 +241,55 @@ class AntigravityProvider(Provider):
         }
 
     def _stream_via_sdk(
-        self, prompt: str, workspace: str, model: str = "", stop_event=None
+        self, prompt: str, workspace: str, model: str = "", permission_mode: str = "", stop_event=None
     ) -> Iterator[dict]:
+        import inspect
         from google.antigravity import Agent, CapabilitiesConfig, LocalAgentConfig  # type: ignore
 
         out_q: "queue.Queue[Optional[dict]]" = queue.Queue()
-        loop_box: dict = {}
+        loop_box: dict = {"cancel": False}
+
+        def _build_config():
+            try:
+                sig = inspect.signature(LocalAgentConfig)
+                params = sig.parameters
+                accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+            except Exception:
+                params = {}
+                accepts_var_kw = True
+
+            kwargs = {"capabilities": CapabilitiesConfig()}
+            if workspace and (accepts_var_kw or "working_directory" in params):
+                kwargs["working_directory"] = workspace
+            if model:
+                if accepts_var_kw or "model" in params:
+                    kwargs["model"] = model
+                else:
+                    LOG.warning("Antigravity LocalAgentConfig does not accept 'model'; using SDK default")
+            pm = (permission_mode or "").strip()
+            if pm:
+                if accepts_var_kw or "permission_mode" in params:
+                    kwargs["permission_mode"] = pm
+                elif "mode" in params:
+                    kwargs["mode"] = pm
+                else:
+                    LOG.warning("Antigravity LocalAgentConfig does not accept permission_mode=%r", pm)
+            return LocalAgentConfig(**kwargs)
 
         async def _run():
             loop_box["loop"] = asyncio.get_running_loop()
             loop_box["task"] = asyncio.current_task()
+            if loop_box.get("cancel") or (stop_event is not None and stop_event.is_set()):
+                out_q.put(None)
+                return
             try:
-                kwargs = {"capabilities": CapabilitiesConfig()}
-                if workspace:
-                    kwargs["working_directory"] = workspace
-                if model:
-                    kwargs["model"] = model
-                try:
-                    config = LocalAgentConfig(**kwargs)
-                except TypeError:
-                    kwargs.pop("model", None)
-                    try:
-                        config = LocalAgentConfig(**kwargs)
-                    except TypeError:
-                        config = LocalAgentConfig(capabilities=CapabilitiesConfig())
+                config = _build_config()
                 async with Agent(config) as ag:
+                    if loop_box.get("cancel") or (stop_event is not None and stop_event.is_set()):
+                        return
                     response = await ag.chat(prompt)
                     async for token in response:
-                        if stop_event is not None and stop_event.is_set():
+                        if loop_box.get("cancel") or (stop_event is not None and stop_event.is_set()):
                             break
                         if token:
                             out_q.put({"type": "text", "text": str(token)})
@@ -292,6 +313,7 @@ class AntigravityProvider(Provider):
         try:
             while True:
                 if stop_event is not None and stop_event.is_set():
+                    loop_box["cancel"] = True
                     lp = loop_box.get("loop")
                     tk = loop_box.get("task")
                     if lp is not None and tk is not None:
@@ -309,6 +331,7 @@ class AntigravityProvider(Provider):
                 yield item
         finally:
             # Always cancel any still-running SDK task on stop OR SSE client disconnect
+            loop_box["cancel"] = True
             lp = loop_box.get("loop")
             tk = loop_box.get("task")
             if lp is not None and tk is not None:
@@ -350,6 +373,7 @@ class AntigravityProvider(Provider):
             proc = subprocess.Popen(
                 cmd,
                 cwd=cwd,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=True,
@@ -386,13 +410,26 @@ class AntigravityProvider(Provider):
         try:
             import codecs
             decoder = codecs.getincrementaldecoder("utf-8")("replace")
-            emitted = False
             assert proc.stdout is not None
             stdout_fd = proc.stdout.fileno()
+            started = time.time()
+            last_output = started
+            idle_limit = 180.0
+            total_limit = 900.0
+            timed_out_msg = ""
             while True:
                 if stop_event is not None and stop_event.is_set():
                     _kill_proc_group(proc)
                     return
+                now = time.time()
+                if (now - last_output) > idle_limit:
+                    timed_out_msg = f"agy CLI produced no output for {int(idle_limit)}s and was stopped."
+                    _kill_proc_group(proc)
+                    break
+                if (now - started) > total_limit:
+                    timed_out_msg = f"agy CLI exceeded the {int(total_limit)}s limit and was stopped."
+                    _kill_proc_group(proc)
+                    break
                 try:
                     rlist, _, _ = select.select([stdout_fd], [], [], 0.15)
                 except (OSError, ValueError):
@@ -407,17 +444,22 @@ class AntigravityProvider(Provider):
                     break
                 if not raw:
                     break
+                last_output = time.time()
                 text = decoder.decode(raw, final=False)
                 if text:
-                    emitted = True
                     yield {"type": "text", "text": text}
             tail = decoder.decode(b"", final=True)
             if tail:
-                emitted = True
                 yield {"type": "text", "text": tail}
             rc = proc.wait(timeout=10)
             err_thread.join(timeout=1.0)
-            if rc != 0 and not emitted:
+            if timed_out_msg:
+                yield {
+                    "type": "error",
+                    "code": "antigravity_timeout",
+                    "message": timed_out_msg,
+                }
+            elif rc != 0:
                 err_text = b"".join(stderr_chunks).decode("utf-8", errors="replace").strip()
                 yield {
                     "type": "error",
@@ -471,7 +513,13 @@ class AntigravityProvider(Provider):
         stage_label = f"Antigravity ({model}) is thinking..." if model else "Antigravity is thinking..."
         yield {"type": "agent", "stage": stage_label}
         if kind == "sdk":
-            yield from self._stream_via_sdk(full_prompt, workspace, model=model, stop_event=stop_event)
+            yield from self._stream_via_sdk(
+                full_prompt,
+                workspace,
+                model=model,
+                permission_mode=permission_mode,
+                stop_event=stop_event,
+            )
         else:
             yield from self._stream_via_cli(
                 detail,

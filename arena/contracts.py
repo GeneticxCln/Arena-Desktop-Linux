@@ -309,8 +309,8 @@ ACCOUNT_TOO_NEW_FOR_VIDEO = "account_too_new_for_video"
 def _rate_limit_reset(headers) -> Optional[float]:
     """Epoch seconds when a rate limit resets, from Arena's response headers.
 
-    Mirrors the website's own parser: ``RateLimit-Reset`` (epoch seconds),
-    then ``Retry-After`` (seconds or HTTP-date), then ``Ratelimit-Remaining``.
+    Checks ``RateLimit-Reset`` (relative seconds or Unix epoch seconds)
+    and ``Retry-After`` (relative seconds or HTTP-date).
     """
     if not headers:
         return None
@@ -322,25 +322,22 @@ def _rate_limit_reset(headers) -> Optional[float]:
     raw = items.get("ratelimit-reset")
     if raw is not None:
         try:
-            return float(raw)
+            val = float(raw)
+            if val <= 1_000_000_000:
+                return _time.time() + max(0.0, val)
+            return val
         except (TypeError, ValueError):
             pass
     raw = items.get("retry-after")
     if raw is not None:
         try:
-            return _time.time() + float(raw)
+            return _time.time() + max(0.0, float(raw))
         except (TypeError, ValueError):
             try:
                 from email.utils import parsedate_to_datetime
                 return parsedate_to_datetime(str(raw)).timestamp()
             except (TypeError, ValueError):
                 pass
-    raw = items.get("ratelimit-remaining")
-    if raw is not None:
-        try:
-            return _time.time() + float(raw)
-        except (TypeError, ValueError):
-            pass
     return None
 
 

@@ -125,10 +125,21 @@ def guide(root, mode_label: str, mode_note: str, dual: bool = False, extra_tools
                         delegate=delegate or "")
 
 
+_FENCED_CODE_RE = re.compile(r"(```[^\n]*\n.*?```|~~~[^\n]*\n.*?~~~|`[^`\n]+`)", re.S)
+
+
+def _strip_code_blocks_for_tools(text: str) -> str:
+    """Replace fenced/inline code blocks with equal-length spaces so quoted tool examples never run."""
+    if not text or ("`" not in text and "~" not in text):
+        return text or ""
+    return _FENCED_CODE_RE.sub(lambda m: " " * len(m.group(0)), text)
+
+
 def parse_tool_calls(text: str) -> List[Dict[str, Any]]:
     calls = []
     found = []
-    for m in _TOOL_RE.finditer(text or ""):
+    scan = _strip_code_blocks_for_tools(text or "")
+    for m in _TOOL_RE.finditer(scan):
         params: Dict[str, Any] = {}
         for p in _PARAM_RE.finditer(m.group(2)):
             # Keep MCP argument names case-sensitive, while retaining the
@@ -136,7 +147,7 @@ def parse_tool_calls(text: str) -> List[Dict[str, Any]]:
             params[p.group(1)] = p.group(2)
             params.setdefault(p.group(1).lower(), p.group(2))
         found.append((m.start(), {"name": m.group(1).lower(), "params": params}))
-    for m in _INVOKE_RE.finditer(text or ""):
+    for m in _INVOKE_RE.finditer(scan):
         params = {}
         for p in _INVOKE_PARAM_RE.finditer(m.group(2)):
             params[p.group(1)] = p.group(2)
@@ -331,39 +342,79 @@ def _interactive_refusal(cmd: str) -> str:
             "e.g. a script file, 'python script.py', 'git log -5', or redirect input from a file.")
 
 
-def run_shell_command(cmd: str, cwd) -> str:
+_ACTIVE_SHELL_LOCK = threading.Lock()
+_ACTIVE_SHELL_PROCS: set = set()
+_INLINE_EVAL_RE = re.compile(
+    r"\b(?:python\d*(?:\.\d+)?|py|node|nodejs|perl|ruby|php|sh|bash|zsh|dash|ksh|pwsh|powershell)"
+    r"\b[^\r\n;|&]*(?:\s(?:-[a-zA-Z]*[ce]|--eval|-enc|-encodedcommand)(?:\s|['\"]|$))",
+    re.I,
+)
+
+
+def _kill_shell_proc(proc) -> None:
+    try:
+        import os as _os
+        import signal as _sig
+        if proc.poll() is None:
+            _os.killpg(proc.pid, _sig.SIGKILL)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def shutdown_shell_procs() -> None:
+    """Terminate any running agent shell subprocess groups on app exit."""
+    with _ACTIVE_SHELL_LOCK:
+        procs = list(_ACTIVE_SHELL_PROCS)
+        _ACTIVE_SHELL_PROCS.clear()
+    for p in procs:
+        _kill_shell_proc(p)
+
+
+def run_shell_command(cmd: str, cwd, stop_event=None) -> str:
     """Run one shell command with an idle watchdog; returns formatted output.
 
-    Output streams through pump threads purely so silence can be detected:
-    a command that produces nothing for SHELL_IDLE_LIMIT seconds is killed
-    (it is almost certainly waiting for input or hung), which previously
-    blocked the whole agent loop until the user pressed Stop.
+    Uses raw binary ``os.read`` with incremental UTF-8 decoding so even small
+    line-by-line output (pytest, pip, builds) immediately resets the idle timer.
     """
+    import codecs
+    import os as _os
+
     cmd = (cmd or "").strip()
     if not cmd:
         raise ValueError("cmd is empty")
     refusal = _interactive_refusal(cmd)
     if refusal:
         return refusal
-    if re.search(r"(?:^|\s)(?:-c|-e|--eval|-enc|-encodedcommand)(?:\s|$)", cmd, re.I):
-        return "Error: inline code execution flags (-c, -e, --eval, -enc) are blocked for safety."
+    if _INLINE_EVAL_RE.search(cmd):
+        return "Error: inline code execution flags (-c, -e, --eval, -enc) on interpreters/shells are blocked for safety."
     argv = ["/bin/sh", "-lc", cmd]
     proc = subprocess.Popen(argv, shell=False, cwd=str(cwd), stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, encoding="utf-8", errors="replace",
                             start_new_session=True)
+    with _ACTIVE_SHELL_LOCK:
+        _ACTIVE_SHELL_PROCS.add(proc)
     out_chunks: List[str] = []
     err_chunks: List[str] = []
     state = {"last": time.time()}
 
     def pump(stream, sink):
+        dec = codecs.getincrementaldecoder("utf-8")("replace")
         try:
+            fd = stream.fileno()
             while True:
-                data = stream.read(1024)
-                if not data:
+                raw = _os.read(fd, 4096)
+                if not raw:
                     break
-                sink.append(data)
+                text = dec.decode(raw, final=False)
+                if text:
+                    sink.append(text)
                 state["last"] = time.time()
+            tail = dec.decode(b"", final=True)
+            if tail:
+                sink.append(tail)
         except Exception:
             pass
 
@@ -373,31 +424,38 @@ def run_shell_command(cmd: str, cwd) -> str:
         t.start()
     started = time.time()
     killed = ""
-    while proc.poll() is None:
-        now = time.time()
-        if now - state["last"] > SHELL_IDLE_LIMIT:
-            killed = f"killed after {SHELL_IDLE_LIMIT}s without output (waiting for input or hung)"
-            break
-        if now - started > SHELL_TOTAL_LIMIT:
-            killed = f"killed after the {SHELL_TOTAL_LIMIT}s limit"
-            break
-        time.sleep(0.15)
-    if killed:
-        try:
-            import os
-            import signal
-            os.killpg(proc.pid, signal.SIGKILL)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
     try:
-        proc.wait(timeout=10)
-    except Exception:
-        pass
-    for t in threads:
-        t.join(timeout=2)
+        while proc.poll() is None:
+            if stop_event is not None and stop_event.is_set():
+                killed = "stopped by user"
+                break
+            now = time.time()
+            if now - state["last"] > SHELL_IDLE_LIMIT:
+                killed = f"killed after {SHELL_IDLE_LIMIT}s without output (waiting for input or hung)"
+                break
+            if now - started > SHELL_TOTAL_LIMIT:
+                killed = f"killed after the {SHELL_TOTAL_LIMIT}s limit"
+                break
+            time.sleep(0.12)
+        if killed:
+            _kill_shell_proc(proc)
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            pass
+    finally:
+        with _ACTIVE_SHELL_LOCK:
+            _ACTIVE_SHELL_PROCS.discard(proc)
+        if proc.poll() is None:
+            _kill_shell_proc(proc)
+        for t in threads:
+            t.join(timeout=2)
+        for st in (proc.stdout, proc.stderr):
+            if st is not None:
+                try:
+                    st.close()
+                except Exception:
+                    pass
     stdout = "".join(out_chunks).strip()
     stderr = "".join(err_chunks).strip()
     if killed:
@@ -455,11 +513,28 @@ class LocalTools:
         self.root = Path(root).expanduser().resolve()
         self.out = Path(out).expanduser().resolve() if out else None
 
+    def _is_protected_write_path(self, target: Path) -> bool:
+        """Protect sensitive repo/checkpoint metadata (.git/config, .git/hooks, checkpoints) from auto-writes."""
+        for base in (self.root, self.out):
+            if base is None:
+                continue
+            try:
+                parts = target.relative_to(base).parts
+            except ValueError:
+                continue
+            if len(parts) >= 2 and parts[0] == ".git" and parts[1] in ("config", "hooks"):
+                return True
+            if len(parts) >= 2 and parts[0] == ARTIFACTS_DIR and parts[1] == "checkpoints":
+                return True
+        return False
+
     def resolve(self, rel: str, write: bool = False) -> Tuple[Path, bool]:
         rel = (rel or ".").strip().strip("\"'") or "."
         p = Path(rel).expanduser()
         target = (p if p.is_absolute() else self.root / p).resolve()
         inside = target == self.root or self.root in target.parents
+        if write and inside and self._is_protected_write_path(target):
+            inside = False
         own = self._own(target) if inside else None
         if own is not None and (write or own.is_file()):
             return own, True
@@ -475,15 +550,25 @@ class LocalTools:
             return None
 
     def _walk(self, top: Path):
-        """Files under a folder and this model's copy of it, minus build output and the other model's copy."""
+        """Files under a folder and this model's copy of it, never escaping root via symlinks."""
+        allowed_roots = [r for r in (self.root, self.out) if r is not None]
         for d in (top, self._own(top)):
             if d is None or not d.is_dir():
                 continue
             for p in d.rglob("*"):
                 parts = p.relative_to(d).parts
-                if not p.is_file() or _SKIP & set(parts):
+                if _SKIP & set(parts):
                     continue
                 if self.out is not None and d == self.root and parts[0] in LANE_DIRS.values():
+                    continue
+                if p.is_symlink():
+                    try:
+                        resolved = p.resolve()
+                    except OSError:
+                        continue
+                    if not any(resolved == r or r in resolved.parents for r in allowed_roots):
+                        continue
+                if not p.is_file():
                     continue
                 yield p
 
@@ -529,12 +614,14 @@ class LocalTools:
             pass
         return info
 
-    def run(self, call: Dict[str, Any]) -> Tuple[bool, str]:
+    def run(self, call: Dict[str, Any], stop_event=None) -> Tuple[bool, str]:
         fn = getattr(self, "_t_" + call["name"], None)
         if fn is None:
             return False, (f"Unknown tool '{call['name']}'. Available: ls, read_file, search, write_file, "
                            "edit_file, mkdir, delete, run_cmd.")
         try:
+            if call["name"] == "run_cmd":
+                return True, fn(call["params"], stop_event=stop_event)
             return True, fn(call["params"])
         except Exception as e:
             return False, f"{type(e).__name__}: {e}"
@@ -648,6 +735,13 @@ class LocalTools:
         return f"Folder ready: {self._rel(target)}"
 
     def _t_delete(self, prm) -> str:
+        rel_str = (prm.get("path") or "").strip().strip("\"'")
+        raw_p = Path(rel_str).expanduser() if rel_str else None
+        raw_cand = (raw_p if (raw_p is not None and raw_p.is_absolute()) else (self.root / raw_p if raw_p is not None else None))
+        if raw_cand is not None and raw_cand.is_symlink():
+            # Unlink the symlink itself; never follow it and rmtree its target.
+            raw_cand.unlink()
+            return f"Deleted symlink {self._rel(raw_cand)}"
         target, _ = self.resolve(prm.get("path", ""), write=True)
         if target in (self.root, self.out) or target in self.root.parents:
             raise PermissionError("refusing to delete the project folder itself")
@@ -659,7 +753,7 @@ class LocalTools:
             return f"Deleted {self._rel(target)}"
         raise FileNotFoundError(f"{self._rel(target)} does not exist")
 
-    def _t_run_cmd(self, prm) -> str:
+    def _t_run_cmd(self, prm, stop_event=None) -> str:
         cwd = self.out or self.root
         cwd.mkdir(parents=True, exist_ok=True)
-        return run_shell_command(prm.get("cmd") or "", cwd)
+        return run_shell_command(prm.get("cmd") or "", cwd, stop_event=stop_event)

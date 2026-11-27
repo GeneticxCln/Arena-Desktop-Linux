@@ -32,6 +32,18 @@ RECAPTCHA_SITE_KEY = "6LeTGMcsAAAAALuIlkVwIxaAuZA8VledA6d3Nnb0"
 RECAPTCHA_CO = base64.b64encode(b"https://arena.ai:443").decode().rstrip("=")
 
 
+def _is_loopback_ws_url(ws_url: Optional[str]) -> bool:
+    """Only allow CDP WebSocket connections to loopback hosts."""
+    if not ws_url or not isinstance(ws_url, str):
+        return False
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(ws_url)
+        return parsed.scheme in ("ws", "wss") and (parsed.hostname or "").lower() in ("127.0.0.1", "localhost", "::1")
+    except Exception:
+        return False
+
+
 def _cdp_find_arena_tab(port: int = 9222) -> Optional[str]:
     """Find an arena.ai tab's WebSocket debugger URL via CDP."""
     import http.client
@@ -44,12 +56,13 @@ def _cdp_find_arena_tab(port: int = 9222) -> Optional[str]:
         pages = json.loads(resp.read().decode("utf-8"))
         conn.close()
         for p in pages:
-            if "arena.ai" in p.get("url", ""):
-                return p.get("webSocketDebuggerUrl")
+            ws = p.get("webSocketDebuggerUrl")
+            if "arena.ai" in p.get("url", "") and _is_loopback_ws_url(ws):
+                return ws
         # No arena tab found — try any tab and navigate it
         for p in pages:
             ws = p.get("webSocketDebuggerUrl")
-            if ws and p.get("type") == "page":
+            if ws and p.get("type") == "page" and _is_loopback_ws_url(ws):
                 return ws
         return None
     except Exception:
@@ -70,13 +83,14 @@ def _cdp_ensure_arena_page(port: int = 9222) -> Optional[str]:
 
         # Check for existing arena tab
         for p in pages:
-            if "arena.ai" in p.get("url", ""):
-                return p.get("webSocketDebuggerUrl")
+            ws = p.get("webSocketDebuggerUrl")
+            if "arena.ai" in p.get("url", "") and _is_loopback_ws_url(ws):
+                return ws
 
         # Navigate first available page tab to arena.ai
         for p in pages:
             ws = p.get("webSocketDebuggerUrl")
-            if ws and p.get("type") == "page":
+            if ws and p.get("type") == "page" and _is_loopback_ws_url(ws):
                 _cdp_execute(ws, "Page.navigate", {"url": "https://arena.ai"})
                 time.sleep(3)
                 return ws
@@ -87,6 +101,8 @@ def _cdp_ensure_arena_page(port: int = 9222) -> Optional[str]:
 
 def _cdp_execute(ws_url: str, method: str, params: dict = None, timeout: int = 10) -> Optional[dict]:
     """Execute a CDP command and return the result."""
+    if not _is_loopback_ws_url(ws_url):
+        return None
     try:
         import websocket
         ws = websocket.create_connection(ws_url, timeout=timeout)
@@ -118,7 +134,7 @@ def fetch_recaptcha_via_cdp(action: str = "chat_submit", port: int = 9222) -> Op
             return {{error: 'grecaptcha not loaded — page may not be arena.ai'}};
         }}
         try {{
-            const token = await grecaptcha.enterprise.execute('{RECAPTCHA_SITE_KEY}', {{action: '{action}'}});
+            const token = await grecaptcha.enterprise.execute({json.dumps(RECAPTCHA_SITE_KEY)}, {{action: {json.dumps(action)}}});
             return {{token: token}};
         }} catch(e) {{
             return {{error: 'reCAPTCHA execute failed: ' + e.message}};
@@ -201,6 +217,7 @@ def send_chat_via_cdp(
     modality: str = "chat",
     port: int = 9222,
     timeout: int = 60,
+    mode: str = "direct",
 ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
     Send chat entirely through browser CDP. Returns (text, eval_id, error).
@@ -211,7 +228,10 @@ def send_chat_via_cdp(
         return None, eval_id, "No CDP browser found. Run /login to launch one, or start your browser with --remote-debugging-port=9222"
 
     is_new = eval_id is None
-    js_eval_id = f"'{eval_id}'" if eval_id else "null"
+    js_eval_id = json.dumps(eval_id) if eval_id else "null"
+    js_mode = json.dumps(mode or "direct")
+    js_modality = json.dumps(modality or "chat")
+    js_model_id = json.dumps(model_id or "")
 
     js = f"""
     (async () => {{
@@ -229,7 +249,7 @@ def send_chat_via_cdp(
             return h.slice(0,8)+'-'+h.slice(8,12)+'-'+h.slice(12,16)+'-'+h.slice(16,20)+'-'+h.slice(20);
         }}
 
-        const SITE_KEY = '{RECAPTCHA_SITE_KEY}';
+        const SITE_KEY = {json.dumps(RECAPTCHA_SITE_KEY)};
         let token = null;
         try {{
             if (typeof grecaptcha !== 'undefined' && grecaptcha.enterprise) {{
@@ -239,13 +259,14 @@ def send_chat_via_cdp(
 
         const evalId = {js_eval_id} || uuidv7();
         const isNew = {str(is_new).lower()};
+        const mode = {js_mode};
         const url = isNew
             ? '/nextjs-api/stream/create-evaluation'
             : '/nextjs-api/stream/post-to-evaluation/' + evalId;
 
         const body = {{
             id: evalId,
-            mode: '{self.active_mode}',
+            mode: mode,
             userMessageId: uuidv7(),
             modelAMessageId: uuidv7(),
             modelBMessageId: uuidv7(),
@@ -254,11 +275,11 @@ def send_chat_via_cdp(
                 experimental_attachments: [],
                 metadata: {{}},
             }},
-            modality: '{modality}',
+            modality: {js_modality},
             recaptchaV3Token: token,
         }};
-        if ('{self.active_mode}' !== 'battle') {{
-            body.modelAId = '{model_id}';
+        if (mode !== 'battle') {{
+            body.modelAId = {js_model_id};
         }}
 
         const resp = await fetch(url, {{
@@ -308,6 +329,9 @@ def send_chat_via_cdp(
         return {{text, reasoning, sources, evalId, chunks}};
     }})()
     """
+
+    if not _is_loopback_ws_url(ws_url):
+        return None, eval_id, "Refusing non-loopback CDP WebSocket URL."
 
     try:
         import websocket

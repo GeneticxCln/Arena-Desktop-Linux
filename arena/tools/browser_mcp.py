@@ -51,7 +51,11 @@ class BrowserOpenUrlTool(BaseTool):
 
         if not url:
             return "Error: No URL provided."
-        if not (url.startswith("http://") or url.startswith("https://")):
+        parsed_url = urllib.parse.urlparse(url)
+        if parsed_url.scheme:
+            if parsed_url.scheme.lower() not in ("http", "https"):
+                return f"Error: Unsupported URL scheme '{parsed_url.scheme}'."
+        else:
             url = f"https://{url}"
 
         installed = detect_installed_browsers()
@@ -111,8 +115,15 @@ class BrowserExecJsTool(BaseTool):
     description = "Evaluate JavaScript in an active browser tab via CDP WebSocket."
 
     def execute(self, params: Dict[str, Any]) -> str:
+        if os.environ.get("ARENA_ALLOW_BROWSER_JS") != "1":
+            return "Error: browser_exec_js is disabled by default (set ARENA_ALLOW_BROWSER_JS=1 to enable)."
         script = params.get("script", "").strip()
-        port = int(params.get("port", 9222))
+        try:
+            port = int(params.get("port", 9222))
+            if not (1 <= port <= 65535):
+                raise ValueError("port out of range")
+        except (TypeError, ValueError):
+            return "Error: Invalid CDP port."
         target_url = params.get("url_match", "arena.ai")
 
         if not script:
@@ -145,6 +156,9 @@ class BrowserExecJsTool(BaseTool):
             ws_url = page.get("webSocketDebuggerUrl")
             if not ws_url:
                 return "Error: No webSocketDebuggerUrl available for target page."
+            parsed_ws = urllib.parse.urlparse(ws_url)
+            if parsed_ws.scheme not in ("ws", "wss") or (parsed_ws.hostname or "").lower() not in ("127.0.0.1", "localhost", "::1"):
+                return "Error: Refusing non-loopback CDP WebSocket URL."
 
             ws = websocket.create_connection(ws_url, timeout=5)
             ws.send(json.dumps({

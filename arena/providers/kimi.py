@@ -171,13 +171,13 @@ class KimiProvider(WebChatEngine):
             "models": models,
         }
 
-    def _apply_model_selection(self, model_id: str) -> None:
+    def _apply_model_selection(self, model_id: str) -> Optional[bool]:
         want = (model_id or "").strip()
         if not want or want.lower() == "default":
-            return
+            return True
         cur = self._read_active_model_label().lower()
         if cur and (want.lower() == cur or want.lower() in cur):
-            return
+            return True
         opened = self.eval_js(
             """(() => {
               const el = document.querySelector('.current-model, .chat-editor-action .kimi-menu-trigger-wrapper');
@@ -189,7 +189,7 @@ class KimiProvider(WebChatEngine):
             timeout=2.5,
         )
         if not (isinstance(opened, dict) and opened.get("ok")):
-            return
+            return False
         time.sleep(0.32)
         toks = [t for t in re.split(r"[\s\-_/]+", want.lower()) if t]
         res = self.eval_js(
@@ -213,8 +213,9 @@ class KimiProvider(WebChatEngine):
         )
         if isinstance(res, dict) and res.get("clicked"):
             time.sleep(0.2)
-        else:
-            time.sleep(0.15)
+            return True
+        time.sleep(0.15)
+        return False
 
     def _parse_observed_sse_chunk(self, raw_chunk: str, state: dict, *, flush: bool = False) -> list[dict]:
         events: list[dict] = []
@@ -279,5 +280,21 @@ class KimiProvider(WebChatEngine):
                     if isinstance(pkt, dict):
                         _handle_pkt(pkt)
                     pos = line.find("{", end)
+        # Also parse Connect/gRPC-web JSON frames incrementally when they lack trailing newlines
+        if buf and "\n" not in buf and "{" in buf and not buf.lstrip().startswith("data:"):
+            decoder = json.JSONDecoder()
+            pos = buf.find("{")
+            consumed = 0
+            while pos != -1 and pos < len(buf):
+                try:
+                    pkt, end = decoder.raw_decode(buf, pos)
+                except ValueError:
+                    break
+                if isinstance(pkt, dict):
+                    _handle_pkt(pkt)
+                consumed = end
+                pos = buf.find("{", end)
+            if consumed:
+                buf = buf[consumed:]
         state["buf"] = buf
         return events

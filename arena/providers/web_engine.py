@@ -210,14 +210,28 @@ class WebChatEngine(Provider):
                     popup_win.add(popup_wv)
                     self._popup_windows.append(popup_win)
 
+                    def _update_popup_title(p_wv):
+                        try:
+                            from urllib.parse import urlparse
+                            uri = p_wv.get_uri() or ""
+                            host = urlparse(uri).netloc if uri else ""
+                            t = (p_wv.get_title() or "").strip()
+                            prefix = f"[{host}] " if host else ""
+                            label = t or f"{self.name} Sign in"
+                            popup_win.set_title(f"{prefix}{label} - Arena Desktop")
+                        except Exception:
+                            pass
+
                     def _on_ready(p_wv):
+                        _update_popup_title(p_wv)
                         popup_win.show_all()
                         popup_win.present()
 
                     def _on_title(p_wv, _pspec):
-                        t = p_wv.get_title() or ""
-                        if t:
-                            popup_win.set_title(f"{t} - Arena Desktop")
+                        _update_popup_title(p_wv)
+
+                    def _on_uri(p_wv, _pspec):
+                        _update_popup_title(p_wv)
 
                     def _on_close(_p_wv):
                         try:
@@ -233,6 +247,7 @@ class WebChatEngine(Provider):
 
                     popup_wv.connect("ready-to-show", _on_ready)
                     popup_wv.connect("notify::title", _on_title)
+                    popup_wv.connect("notify::uri", _on_uri)
                     popup_wv.connect("close", _on_close)
                     popup_win.connect("destroy", _on_destroy)
                     _wire_popups(popup_wv)
@@ -730,24 +745,6 @@ class WebChatEngine(Provider):
           }})();
           return 'started';
         }})()"""
-        if self.eval_js(script, timeout=3.5) != "started":
-            yield {"event": "error", "error": "eval_failed"}
-            return
-
-        drain_js = f"""(() => {{
-          const st = window.__apStreams && window.__apStreams[{json.dumps(rid)}];
-          if (!st) return JSON.stringify({{ missing: true }});
-          const out = {{
-            statusReady: Boolean(st.statusReady),
-            status: st.status,
-            ok: st.ok,
-            chunks: st.chunks.splice(0),
-            done: Boolean(st.done),
-            error: st.error || ''
-          }};
-          if (st.done && !st.chunks.length) delete window.__apStreams[{json.dumps(rid)}];
-          return JSON.stringify(out);
-        }})()"""
         cleanup_js = f"""(() => {{
           const st = window.__apStreams && window.__apStreams[{json.dumps(rid)}];
           if (st) {{
@@ -756,25 +753,51 @@ class WebChatEngine(Provider):
           }}
           return 1;
         }})()"""
+        if self.eval_js(script, timeout=3.5) != "started":
+            self.eval_js(cleanup_js, timeout=1.5)
+            yield {"event": "error", "error": "eval_failed"}
+            return
 
-        deadline = time.time() + timeout
+        cursor = 0
+        last_activity = time.time()
+        hard_deadline = last_activity + max(float(timeout) * 3.0, 900.0)
         emitted_status = False
         try:
-            while time.time() < deadline:
+            while (time.time() - last_activity) < timeout and time.time() < hard_deadline:
                 if stop_event is not None and stop_event.is_set():
                     return
                 time.sleep(0.08)
+                drain_js = f"""(() => {{
+                  const st = window.__apStreams && window.__apStreams[{json.dumps(rid)}];
+                  if (!st) return JSON.stringify({{ missing: true }});
+                  const cur = {int(cursor)};
+                  for (let i = 0; i < cur && i < st.chunks.length; i++) st.chunks[i] = '';
+                  const slice = st.chunks.slice(cur);
+                  const nextCursor = st.chunks.length;
+                  return JSON.stringify({{
+                    statusReady: Boolean(st.statusReady),
+                    status: st.status,
+                    ok: st.ok,
+                    chunks: slice,
+                    nextCursor,
+                    done: Boolean(st.done),
+                    error: st.error || ''
+                  }});
+                }})()"""
                 snap = self.eval_js(drain_js, timeout=3.0)
                 if not isinstance(snap, dict):
                     continue
                 if snap.get("missing"):
                     yield {"event": "error", "error": "stream_missing"}
                     return
+                cursor = max(cursor, int(snap.get("nextCursor") or cursor))
                 if snap.get("statusReady") and not emitted_status:
                     emitted_status = True
+                    last_activity = time.time()
                     yield {"event": "status", "status": int(snap.get("status") or 0), "ok": bool(snap.get("ok"))}
                 for chunk in snap.get("chunks") or []:
                     if chunk:
+                        last_activity = time.time()
                         yield {"event": "chunk", "data": str(chunk)}
                 if snap.get("error"):
                     yield {"event": "error", "error": str(snap["error"])}
@@ -863,23 +886,29 @@ class WebChatEngine(Provider):
         }})()"""
         return bool(self.eval_js(script, timeout=3.0))
 
-    def _drain_observed_stream(self) -> dict:
+    def _drain_observed_stream(self, cursor: int = 0, expected_seq: int = 0) -> dict:
         res = self.eval_js(
-            """(() => {
+            f"""(() => {{
               const o = window.__apObs;
-              if (!o) return JSON.stringify({ active: false, chunks: [], done: false });
-              return JSON.stringify({
+              if (!o) return JSON.stringify({{ active: false, chunks: [], done: false, seq: 0, nextCursor: 0 }});
+              const seq = Number(o.seq || 0);
+              const rawChunks = Array.isArray(o.chunks) ? o.chunks : [];
+              const cur = ({int(expected_seq)} && seq !== {int(expected_seq)}) ? 0 : {int(cursor)};
+              for (let i = 0; i < cur && i < rawChunks.length; i++) rawChunks[i] = '';
+              return JSON.stringify({{
                 active: Boolean(o.active),
                 status: Number(o.status || 0),
                 url: String(o.url || ''),
-                chunks: o.chunks ? o.chunks.splice(0) : [],
+                seq,
+                chunks: rawChunks.slice(cur),
+                nextCursor: rawChunks.length,
                 done: Boolean(o.done),
                 error: String(o.error || '')
-              });
-            })()""",
+              }});
+            }})()""",
             timeout=2.5,
         )
-        return res if isinstance(res, dict) else {"active": False, "chunks": [], "done": False}
+        return res if isinstance(res, dict) else {"active": False, "chunks": [], "done": False, "seq": expected_seq, "nextCursor": cursor}
 
     def _parse_observed_sse_chunk(self, raw_chunk: str, state: dict, *, flush: bool = False) -> list[dict]:
         """Override in subclasses to parse observed SSE lines into text/reasoning/meta events."""
@@ -944,7 +973,9 @@ class WebChatEngine(Provider):
                 "detail": f"{self.name} wants a manual human check in its window.",
             }
         cookie_names = self.read_cookie_names()
-        cookie_ok = bool(self.auth_cookie_names and (cookie_names & set(self.auth_cookie_names)))
+        _anon_waf = {"HWWAFSESID", "__cf_bm", "cf_clearance", "ssxmod_itna", "cna"}
+        effective_auth_cookies = set(self.auth_cookie_names or ()) - _anon_waf
+        cookie_ok = bool(effective_auth_cookies and (cookie_names & effective_auth_cookies))
         dom_ok = bool(probe.get("has_composer")) and not self._is_login_url(href)
         signed = bool((dom_ok or cookie_ok) and not self._is_login_url(href))
         self._signed_in_cache = signed
@@ -1304,20 +1335,26 @@ class WebChatEngine(Provider):
             box.dispatchEvent(new KeyboardEvent('keypress', opts));
             box.dispatchEvent(new KeyboardEvent('keyup', opts));
           }};
+          let clickedSend = false;
           const trySend = (attempt) => {{
-            if (window.__apObs && window.__apObs.active) return true;
+            if (clickedSend || (window.__apObs && window.__apObs.active)) return true;
+            const curVal = (box.value !== undefined ? String(box.value) : (box.innerText || box.textContent || '')).trim();
+            if (!curVal) return true; // already submitted and cleared!
             if (preferEnter && attempt === 0) {{
               fireEnter();
               return false; // still check button on attempt 1 if Enter didn't clear the box
             }}
-            const curVal = (box.value !== undefined ? String(box.value) : (box.innerText || box.textContent || '')).trim();
-            if (!curVal) return true; // already submitted and cleared!
             const btn = findScopedSend();
             if (btn) {{
+              clickedSend = true;
               btn.click();
               return true;
             }}
-            if (attempt >= 1) fireEnter();
+            if (attempt >= 1) {{
+              clickedSend = true;
+              fireEnter();
+              return true;
+            }}
             return false;
           }};
           const delays = preferEnter ? [140, 750, 1250, 1800] : [140, 420, 820, 1300];
@@ -1622,57 +1659,106 @@ class WebChatEngine(Provider):
         emitted_text = ""
         emitted_reasoning = ""
         saved_href = conversation_url
-        deadline = time.time() + self.turn_timeout
         started = time.time()
         last_growth_at = started
+        hard_deadline = started + max(float(self.turn_timeout) * 3.0, 900.0)
         last_api_poll = 0.0
         stable_ticks = 0
         saw_activity = False
         obs_state: dict = {"buf": ""}
         obs_used = False
+        dom_used = False
+        obs_cursor = 0
+        obs_seq = 0
+        obs_text_acc = ""
+        obs_reason_acc = ""
 
-        while time.time() < deadline:
+        def _handle_obs_event(ev: dict) -> Optional[dict]:
+            nonlocal obs_used, emitted_text, emitted_reasoning, last_growth_at, saved_href
+            nonlocal obs_text_acc, obs_reason_acc
+            et = ev.get("type")
+            if et == "text" and ev.get("text"):
+                piece = str(ev["text"])
+                obs_used = True
+                obs_text_acc += piece
+                last_growth_at = time.time()
+                if dom_used:
+                    if obs_text_acc == emitted_text:
+                        return None
+                    if obs_text_acc.startswith(emitted_text):
+                        delta = obs_text_acc[len(emitted_text):]
+                        emitted_text = obs_text_acc
+                        return {"type": "text", "text": delta} if delta else None
+                    if emitted_text.startswith(obs_text_acc):
+                        return None
+                    emitted_text = obs_text_acc
+                    return {"type": "text_replace", "text": obs_text_acc}
+                emitted_text += piece
+                return ev
+            if et == "text_replace" and ev.get("text") is not None:
+                obs_used = True
+                new_t = str(ev["text"])
+                obs_text_acc = new_t
+                emitted_text = new_t
+                last_growth_at = time.time()
+                return {"type": "text_replace", "text": new_t}
+            if et == "reasoning" and ev.get("text"):
+                piece = str(ev["text"])
+                obs_used = True
+                obs_reason_acc += piece
+                last_growth_at = time.time()
+                if dom_used:
+                    if obs_reason_acc == emitted_reasoning:
+                        return None
+                    if obs_reason_acc.startswith(emitted_reasoning):
+                        delta = obs_reason_acc[len(emitted_reasoning):]
+                        emitted_reasoning = obs_reason_acc
+                        return {"type": "reasoning", "text": delta} if delta else None
+                    if emitted_reasoning.startswith(obs_reason_acc):
+                        return None
+                    emitted_reasoning = obs_reason_acc
+                    return {"type": "reasoning_replace", "text": obs_reason_acc}
+                emitted_reasoning += piece
+                return ev
+            if et == "reasoning_replace" and ev.get("text") is not None:
+                obs_used = True
+                new_r = str(ev["text"])
+                obs_reason_acc = new_r
+                emitted_reasoning = new_r
+                last_growth_at = time.time()
+                return {"type": "reasoning_replace", "text": new_r}
+            if et == "meta_update" and ev.get("external_url"):
+                if ev["external_url"] != saved_href:
+                    saved_href = str(ev["external_url"])
+                    return ev
+            return None
+
+        while (time.time() - last_growth_at) < self.turn_timeout and time.time() < hard_deadline:
             if stop_event is not None and stop_event.is_set():
                 return
             time.sleep(self.poll_interval)
 
             # Prefer observation-only SSE stream when captured from the page's own fetch()
             if self.observed_fetch_patterns:
-                obs = self._drain_observed_stream()
+                obs = self._drain_observed_stream(cursor=obs_cursor, expected_seq=obs_seq)
                 if obs.get("active"):
                     saw_activity = True
+                    new_seq = int(obs.get("seq") or 0)
+                    if obs_seq and new_seq and new_seq != obs_seq:
+                        obs_cursor = 0
+                    if new_seq:
+                        obs_seq = new_seq
+                    obs_cursor = max(obs_cursor, int(obs.get("nextCursor") or obs_cursor))
                     for raw_chunk in obs.get("chunks") or []:
                         for ev in self._parse_observed_sse_chunk(str(raw_chunk), obs_state):
-                            et = ev.get("type")
-                            if et == "text" and ev.get("text"):
-                                obs_used = True
-                                emitted_text += str(ev["text"])
-                                last_growth_at = time.time()
-                                yield ev
-                            elif et == "reasoning" and ev.get("text"):
-                                obs_used = True
-                                emitted_reasoning += str(ev["text"])
-                                last_growth_at = time.time()
-                                yield ev
-                            elif et == "meta_update" and ev.get("external_url"):
-                                if ev["external_url"] != saved_href:
-                                    saved_href = str(ev["external_url"])
-                                    yield ev
+                            out_ev = _handle_obs_event(ev)
+                            if out_ev is not None:
+                                yield out_ev
                     if obs.get("done"):
                         for ev in self._parse_observed_sse_chunk("", obs_state, flush=True):
-                            et = ev.get("type")
-                            if et == "text" and ev.get("text"):
-                                obs_used = True
-                                emitted_text += str(ev["text"])
-                                yield ev
-                            elif et == "reasoning" and ev.get("text"):
-                                obs_used = True
-                                emitted_reasoning += str(ev["text"])
-                                yield ev
-                            elif et == "meta_update" and ev.get("external_url"):
-                                if ev["external_url"] != saved_href:
-                                    saved_href = str(ev["external_url"])
-                                    yield ev
+                            out_ev = _handle_obs_event(ev)
+                            if out_ev is not None:
+                                yield out_ev
                         if obs_used:
                             cur_href = self.page_url()
                             if (
@@ -1741,21 +1827,25 @@ class WebChatEngine(Provider):
                 if cur_reason and len(cur_reason) > len(emitted_reasoning) and cur_reason.startswith(emitted_reasoning):
                     delta_r = cur_reason[len(emitted_reasoning):]
                     emitted_reasoning = cur_reason
+                    dom_used = True
                     last_growth_at = time.time()
                     yield {"type": "reasoning", "text": delta_r}
                 elif cur_reason and cur_reason != emitted_reasoning:
                     emitted_reasoning = cur_reason
+                    dom_used = True
                     last_growth_at = time.time()
                     yield {"type": "reasoning_replace", "text": cur_reason}
 
                 if cur_text and len(cur_text) > len(emitted_text) and cur_text.startswith(emitted_text):
                     delta = cur_text[len(emitted_text):]
                     emitted_text = cur_text
+                    dom_used = True
                     last_growth_at = time.time()
                     stable_ticks = 0
                     yield {"type": "text", "text": delta}
                 elif cur_text and cur_text != emitted_text:
                     emitted_text = cur_text
+                    dom_used = True
                     last_growth_at = time.time()
                     stable_ticks = 0
                     yield {"type": "text_replace", "text": cur_text}

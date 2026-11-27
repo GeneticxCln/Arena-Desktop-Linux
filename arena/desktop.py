@@ -412,6 +412,8 @@ def main():
         LOG.info("registered arenadesktop:// for this user")
     instance_token = deep_links.new_instance_token()
     web_app.INSTANCE_TOKEN = instance_token
+    boot_nonce = deep_links.new_instance_token()
+    web_app._BOOT_NONCE = boot_nonce
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -443,7 +445,7 @@ def main():
     background = "--background" in sys.argv
     start_url = f"http://127.0.0.1:{port}/"
     mode_flag = _flag_value("--mode")
-    query = []
+    query = [("boot", boot_nonce)]
     if mode_flag:
         query.append(("mode", mode_flag))
     if deep_link_arg:
@@ -500,7 +502,11 @@ def main():
             tray_started = True
             main_win.events.closing += tray.on_closing
         elif background:
-            main_win.show()
+            # main_win was created hidden; show it once webview.start() marks it ready.
+            try:
+                main_win.events.shown += lambda *_a: main_win.show()
+            except Exception:
+                main_win.show()
     if not tray_started:
         icon_png = base / "assets" / "logo.png"
         web_app.NOTIFY_HOOK = lambda title, text, kind="done": _linux_notify(title, text, icon_png)

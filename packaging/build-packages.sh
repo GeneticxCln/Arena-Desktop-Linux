@@ -26,7 +26,7 @@ case "$MACHINE" in
 esac
 BINARY="${BINARY:-$DEFAULT_BINARY}"
 VERSION="${VERSION:-$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' arena/web/app.py | head -1)}"
-VERSION="${VERSION:-7.4.0}"
+VERSION="${VERSION:-7.4.1}"
 MAINTAINER="${MAINTAINER:-Quinton Titus <93550885+GeneticxCln@users.noreply.github.com>}"
 VENDOR="${VENDOR:-Quinton Titus}"
 HOMEPAGE="${HOMEPAGE:-https://github.com/GeneticxCln/Arena-Desktop-Linux}"

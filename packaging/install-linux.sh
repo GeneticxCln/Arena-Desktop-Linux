@@ -38,7 +38,8 @@ if [ ! -f "$TEMPLATE" ]; then
   echo "arena-desktop.desktop not found next to this script." >&2
   exit 1
 fi
-sed "s|@EXEC@|$BIN_DIR/Arena-Desktop|g" "$TEMPLATE" > "$APP_DIR/arena-desktop.desktop"
+EXEC_ESCAPED="\"${BIN_DIR//\"/\\\"}/Arena-Desktop\""
+sed "s|@EXEC@|$EXEC_ESCAPED|g" "$TEMPLATE" > "$APP_DIR/arena-desktop.desktop"
 chmod 644 "$APP_DIR/arena-desktop.desktop"
 
 if command -v update-desktop-database >/dev/null 2>&1; then

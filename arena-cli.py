@@ -14,6 +14,7 @@ if str(root_dir) not in sys.path:
 
 def main():
     if "--cli" in sys.argv:
+        sys.argv = [sys.argv[0], *[a for a in sys.argv[1:] if a != "--cli"]]
         from arena.cli import main as cli_main
         cli_main()
     else:

@@ -226,15 +226,28 @@ def sync_models(cookie: Optional[str] = None, force: bool = False,
                                                 provider if isinstance(provider, dict) else None),
                 })
 
+    if not models:
+        if CACHE_FILE.exists():
+            try:
+                cached_data = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+                prev = cached_data.get("models", [])
+                if prev:
+                    return prev
+            except Exception:
+                pass
+        return []
+
     try:
-        CACHE_FILE.write_text(
-            json.dumps({
-                "_cached_at": time.time(),
-                "total": len(models),
-                "models": models,
-            }, indent=2),
-            encoding="utf-8"
-        )
+        import os as _os
+        CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps({
+            "_cached_at": time.time(),
+            "total": len(models),
+            "models": models,
+        }, indent=2)
+        tmp = CACHE_FILE.with_name(f".{CACHE_FILE.name}.{_os.getpid()}.tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        _os.replace(tmp, CACHE_FILE)
     except Exception:
         pass
 

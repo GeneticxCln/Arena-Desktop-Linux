@@ -2,6 +2,7 @@
 Main command implementations and CLI entry point for Arena Code.
 """
 
+import json
 import os
 import sys
 import time
@@ -574,9 +575,20 @@ def cmd_chat(initial_msg: Optional[str] = None) -> None:
                             elif key_s == "autocopy":
                                 s["auto_copy"] = val_s.lower() in ("true", "on", "1", "yes")
                             elif key_s == "history":
-                                s["max_history"] = max(1, min(100, int(val_s)))
+                                try:
+                                    s["max_history"] = max(1, min(100, int(val_s)))
+                                except ValueError:
+                                    con.print(f"[red]Invalid integer for history: {val_s}[/red]")
+                                    continue
                             elif key_s == "cdp_port":
-                                s["cdp_port"] = int(val_s)
+                                try:
+                                    port_val = int(val_s)
+                                    if not (1 <= port_val <= 65535):
+                                        raise ValueError("port out of range")
+                                    s["cdp_port"] = port_val
+                                except ValueError:
+                                    con.print(f"[red]Invalid port for cdp_port: {val_s}[/red]")
+                                    continue
                             else:
                                 con.print(f"[dim]Unknown setting: {key_s}[/dim]")
                                 continue
@@ -591,10 +603,9 @@ def cmd_chat(initial_msg: Optional[str] = None) -> None:
                         s = get_settings()
                         s["persona"] = arg
                         save_settings(s)
-                        sys_prompt = tools.get_system_prompt().replace(
-                            "You are a helpful AI coding assistant",
-                            arg[:500]
-                        )
+                        base_prompt = tools.get_system_prompt()
+                        first_nl = base_prompt.find("\n")
+                        sys_prompt = arg[:500] + (base_prompt[first_nl:] if first_nl != -1 else "")
                         con.print(f"[bold #10B981]Persona updated.[/bold #10B981]")
                     else:
                         con.print("[dim]Usage: /persona <your custom system prompt>[/dim]")
@@ -689,7 +700,7 @@ def cmd_chat(initial_msg: Optional[str] = None) -> None:
                 elif cmd == "/cd" and arg:
                     try:
                         os.chdir(arg)
-                        tools.cwd = os.getcwd()
+                        tools.set_cwd(os.getcwd())
                         sys_prompt = tools.get_system_prompt()
                         con.print(f"[bold #10B981]✓ Working directory: {tools.cwd}[/bold #10B981]")
                     except Exception as e:
@@ -789,8 +800,23 @@ def cmd_chat(initial_msg: Optional[str] = None) -> None:
                     break
 
                 tool_results = []
+                _SAFE_CLI_TOOLS = {"read_file", "ls", "search", "browser_detect", "browser_list_tabs"}
+                _auto_approve = os.environ.get("ARENA_CLI_AUTO_APPROVE") == "1"
                 for tc in tcalls:
                     print_tool_call(tc["name"], tc["params"])
+                    if tc["name"] not in _SAFE_CLI_TOOLS and not _auto_approve:
+                        approved = False
+                        if sys.stdin.isatty():
+                            try:
+                                ans = input(f"  Allow tool '{tc['name']}'? [y/N]: ").strip().lower()
+                                approved = ans in ("y", "yes")
+                            except (EOFError, KeyboardInterrupt):
+                                approved = False
+                        if not approved:
+                            res = f"Tool '{tc['name']}' declined by user."
+                            print_tool_result(tc["name"], res)
+                            tool_results.append(f'<tool_result name="{tc["name"]}">\n{res}\n</tool_result>')
+                            continue
                     res = tools.execute(tc["name"], tc["params"])
                     print_tool_result(tc["name"], res)
                     tool_results.append(f'<tool_result name="{tc["name"]}">\n{res[:4000]}\n</tool_result>')

@@ -71,18 +71,28 @@ class ToolRegistry:
             BrowserDetectTool(self.cwd),
             BrowserOpenUrlTool(self.cwd),
             BrowserListTabsTool(self.cwd),
-            BrowserExecJsTool(self.cwd),
         ]
+        if os.environ.get("ARENA_ALLOW_BROWSER_JS") == "1":
+            defaults.append(BrowserExecJsTool(self.cwd))
         for t in defaults:
             self.tools[t.name] = t
 
+    def set_cwd(self, new_cwd: str) -> None:
+        """Update working directory across the registry and all registered tools."""
+        self.cwd = new_cwd
+        for tool in self.tools.values():
+            if hasattr(tool, "cwd"):
+                tool.cwd = new_cwd
+
     def _load_local_mcp_servers(self) -> None:
-        """Check for brave-search-mcp-server or configured MCP servers."""
+        """Check for brave-search-mcp-server in trusted install/config directories only (never untrusted cwd)."""
+        from arena.config import CONFIG_DIR
+        install_root = Path(__file__).resolve().parents[2]
         candidate_dirs = [
-            Path(self.cwd) / "servers" / "brave-search-mcp-server-2.1.4",
-            Path(self.cwd) / "servers" / "brave-search-mcp-server",
-            Path(self.cwd) / "brave-search-mcp-server-2.1.4",
-            Path(self.cwd) / "brave-search-mcp-server",
+            CONFIG_DIR / "servers" / "brave-search-mcp-server-2.1.4",
+            CONFIG_DIR / "servers" / "brave-search-mcp-server",
+            install_root / "servers" / "brave-search-mcp-server-2.1.4",
+            install_root / "servers" / "brave-search-mcp-server",
         ]
         brave_dir = None
         for d in candidate_dirs:
@@ -94,10 +104,10 @@ class ToolRegistry:
             index_js = brave_dir / "dist" / "index.js"
             brave_api_key = os.environ.get("BRAVE_API_KEY", "")
             cmd = ["node", str(index_js)]
-            if brave_api_key:
-                cmd.extend(["--brave-api-key", brave_api_key])
+            extra_env = {"BRAVE_API_KEY": brave_api_key} if brave_api_key else None
             client = McpStdioClient(
                 command=cmd,
+                env=extra_env,
                 cwd=str(brave_dir)
             )
             if client.start():
@@ -135,11 +145,14 @@ def parse_tool_calls(text: str) -> List[Dict[str, Any]]:
     """
     Parse XML tool calls from model output:
     <tool name="tool_name"><param1>val1</param1></tool>
+    Ignores examples inside fenced code blocks or inline backticks.
     """
+    cleaned = re.sub(r"(?m)^[ \t]*(`{3,}|~{3,})[^\n]*\n.*?\n[ \t]*\1[ \t]*$", "", text or "", flags=re.DOTALL)
+    cleaned = re.sub(r"`[^`\n]+`", "", cleaned)
     calls = []
     # Match outer <tool name="...">...</tool>
     pattern = re.compile(r'<tool\s+name=["\']([\w\-]+)["\']>(.*?)</tool>', re.DOTALL)
-    for m in pattern.finditer(text):
+    for m in pattern.finditer(cleaned):
         name = m.group(1)
         body = m.group(2)
         params: Dict[str, Any] = {}

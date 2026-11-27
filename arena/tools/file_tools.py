@@ -10,6 +10,23 @@ from typing import Dict, Any
 from arena.tools.base import BaseTool
 
 
+def _resolve_workspace_path(cwd: str, raw_path: str, *, write: bool = False) -> Path:
+    """Resolve a path inside the active workspace root, blocking traversal and sensitive git metadata."""
+    root = Path(cwd).expanduser().resolve()
+    p = Path(raw_path).expanduser()
+    target = (p if p.is_absolute() else root / p).resolve()
+    if target != root and root not in target.parents:
+        raise PermissionError(f"Path '{raw_path}' escapes workspace '{root}'")
+    if write:
+        try:
+            parts = target.relative_to(root).parts
+        except ValueError:
+            parts = ()
+        if len(parts) >= 2 and parts[0] == ".git" and parts[1] in ("config", "hooks"):
+            raise PermissionError(f"Refusing to modify protected git metadata: '{raw_path}'")
+    return target
+
+
 class ReadFileTool(BaseTool):
     name = "read_file"
     description = "Read a file from disk with line numbers."
@@ -19,9 +36,10 @@ class ReadFileTool(BaseTool):
         if not raw_path:
             return "Error: No file path provided."
 
-        f = Path(raw_path)
-        if not f.is_absolute():
-            f = Path(self.cwd) / f
+        try:
+            f = _resolve_workspace_path(self.cwd, raw_path, write=False)
+        except PermissionError as e:
+            return f"Error: {e}"
 
         if not f.exists():
             return f"Error: File not found at '{raw_path}'"
@@ -60,9 +78,10 @@ class WriteFileTool(BaseTool):
         if not raw_path:
             return "Error: No file path provided."
 
-        f = Path(raw_path)
-        if not f.is_absolute():
-            f = Path(self.cwd) / f
+        try:
+            f = _resolve_workspace_path(self.cwd, raw_path, write=True)
+        except PermissionError as e:
+            return f"Error: {e}"
 
         try:
             f.parent.mkdir(parents=True, exist_ok=True)
@@ -87,9 +106,10 @@ class EditFileTool(BaseTool):
         if not old_text:
             return "Error: 'old_text' cannot be empty."
 
-        f = Path(raw_path)
-        if not f.is_absolute():
-            f = Path(self.cwd) / f
+        try:
+            f = _resolve_workspace_path(self.cwd, raw_path, write=True)
+        except PermissionError as e:
+            return f"Error: {e}"
 
         if not f.exists():
             return f"Error: File not found at '{raw_path}'"
@@ -121,13 +141,15 @@ class SearchTool(BaseTool):
         if not pattern:
             return "Error: No regex pattern provided."
 
-        target = Path(root_dir)
-        if not target.is_absolute():
-            target = Path(self.cwd) / target
+        try:
+            target = _resolve_workspace_path(self.cwd, root_dir, write=False)
+        except PermissionError as e:
+            return f"Error: {e}"
 
         if not target.exists():
             return f"Error: Path '{root_dir}' does not exist."
 
+        ws_root = Path(self.cwd).expanduser().resolve()
         results = []
         file_list = [target] if target.is_file() else list(target.rglob("*"))
         binary_extensions = {".exe", ".dll", ".bin", ".zip", ".gz", ".png", ".jpg", ".pyc", ".iso"}
@@ -138,6 +160,13 @@ class SearchTool(BaseTool):
             return f"Error: Invalid regex pattern '{pattern}': {e}"
 
         for f in file_list[:600]:
+            if f.is_symlink():
+                try:
+                    resolved = f.resolve()
+                    if resolved != ws_root and ws_root not in resolved.parents:
+                        continue
+                except OSError:
+                    continue
             if not f.is_file() or f.suffix.lower() in binary_extensions:
                 continue
             try:
@@ -147,7 +176,7 @@ class SearchTool(BaseTool):
                 for i, line in enumerate(content.splitlines(), 1):
                     if regex.search(line):
                         try:
-                            rel = f.relative_to(self.cwd)
+                            rel = f.relative_to(ws_root)
                         except ValueError:
                             rel = f
                         results.append(f"{rel}:{i}: {line.strip()[:140]}")
@@ -165,9 +194,10 @@ class LsTool(BaseTool):
 
     def execute(self, params: Dict[str, Any]) -> str:
         raw_path = params.get("path", ".")
-        target = Path(raw_path)
-        if not target.is_absolute():
-            target = Path(self.cwd) / target
+        try:
+            target = _resolve_workspace_path(self.cwd, raw_path, write=False)
+        except PermissionError as e:
+            return f"Error: {e}"
 
         if not target.exists():
             return f"Error: Path '{raw_path}' does not exist."

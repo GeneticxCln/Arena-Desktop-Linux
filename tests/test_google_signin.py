@@ -56,11 +56,12 @@ def test_signed_in_window_saves_the_exported_cookie(tmp_path, monkeypatch):
     web._google_on_signed_in({"signed_in": True, "email": "user@example.com",
                               "name": "User"})
 
+    from arena import crypto
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["current"] == data["accounts"][0]["id"]
     record = data["accounts"][0]
     assert record["email"] == "user@example.com"
-    assert record["cookie"] == COOKIE
+    assert crypto.decode_cookie(record["cookie"]) == COOKIE
     assert record["verified"] is True
     assert record["added_by"] == "window"
     assert Engine.closed is True, "the single-use sign-in window was not closed"

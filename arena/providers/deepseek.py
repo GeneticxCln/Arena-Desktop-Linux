@@ -26,7 +26,7 @@ class DeepSeekProvider(WebChatEngine):
     origin = "https://chat.deepseek.com/"
     window_title = "DeepSeek - Arena Desktop"
     cookie_urls = ("https://chat.deepseek.com/",)
-    auth_cookie_names = ("ds_session_id", "HWWAFSESID", "userToken")
+    auth_cookie_names = ("ds_session_id", "userToken")
     login_url_hints = ("/sign_in", "/login")
     conversation_url_hint = "/a/chat/s/"
     observed_fetch_patterns = ("/api/v0/chat/completion",)
@@ -187,10 +187,10 @@ class DeepSeekProvider(WebChatEngine):
             "models": models,
         }
 
-    def _apply_model_selection(self, model_id: str) -> None:
+    def _apply_model_selection(self, model_id: str) -> Optional[bool]:
         want = (model_id or "").strip().lower()
         if not want:
-            return
+            return True
         want_think = "think" in want or "reasoner" in want or "r1" in want
         want_search = "search" in want
         script = f"""(() => {{
@@ -218,11 +218,13 @@ class DeepSeekProvider(WebChatEngine):
           if (thinkBtn && isOn(thinkBtn) !== wantThink) {{ thinkBtn.click(); changed.push('think'); }}
           const searchBtn = findPill(/\\bsearch\\b/i);
           if (searchBtn && isOn(searchBtn) !== wantSearch) {{ searchBtn.click(); changed.push('search'); }}
-          return JSON.stringify({{ ok: true, changed }});
+          const found = Boolean(thinkBtn || searchBtn);
+          return JSON.stringify({{ ok: found, changed }});
         }})()"""
         res = self.eval_js(script, timeout=3.0)
         if isinstance(res, dict) and res.get("changed"):
             time.sleep(0.15)
+        return bool(isinstance(res, dict) and res.get("ok"))
 
     def _parse_observed_sse_chunk(self, raw_chunk: str, state: dict, *, flush: bool = False) -> list[dict]:
         """Parse DeepSeek's live SSE response stream (observation-only)."""
@@ -231,6 +233,7 @@ class DeepSeekProvider(WebChatEngine):
         if flush and buf.strip():
             buf += "\n"
         cur_path = str(state.get("path") or "")
+        frag_types: dict[int, str] = state.setdefault("frag_types", {})
         while "\n" in buf:
             line, buf = buf.split("\n", 1)
             line = line.strip()
@@ -256,21 +259,37 @@ class DeepSeekProvider(WebChatEngine):
                     events.append({"type": "text", "text": str(delta["content"])})
                 continue
 
-            # Format B (DeepSeek patch stream: {"p": "response/content", "o": "APPEND", "v": "..."})
+            # Format B (DeepSeek patch stream: {"p": "response/content"|"response/fragments"|"response/fragments/0/content", "o": "APPEND", "v": ...})
             if isinstance(pkt.get("p"), str):
                 cur_path = pkt["p"]
                 state["path"] = cur_path
             val = pkt.get("v")
             if isinstance(val, str) and val:
-                if "thinking" in cur_path or "reason" in cur_path:
+                frag_match = re.match(r"^response/fragments/(\d+)/content$", cur_path)
+                if frag_match:
+                    fidx = int(frag_match.group(1))
+                    ftype = frag_types.get(fidx, "")
+                    if "THINK" in ftype:
+                        events.append({"type": "reasoning", "text": val})
+                    else:
+                        events.append({"type": "text", "text": val})
+                elif "thinking" in cur_path or "reason" in cur_path:
                     events.append({"type": "reasoning", "text": val})
                 elif "content" in cur_path:
                     events.append({"type": "text", "text": val})
             elif isinstance(val, list):
-                for item in val:
+                base_idx = 0 if pkt.get("o") == "SET" else len(frag_types)
+                for offset, item in enumerate(val):
                     if not isinstance(item, dict):
                         continue
                     itype = str(item.get("type") or "").upper()
+                    fidx = item.get("id")
+                    if isinstance(fidx, int) and fidx >= 0:
+                        frag_idx = fidx - 1 if fidx >= 1 and 0 not in frag_types and base_idx == 0 and offset == 0 else offset + base_idx
+                    else:
+                        frag_idx = offset + base_idx
+                    if itype:
+                        frag_types[frag_idx] = itype
                     icontent = item.get("content")
                     if isinstance(icontent, str) and icontent:
                         if "THINK" in itype:

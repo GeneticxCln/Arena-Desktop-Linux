@@ -175,8 +175,6 @@ class ChatGPTProvider(WebChatEngine):
             "models": models,
         }
 
-    def _apply_model_selection(self, model_id: str) -> None:
-        want = (model_id or "").strip()
     def _apply_model_selection(self, model_id: str) -> Optional[bool]:
         want = (model_id or "").strip()
         if not want or want in ("auto", "default"):

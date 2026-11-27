@@ -31,16 +31,37 @@ SAFE_CMD = re.compile(
     r"^\s*(dir|ls|pwd|echo|type|cat|where|which|tree|git\s+(status|log|diff|show|branch)|"
     r"(python|py)(\s+-m)?\s+(pytest|unittest|--version)|node\s+(--version|-v)|"
     r"npm\s+(test|ls|-v|--version)|npm\s+run\s+(test|build|lint))\b", re.I)
-SHELL_META = re.compile(r"[;&|<>`$]|\b(del|erase|rm|rmdir|rd|format|curl|wget|iwr|invoke-webrequest|"
-                        r"powershell|pwsh|reg|shutdown|move|mv)\b", re.I)
+# Block newlines, NULs, shell metacharacters, dangerous flags/paths on otherwise-read commands
+SHELL_META = re.compile(
+    r"[\r\n\x00;&|<>`$]|\b(del|erase|rm|rmdir|rd|format|curl|wget|iwr|invoke-webrequest|"
+    r"powershell|pwsh|reg|shutdown|move|mv)\b", re.I)
+_UNSAFE_SAFE_CMD_ARGS = re.compile(
+    r"(--output\b|--ext-diff\b|--textconv\b|"
+    r"\bgit\s+branch\b.*\s(?:-[a-zA-Z]*[dDmMcCf]\b|--delete\b|--move\b|--copy\b|--force\b)|"
+    r"(?:^|\s)(?:~|\.\./|/etc/|/proc/|/root/|/home/|/var/|/usr/|\.ssh\b))",
+    re.I,
+)
 CATASTROPHIC = re.compile(
-    r"(\brm\s+-[a-z]*r[a-z]*\s+(/|~|\*|[a-z]:[\\/]?)(\s|$)|\bformat\s+[a-z]:|"
+    r"(\brm\s+(?:-[a-zA-Z]+\s+)*(?:-[a-zA-Z]*r[a-zA-Z]*|--recursive)(?:\s+-[a-zA-Z]+)*\s+"
+    r"(?:--no-preserve-root\s+)?(?:/\*?|~/?|\*|\$HOME\b|\$\{HOME\}|[a-z]:[\\/]?)(?:\s|$)|"
+    r"\bformat\s+[a-z]:|"
     r"\b(rd|rmdir)\s+/s\s+(/q\s+)?[a-z]:[\\/]?\s*$|\bdel\s+(/[a-z]\s+)*[a-z]:[\\/]\*|\bmkfs\b|"
     r"\bshutdown\b|:\(\)\s*\{|\bdiskpart\b|\bbcdedit\b|\bvssadmin\s+delete\b|\bcipher\s+/w)", re.I)
 
 
 def normalize(mode: Optional[str]) -> str:
     return mode if mode in MODES else "default"
+
+
+def _is_safe_auto_cmd(command: str) -> bool:
+    cmd = command or ""
+    if not SAFE_CMD.match(cmd):
+        return False
+    if SHELL_META.search(cmd):
+        return False
+    if _UNSAFE_SAFE_CMD_ARGS.search(cmd):
+        return False
+    return True
 
 
 def decide(mode: str, tool: str, inside: bool = True, command: str = "") -> str:
@@ -61,7 +82,7 @@ def decide(mode: str, tool: str, inside: bool = True, command: str = "") -> str:
         return "allow" if mode in ("acceptEdits", "auto") else "ask"
     if kind == "delete":
         return "allow" if mode == "auto" else "ask"
-    if mode == "auto" and SAFE_CMD.match(command or "") and not SHELL_META.search(command or ""):
+    if mode == "auto" and _is_safe_auto_cmd(command or ""):
         return "allow"
     return "ask"
 
@@ -72,12 +93,26 @@ class PermissionBroker:
     def __init__(self):
         self._lock = threading.Lock()
         self._pending: Dict[str, dict] = {}
-        self._always: set = set()
+        # Scoped per chat_id: {chat_id: set(kinds)} so "Allow in this chat" never leaks globally or to gateway.
+        self._always: Dict[str, set] = {}
 
-    def check(self, mode: str, tool: str, inside: bool = True, command: str = "") -> str:
+    def check(
+        self,
+        mode: str,
+        tool: str,
+        inside: bool = True,
+        command: str = "",
+        *,
+        chat_id: Optional[str] = None,
+        gateway: bool = False,
+    ) -> str:
         verdict = decide(mode, tool, inside, command)
-        if verdict == "ask" and inside and KIND.get(tool, "shell") in self._always:
-            return "allow"
+        if verdict == "ask" and inside and not gateway:
+            scope = str(chat_id or "")
+            kind = KIND.get(tool, "shell")
+            with self._lock:
+                if kind in self._always.get(scope, ()):
+                    return "allow"
         return verdict
 
     def ask(self, info: dict) -> str:
@@ -95,8 +130,10 @@ class PermissionBroker:
             if not item or item["decision"]:
                 return False
             item["decision"] = decision
-            if decision == "always":
-                self._always.add(KIND.get(item["info"].get("tool"), "shell"))
+            if decision == "always" and not item["info"].get("gateway"):
+                scope = str(item["info"].get("chat_id") or "")
+                kind = KIND.get(item["info"].get("tool"), "shell")
+                self._always.setdefault(scope, set()).add(kind)
             item["event"].set()
         return True
 
@@ -111,6 +148,17 @@ class PermissionBroker:
             self._pending.pop(pid, None)
         return "deny" if item["decision"] == "deny" else "allow"
 
+    def cancel(self, pid: str) -> bool:
+        """Resolve and remove a pending request (e.g. after timeout or disconnect)."""
+        with self._lock:
+            item = self._pending.pop(pid, None)
+            if not item:
+                return False
+            if not item["decision"]:
+                item["decision"] = "deny"
+            item["event"].set()
+        return True
+
     def pending(self) -> List[dict]:
         with self._lock:
             return [p["info"] for p in self._pending.values() if not p["decision"]]
@@ -121,5 +169,9 @@ class PermissionBroker:
             self.resolve(pid, "deny")
         return len(ids)
 
-    def reset_always(self) -> None:
-        self._always.clear()
+    def reset_always(self, chat_id: Optional[str] = None):
+        with self._lock:
+            if chat_id is None:
+                self._always.clear()
+            else:
+                self._always.pop(str(chat_id), None)

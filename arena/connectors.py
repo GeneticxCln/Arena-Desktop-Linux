@@ -16,6 +16,7 @@ import shlex
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -301,12 +302,15 @@ def build_preset_entry(preset_id: str, workspace: Path, values: Optional[Dict[st
 
 
 class ConnectorManager:
+    _RETRY_COOLDOWN_S = 60.0
+
     def __init__(self, workspace_provider: Callable[[], Path], config_path: Optional[Path] = None):
         self._workspace_provider = workspace_provider
         self._config_path = _config_path(config_path)
         self._clients: Dict[str, McpStdioClient] = {}
         self._signatures: Dict[str, str] = {}
         self._errors: Dict[str, str] = {}
+        self._failed_at: Dict[str, float] = {}
         self._lock = threading.RLock()
 
     @property
@@ -391,7 +395,7 @@ class ConnectorManager:
             "server_info": client.server_info if client else {},
         }
 
-    def connect(self, name: str, timeout: float = 45.0) -> Dict[str, Any]:
+    def connect(self, name: str, timeout: float = 45.0, *, respect_backoff: bool = False) -> Dict[str, Any]:
         servers = self._servers()
         server = servers.get(name)
         if server is None:
@@ -404,27 +408,49 @@ class ConnectorManager:
                 return self._summary(server)
         if not server.get("command"):
             raise ValueError("STDIO connector has no command")
+        sig = self._signature(server)
         with self._lock:
             existing = self._clients.get(name)
             if existing and existing.process and existing.process.poll() is None \
-                    and self._signatures.get(name) == self._signature(server):
+                    and self._signatures.get(name) == sig:
                 return self._summary(server)
-            self.disconnect(name)
+            if respect_backoff:
+                failed_ts = self._failed_at.get(name)
+                if failed_ts is not None and (time.monotonic() - failed_ts) < self._RETRY_COOLDOWN_S:
+                    return self._summary(server)
+            old_client = self._clients.pop(name, None)
+            self._signatures.pop(name, None)
             command = [expand_env_value(server["command"]), *[expand_env_value(arg) for arg in server.get("args", [])]]
             cwd = expand_env_value(server["cwd"]) if server.get("cwd") else str(self._workspace_provider())
-            client = McpStdioClient(command=command, env=expand_env(server.get("env")), cwd=cwd)
-            ok = client.start(timeout=timeout)
+            env = expand_env(server.get("env"))
+        if old_client:
+            try:
+                old_client.stop()
+            except Exception:
+                pass
+        client = McpStdioClient(command=command, env=env, cwd=cwd)
+        ok = client.start(timeout=timeout)
+        with self._lock:
             if ok:
+                prev = self._clients.get(name)
+                if prev is not None and prev is not client:
+                    try:
+                        prev.stop()
+                    except Exception:
+                        pass
                 self._clients[name] = client
-                self._signatures[name] = self._signature(server)
+                self._signatures[name] = sig
                 self._errors.pop(name, None)
+                self._failed_at.pop(name, None)
             else:
                 self._errors[name] = client.last_error or "MCP server did not start"
+                self._failed_at[name] = time.monotonic()
             return self._summary(server)
 
     def disconnect(self, name: str) -> None:
         client = self._clients.pop(name, None)
         self._signatures.pop(name, None)
+        self._failed_at.pop(name, None)
         if client:
             client.stop()
 
@@ -494,7 +520,7 @@ class ConnectorManager:
         for server in servers.values():
             if server.get("enabled") and server.get("transport") == "stdio":
                 try:
-                    self.connect(server["name"], timeout=timeout)
+                    self.connect(server["name"], timeout=timeout, respect_backoff=True)
                 except Exception:
                     continue
         return self.tool_map()

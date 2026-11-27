@@ -276,9 +276,10 @@ def start_install(cid: str) -> Dict[str, Any]:
         current = _jobs.get(cid) or {}
         if current.get("state") == "downloading":
             return {"ok": True, "already": True}
-    _set_job(cid, state="downloading", progress=0, error=None)
+        _jobs[cid] = {"state": "downloading", "progress": 0, "error": None}
     if cid == "cloudflared":
         threading.Thread(target=_install_cloudflared, daemon=True).start()
     else:
+        _set_job(cid, state="idle", progress=0, error=None)
         return {"ok": False, "error": f"No installer for: {cid}"}
     return {"ok": True}

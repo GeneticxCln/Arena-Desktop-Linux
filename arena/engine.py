@@ -85,7 +85,11 @@ _FETCH_JS = r"""
           try { body.recaptchaV3Token = await Promise.race([g.execute(key, {action: action}), wait(15000).then(function () { return null; })]); } catch (e) {}
         }
       }
+      window.__arenaFetchCtrls = window.__arenaFetchCtrls || {};
+      var ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      if (ctrl) window.__arenaFetchCtrls[rid] = ctrl;
       var res = await fetch(path, {method: method, credentials: 'include',
+        signal: ctrl ? ctrl.signal : undefined,
         headers: Object.assign({}, body ? {'Content-Type': 'application/json'} : {}, extraHeaders || {}),
         body: body ? JSON.stringify(body) : undefined});
       var hdrs = {};
@@ -106,6 +110,9 @@ _FETCH_JS = r"""
       }
       push('end', null);
     } catch (e) { push('error', String(e)); }
+    finally {
+      try { if (window.__arenaFetchCtrls) delete window.__arenaFetchCtrls[rid]; } catch (e) {}
+    }
   })();
   return 1;
 })(%s);
@@ -264,7 +271,7 @@ _PREFLIGHT_JS = r"""
     var tokenLen = 0, cx = null;
     try { tokenLen = await tokenProbe(); } catch (e) { trace.push('token_outer=' + String(e).slice(0, 60)); }
     try { cx = await acquireCx(); } catch (e) { trace.push('cx_outer=' + String(e).slice(0, 60)); }
-    push({cx: cx, cxLen: cx ? cx.length : 0, tokenLen: tokenLen, trace: trace});
+    push({probeId: opts.probeId || '', cx: cx, cxLen: cx ? cx.length : 0, tokenLen: tokenLen, trace: trace});
   })();
   return 1;
 })(__ARENA_OPTS__)
@@ -274,6 +281,7 @@ _VOTE_JS = r"""
 (function (opts) {
   var trace = [];
   function push(obj) {
+    if (obj && typeof obj === 'object' && opts && opts.probeId) obj.probeId = opts.probeId;
     try { window.pywebview.api.drive_event('vote', JSON.stringify(obj)); } catch (e) {}
   }
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
@@ -437,6 +445,7 @@ _ARCHIVE_JS = r"""
 (function (opts) {
   var trace = [];
   function push(obj) {
+    if (obj && typeof obj === 'object' && opts && opts.probeId) obj.probeId = opts.probeId;
     try { window.pywebview.api.drive_event('archive', JSON.stringify(obj)); } catch (e) {}
   }
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
@@ -788,19 +797,30 @@ class EngineResponse:
         self._done = True
         self._engine._close(self._rid)
 
+    def close(self):
+        if not self._done:
+            self._done = True
+            self._engine.abort_stream(self._rid)
+        else:
+            self._engine._close(self._rid)
+
     @property
     def ok(self) -> bool:
         return 200 <= self.status_code < 400
 
     def iter_text(self):
-        while not self._done:
-            kind, data = self._next()
-            if kind == "chunk":
-                yield str(data)
-            else:
-                if kind == "error":
-                    self.error = str(data)
-                self._finish()
+        try:
+            while not self._done:
+                kind, data = self._next()
+                if kind == "chunk":
+                    yield str(data)
+                else:
+                    if kind == "error":
+                        self.error = str(data)
+                    self._finish()
+        finally:
+            if not self._done:
+                self.close()
 
     def iter_content(self, chunk_size=None):
         for text in self.iter_text():
@@ -830,6 +850,7 @@ class BrowserEngine:
         self._imported = False
         self._drive_lock = threading.Lock()
         self._drive_queue: Optional["queue.Queue"] = None
+        self._drive_probe_id: Optional[str] = None
 
     def bridge(self) -> _Bridge:
         return _Bridge(self)
@@ -965,12 +986,14 @@ class BrowserEngine:
         """Show one arena.ai path in the separate engine window."""
         if not self.window or not isinstance(path, str) or not path.startswith("/") or path.startswith("//"):
             return False
+        self._abort_all_streams("arena.ai window navigated")
         self.loaded = False
         self.window.load_url(contracts.ORIGIN + path)
         self._present()
         return True
 
     def show_cloudflare(self):
+        self._abort_all_streams("arena.ai Cloudflare check started")
         self.loaded = False
         self.challenge = "cloudflare"
         self.window.load_url(contracts.ORIGIN)
@@ -1048,6 +1071,7 @@ class BrowserEngine:
               "pairs.forEach(function(p){document.cookie=p+'; path=/; max-age=34560000; secure; samesite=lax';});"
               "location.reload();return 1})(%s,%s,%s)") % (
             json.dumps(names), json.dumps(pairs), json.dumps(contracts.AUTH_COOKIE_PREFIX))
+        self._abort_all_streams("arena.ai session reloaded")
         self._imported = True
         self.loaded = False
         self.window.evaluate_js(js)
@@ -1073,6 +1097,7 @@ class BrowserEngine:
         """
         if not self.window:
             return
+        self._abort_all_streams("arena.ai session cleared")
         self._imported = True
         self.loaded = False
         js = ("(function(){document.cookie.split(';').forEach(function(c){var n=c.split('=')[0].trim();"
@@ -1086,6 +1111,7 @@ class BrowserEngine:
     def logout(self):
         if not self.window:
             return
+        self._abort_all_streams("arena.ai signed out")
         self._imported = True
         self.loaded = False
         js = ("(async function(){try{await fetch(%s,{method:'POST',credentials:'include'})}catch(e){}"
@@ -1161,6 +1187,7 @@ class BrowserEngine:
                     return result
                 LOG.info("preflight: no cx on %s; navigating to /agent to load the module",
                          state.get("path"))
+                self._abort_all_streams("arena.ai navigated to /agent")
                 self.loaded = False
                 self.window.load_url(contracts.ORIGIN + "/agent")
                 if not self.wait_ready(60):
@@ -1172,10 +1199,12 @@ class BrowserEngine:
         if not self.wait_ready(30):
             return None
         q: "queue.Queue" = queue.Queue()
+        probe_id = uuid.uuid4().hex
+        self._drive_probe_id = probe_id
         self._drive_queue = q
         try:
             opts = json.dumps({"action": action, "v3key": contracts.KEYS["v3"],
-                               "moduleId": _CX_MODULE_ID})
+                               "moduleId": _CX_MODULE_ID, "probeId": probe_id})
             self.run_script(_PREFLIGHT_JS.replace("__ARENA_OPTS__", opts))
             deadline = time.time() + timeout
             while time.time() < deadline:
@@ -1188,6 +1217,7 @@ class BrowserEngine:
             return None
         finally:
             self._drive_queue = None
+            self._drive_probe_id = None
 
     # -- Battle pairwise vote --------------------------------------------------
     def pairwise_vote(self, args: dict, timeout: float = 45) -> dict:
@@ -1226,11 +1256,13 @@ class BrowserEngine:
         if not self.wait_ready(30):
             return None
         q: "queue.Queue" = queue.Queue()
+        probe_id = uuid.uuid4().hex
+        self._drive_probe_id = probe_id
         self._drive_queue = q
         try:
             opts = json.dumps({"args": args, "v3key": contracts.KEYS["v3"],
                                "moduleId": _VOTE_MODULE_ID, "actionId": _VOTE_ACTION_ID,
-                               "recaptchaAction": _VOTE_RECAPTCHA_ACTION})
+                               "recaptchaAction": _VOTE_RECAPTCHA_ACTION, "probeId": probe_id})
             self.run_script(_VOTE_JS.replace("__ARENA_OPTS__", opts))
             deadline = time.time() + timeout
             while time.time() < deadline:
@@ -1243,6 +1275,7 @@ class BrowserEngine:
             return None
         finally:
             self._drive_queue = None
+            self._drive_probe_id = None
 
     # -- chat archive --------------------------------------------------------
     def archive_evaluation(self, session_id: str, timeout: float = 40) -> dict:
@@ -1273,12 +1306,15 @@ class BrowserEngine:
         if not session_id or not self.wait_ready(30):
             return None
         q: "queue.Queue" = queue.Queue()
+        probe_id = uuid.uuid4().hex
+        self._drive_probe_id = probe_id
         self._drive_queue = q
         try:
             opts = json.dumps({"sessionId": session_id,
                                "moduleId": _VOTE_MODULE_ID,
                                "actionId": _ARCHIVE_ACTION_ID,
-                               "actionName": _ARCHIVE_ACTION_NAME})
+                               "actionName": _ARCHIVE_ACTION_NAME,
+                               "probeId": probe_id})
             self.run_script(_ARCHIVE_JS.replace("__ARENA_OPTS__", opts))
             deadline = time.time() + timeout
             while time.time() < deadline:
@@ -1291,6 +1327,7 @@ class BrowserEngine:
             return None
         finally:
             self._drive_queue = None
+            self._drive_probe_id = None
 
     # -- native Agent page drive -------------------------------------------
     def _on_drive_event(self, kind, payload):
@@ -1332,6 +1369,10 @@ class BrowserEngine:
                      ("ok", "set", "via", "cleared", "stage", "path")})
         q = self._drive_queue
         if q is not None:
+            expected_id = self._drive_probe_id
+            got_id = data.get("probeId") if isinstance(data, dict) else None
+            if expected_id and got_id and got_id != expected_id:
+                return
             q.put((kind, data))
 
     def _drive_state(self) -> dict:
@@ -1398,6 +1439,7 @@ class BrowserEngine:
             if (state.get("path") or "").rstrip("/") != target:
                 notify("stage", "Arena Agent · opening the agent page")
                 LOG.info("drive: navigating %s -> %s", state.get("path"), target)
+                self._abort_all_streams("arena.ai navigated to /agent")
                 self.loaded = False
                 self.window.load_url(contracts.ORIGIN + target)
                 if not self.wait_ready(60):
@@ -1539,6 +1581,32 @@ class BrowserEngine:
     def _close(self, rid):
         with self._lock:
             self._streams.pop(rid, None)
+
+    def abort_stream(self, rid: str) -> None:
+        """Abort an in-page fetch() stream and drop its local queue."""
+        self._close(rid)
+        if not self.window or not rid:
+            return
+        try:
+            js = (
+                "(function(rid){var m=window.__arenaFetchCtrls;"
+                "if(m&&m[rid]){try{m[rid].abort();}catch(e){}delete m[rid];}return 1})(%s)"
+            ) % json.dumps(rid)
+            run = getattr(self.window, "run_js", None) or self.window.evaluate_js
+            run(js)
+        except Exception:
+            pass
+
+    def _abort_all_streams(self, reason: str = "page navigated") -> None:
+        """Fail all in-flight streams cleanly before navigating or reloading the page."""
+        with self._lock:
+            items = list(self._streams.items())
+            self._streams.clear()
+        for _rid, st in items:
+            try:
+                st["q"].put(("error", reason))
+            except Exception:
+                pass
 
     # -- human verification -----------------------------------------------
     def request_human_check(self):

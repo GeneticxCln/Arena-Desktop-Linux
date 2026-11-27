@@ -29,26 +29,39 @@ _SECRET_SERVICE = "arena-desktop"
 _SECRET_ACCOUNT = "master-key"
 _LINUX_KEY_CACHE: Optional[bytes] = None
 _LINUX_KEYRING_CHECKED = False
+_LAST_LOOKUP_STATUS = "missing"
 
 
-def _secret_tool_lookup() -> Optional[bytes]:
+def _secret_tool_lookup_status() -> tuple[Optional[bytes], str]:
+    """Return ``(key_bytes, status)`` where status is ``'ok'``, ``'missing'``, or ``'error'``."""
     tool = shutil.which("secret-tool")
     if not tool:
-        return None
+        return None, "error"
     try:
         proc = subprocess.run(
             [tool, "lookup", "service", _SECRET_SERVICE, "account", _SECRET_ACCOUNT],
             capture_output=True, text=True, timeout=4,
         )
     except Exception:
-        return None
-    if proc.returncode != 0 or not proc.stdout.strip():
-        return None
-    try:
-        raw = base64.b64decode(proc.stdout.strip(), validate=True)
-        return raw if len(raw) == 32 else None
-    except (ValueError, binascii.Error):
-        return None
+        return None, "error"
+    if proc.returncode == 0 and proc.stdout.strip():
+        try:
+            raw = base64.b64decode(proc.stdout.strip(), validate=True)
+            return (raw, "ok") if len(raw) == 32 else (None, "error")
+        except (ValueError, binascii.Error):
+            return None, "error"
+    # secret-tool exits 1 with empty stderr when the entry genuinely does not exist;
+    # non-empty stderr (e.g. locked keyring / D-Bus failure) must NOT trigger key rotation!
+    if proc.returncode == 1 and not (proc.stderr or "").strip():
+        return None, "missing"
+    return None, "error"
+
+
+def _secret_tool_lookup() -> Optional[bytes]:
+    global _LAST_LOOKUP_STATUS
+    key, status = _secret_tool_lookup_status()
+    _LAST_LOOKUP_STATUS = status
+    return key
 
 
 def _secret_tool_store(key: bytes) -> bool:
@@ -69,17 +82,19 @@ def _secret_tool_store(key: bytes) -> bool:
 
 def _linux_master_key(create: bool = False) -> Optional[bytes]:
     """Return the 32-byte AES-256 master key from Linux Secret Service, or None."""
-    global _LINUX_KEY_CACHE, _LINUX_KEYRING_CHECKED
+    global _LINUX_KEY_CACHE, _LINUX_KEYRING_CHECKED, _LAST_LOOKUP_STATUS
     if not LINUX_KEYRING_ENABLED:
         return None
     if _LINUX_KEY_CACHE is not None:
         return _LINUX_KEY_CACHE
+    _LAST_LOOKUP_STATUS = "missing"
     existing = _secret_tool_lookup()
     if existing is not None:
         _LINUX_KEY_CACHE = existing
         _LINUX_KEYRING_CHECKED = True
         return existing
-    if not create or _LINUX_KEYRING_CHECKED:
+    # Never overwrite an existing key when the real keyring timed out or is locked!
+    if _LAST_LOOKUP_STATUS == "error" or not create or _LINUX_KEYRING_CHECKED:
         return None
     _LINUX_KEYRING_CHECKED = True
     candidate = os.urandom(32)

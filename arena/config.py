@@ -61,21 +61,47 @@ def restrict_permissions(path: Path, mode: int = 0o600) -> None:
             pass
 
 
+_CONFIG_LOCK = None
+
+
+def _cfg_lock():
+    global _CONFIG_LOCK
+    if _CONFIG_LOCK is None:
+        import threading as _t
+        _CONFIG_LOCK = _t.RLock()
+    return _CONFIG_LOCK
+
+
 def load_config() -> Dict[str, Any]:
-    """Load configuration from disk."""
-    ensure_config_dir()
-    if not CONFIG_FILE.exists():
-        return {}
-    try:
-        return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    """Load configuration from disk safely under a process lock."""
+    with _cfg_lock():
+        ensure_config_dir()
+        if not CONFIG_FILE.exists():
+            return {}
+        try:
+            return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
 
 
 def save_config(cfg: Dict[str, Any]) -> None:
-    """Save configuration to disk."""
-    ensure_config_dir()
-    CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    """Atomically save configuration to disk (temp file + os.replace) under a lock."""
+    with _cfg_lock():
+        ensure_config_dir()
+        tmp = CONFIG_FILE.with_suffix(f".tmp.{os.getpid()}")
+        payload = json.dumps(cfg, indent=2)
+        tmp.write_text(payload, encoding="utf-8")
+        restrict_permissions(tmp)
+        os.replace(tmp, CONFIG_FILE)
+
+
+def update_config(mutator) -> Dict[str, Any]:
+    """Atomic read-modify-write helper for config.json."""
+    with _cfg_lock():
+        cfg = load_config()
+        mutator(cfg)
+        save_config(cfg)
+        return cfg
 
 
 def get_cookie() -> Optional[str]:
