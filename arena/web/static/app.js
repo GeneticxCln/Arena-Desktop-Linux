@@ -3685,6 +3685,8 @@ You can start with a more structured option: one script, short captions, and a c
         live: Boolean(res?.live),
         source: String(res?.source || (res?.live ? 'live' : 'default')),
         fetchedAt: Number(res?.fetched_at || 0),
+        // false only when the provider window shows its sign-in page.
+        signedIn: res?.signed_in !== false,
         loading: false,
         error: res?.ok === false ? String(res?.error || 'Could not load models') : null,
       };
@@ -3817,14 +3819,26 @@ You can start with a more structured option: one script, short captions, and a c
         }
       }
       const count = `${models.length} model${models.length === 1 ? '' : 's'}`;
+      const signedOut = !entry.loading && entry.signedIn === false;
       const statusText = entry.loading
         ? 'Refreshing…'
-        : entry.live
+        : signedOut
+          ? `Signed out of ${meta.label} · sign in to see your models`
+          : entry.live
           ? `Live · ${count}`
           : entry.source === 'cached'
             ? `Cached · ${count} from ${entry.fetchedAt ? relativeTime(entry.fetchedAt * 1000) : 'earlier'} · ${meta.label} did not answer now`
             : (isLocalAgentTrack(track) ? 'Default list' : 'Default · open window & refresh for live models');
       foot.appendChild(el('span', { class: 'setting-desc', style: { fontSize: '11px', margin: '0' }, text: statusText }));
+      if (signedOut) {
+        foot.appendChild(el('button', {
+          class: 'button button-small', type: 'button',
+          onclick: () => {
+            closePopover();
+            void API.providerSignIn(track).catch((err) => toast(errorMessage(err), 'error', meta.label));
+          }
+        }, el('span', { text: 'Sign in' })));
+      }
       foot.appendChild(el('button', {
         class: 'button button-small button-quiet', type: 'button', disabled: Boolean(entry.loading),
         onclick: () => { void loadProviderModels(track, { force: true, quiet: false, syncActive: true }).then(renderOptions); }
@@ -7120,7 +7134,9 @@ You can start with a more structured option: one script, short captions, and a c
       const selected = selectedProviderModel(state.track);
       const label = entry.loading && !selected
         ? `Loading ${meta.label} models…`
-        : (selected ? selected.name : `${meta.label} default`);
+        : entry.signedIn === false
+          ? `Sign in to ${meta.label}`
+          : (selected ? selected.name : `${meta.label} default`);
       const chip = el('button', {
         class: 'composer-chip model-chip provider-model-chip',
         type: 'button',

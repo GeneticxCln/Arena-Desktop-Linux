@@ -12,7 +12,7 @@ import logging
 import re
 import time
 import uuid
-from typing import Iterator, Optional
+from collections.abc import Iterator
 
 from arena import diag
 from arena.providers.web_engine import WebChatEngine
@@ -138,7 +138,7 @@ class ClaudeProvider(WebChatEngine):
                 return self._org_id, chosen
         return "", {}
 
-    def _probe_live_models(self) -> Optional[dict]:
+    def _probe_live_models(self) -> dict | None:
         """Retrieve live Claude models from signed-in session APIs + live DOM dropdown."""
         models: list[dict] = []
         seen: set[str] = set()
@@ -164,7 +164,8 @@ class ClaudeProvider(WebChatEngine):
             })
 
         # 1. Inspect claude.ai's signed-in bootstrap / account JSON for real model slugs
-        self._collect_account_models(_add)
+        api_notes = self._collect_account_models(_add)
+        api_count = len(models)
 
         # 2. Also read the live model selector button & dropdown in claude.ai's DOM (pure ASCII JS)
         script = r"""(() => {
@@ -258,6 +259,12 @@ class ClaudeProvider(WebChatEngine):
                 if not matched_existing:
                     _add(name, name, str(m.get("description") or ""), bool(m.get("active")))
 
+        # Host and first path segment only: later segments hold chat ids.
+        path = "/".join((self.page_url() or "").split("?", 1)[0].split("#", 1)[0].split("/")[:4])
+        diag.note(
+            f"claude models probe: page={path or '-'} api[{', '.join(api_notes)}] api_models={api_count} "
+            f"dom_trigger={'yes' if dom_active else 'no'} dom_items={len(dom_models)} total={len(models)}"
+        )
         if not models:
             return None
         active_id = next((m["id"] for m in models if m.get("active")), "") or dom_active or models[0]["id"]
@@ -273,7 +280,7 @@ class ClaudeProvider(WebChatEngine):
         if isinstance(obj, dict):
             # Look for model config dicts: {"model": "claude-...", "name": "..."} or {"id": "claude-..."}
             raw_slug = obj.get("model") or obj.get("model_id") or obj.get("slug") or obj.get("id")
-            if isinstance(raw_slug, str) and re.match(r"^claude-[a-z0-9._-]+$", raw_slug.strip(), re.I):
+            if isinstance(raw_slug, str) and re.match(r"^claude-[a-z0-9._-]+$", raw_slug.strip(), re.IGNORECASE):
                 slug = raw_slug.strip()
                 if not obj.get("hidden") and not obj.get("is_hidden"):
                     name = str(obj.get("display_name") or obj.get("name") or obj.get("title") or _humanize_claude_slug(slug))
@@ -286,24 +293,31 @@ class ClaudeProvider(WebChatEngine):
                     for hint in ("model", "config", "default", "account", "org", "membership", "settings", "feature")
                 ):
                     self._collect_claude_models_from_json(v, add_fn, depth + 1)
-                elif isinstance(v, str) and "model" in str(k).lower() and re.match(r"^claude-[a-z0-9._-]+$", v.strip(), re.I):
+                elif isinstance(v, str) and "model" in str(k).lower() and re.match(r"^claude-[a-z0-9._-]+$", v.strip(), re.IGNORECASE):
                     slug = v.strip()
                     add_fn(slug, _humanize_claude_slug(slug), "", "default" in str(k).lower())
         elif isinstance(obj, list):
             for item in obj[:60]:
-                if isinstance(item, str) and re.match(r"^claude-[a-z0-9._-]+$", item.strip(), re.I):
+                if isinstance(item, str) and re.match(r"^claude-[a-z0-9._-]+$", item.strip(), re.IGNORECASE):
                     slug = item.strip()
                     add_fn(slug, _humanize_claude_slug(slug), "", False)
                 elif isinstance(item, (dict, list)):
                     self._collect_claude_models_from_json(item, add_fn, depth + 1)
 
-    def _collect_account_models(self, add_fn) -> None:
-        """Read real model slugs from claude.ai's signed-in bootstrap and account JSON."""
+    def _collect_account_models(self, add_fn) -> list[str]:
+        """Read real model slugs from claude.ai's signed-in bootstrap and account JSON.
+
+        Returns one short "endpoint=status" note per endpoint for the probe log.
+        """
+        notes = []
         for endpoint in ("/api/bootstrap", "/api/account"):
             resp = self.fetch_json(endpoint, timeout=4.5)
             data = resp.get("data")
+            kind = type(data).__name__
+            notes.append(f"{endpoint}={resp.get('status') or ('ok' if resp.get('ok') else resp.get('error') or 'fail')}:{kind}")
             if resp.get("ok") and isinstance(data, (dict, list)):
                 self._collect_claude_models_from_json(data, add_fn)
+        return notes
 
     def _resolve_api_model(self, model_id: str) -> str:
         """The API slug for a picked model, or "" when it has none.
@@ -350,7 +364,7 @@ class ClaudeProvider(WebChatEngine):
         conversation_url: str = "",
         model: str = "",
         stop_event=None,
-    ) -> Optional[Iterator[dict]]:
+    ) -> Iterator[dict] | None:
         """Stream Claude directly via claude.ai's signed-in same-origin SSE API."""
         if model and model.strip().lower() != "default" and not self._resolve_api_model(model):
             # Only the page's own model menu knows this label: the API call would
@@ -512,7 +526,7 @@ class ClaudeProvider(WebChatEngine):
 
         return _gen()
 
-    def _apply_model_selection(self, model_id: str) -> Optional[bool]:
+    def _apply_model_selection(self, model_id: str) -> bool | None:
         want = (model_id or "").strip()
         if not want or want.lower() == "default":
             return True

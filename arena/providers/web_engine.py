@@ -28,23 +28,23 @@ import re
 import threading
 import time
 import uuid
-from typing import Callable, Iterator, Optional
+from collections.abc import Callable, Iterator
 
 from arena import diag
 from arena.providers.base import Provider
 
 LOG = logging.getLogger("arena.providers.web")
 
-_WINDOW_FACTORY: Optional[Callable[[str, str, bool], object]] = None
+_WINDOW_FACTORY: Callable[[str, str, bool], object] | None = None
 
 
-def set_window_factory(factory: Optional[Callable[[str, str, bool], object]]) -> None:
+def set_window_factory(factory: Callable[[str, str, bool], object] | None) -> None:
     """Register the desktop WebView window creator from ``arena/desktop.py``."""
     global _WINDOW_FACTORY
     _WINDOW_FACTORY = factory
 
 
-def get_window_factory() -> Optional[Callable[[str, str, bool], object]]:
+def get_window_factory() -> Callable[[str, str, bool], object] | None:
     return _WINDOW_FACTORY
 
 
@@ -151,9 +151,9 @@ class WebChatEngine(Provider):
         self.last_error: str = ""
         self._lock = threading.Lock()
         self._turn_lock = threading.Lock()
-        self._signed_in_cache: Optional[bool] = None
+        self._signed_in_cache: bool | None = None
         self._signed_in_at: float = 0.0
-        self._models_cache: Optional[dict] = None
+        self._models_cache: dict | None = None
         self._models_at: float = 0.0
         self._models_probe_lock = threading.Lock()
         self._popup_windows: list = []
@@ -642,8 +642,8 @@ class WebChatEngine(Provider):
         url: str,
         *,
         method: str = "GET",
-        body: Optional[dict] = None,
-        headers: Optional[dict] = None,
+        body: dict | None = None,
+        headers: dict | None = None,
         timeout: float = 8.0,
     ) -> dict:
         """Execute a same-origin fetch() inside the WebKitGTK page and return status+data."""
@@ -707,8 +707,8 @@ class WebChatEngine(Provider):
         url: str,
         *,
         method: str = "POST",
-        body: Optional[dict] = None,
-        headers: Optional[dict] = None,
+        body: dict | None = None,
+        headers: dict | None = None,
         timeout: float = 180.0,
         stop_event=None,
     ) -> Iterator[dict]:
@@ -1044,11 +1044,11 @@ class WebChatEngine(Provider):
     def _fallback_models(self) -> list[dict]:
         return [dict(m) for m in self.default_models]
 
-    def _probe_live_models(self) -> Optional[dict]:
+    def _probe_live_models(self) -> dict | None:
         """Override in subclasses to query live models from the signed-in session."""
         return None
 
-    def _apply_model_selection(self, model_id: str) -> Optional[bool]:
+    def _apply_model_selection(self, model_id: str) -> bool | None:
         """Override to switch the provider page to ``model_id``.
 
         Return True once the page shows that model, False when it could not be
@@ -1056,7 +1056,7 @@ class WebChatEngine(Provider):
         """
         return None
 
-    def _known_model_id(self, want: str) -> Optional[str]:
+    def _known_model_id(self, want: str) -> str | None:
         """The listed id ``want`` refers to, or None when a live list lacks it.
 
         Without a live list there is nothing to check against, so ``want`` passes.
@@ -1135,6 +1135,10 @@ class WebChatEngine(Provider):
                 self._wait_for_composer(timeout=6.0 if force else 3.5)
         if self.window is None:
             return self._cached_or_default_models()
+        if self._is_login_url(self.page_url()):
+            # The window shows the provider's sign-in page: there is no model
+            # list to read, and the placeholder must not pass for one.
+            return {**self._cached_or_default_models(), "signed_in": False}
         # Never touch the live provider DOM (e.g. clicking dropdowns / Escape) while a turn is running.
         if not self._turn_lock.acquire(blocking=False):
             return self._cached_or_default_models()
@@ -1153,6 +1157,7 @@ class WebChatEngine(Provider):
             "provider": self.id,
             "live": True,
             "source": "live",
+            "signed_in": True,
             "active_model": str(live_res.get("active_model") or ""),
             "models": list(live_res["models"]),
             "fetched_at": now,
@@ -1470,7 +1475,7 @@ class WebChatEngine(Provider):
         conversation_url: str = "",
         model: str = "",
         stop_event=None,
-    ) -> Optional[Iterator[dict]]:
+    ) -> Iterator[dict] | None:
         """Optional direct same-origin API streaming hook (used by Claude).
 
         Return an iterator if handled directly via API, or ``None`` to fall back
@@ -1478,7 +1483,7 @@ class WebChatEngine(Provider):
         """
         return None
 
-    def _poll_conversation_api(self, href: str) -> Optional[dict]:
+    def _poll_conversation_api(self, href: str) -> dict | None:
         """Optional same-origin conversation GET fallback for hidden GTK windows.
 
         Returns ``{"count": int, "text": str, "reasoning": str, "streaming": bool}``
@@ -1756,7 +1761,7 @@ class WebChatEngine(Provider):
         obs_text_acc = ""
         obs_reason_acc = ""
 
-        def _handle_obs_event(ev: dict) -> Optional[dict]:
+        def _handle_obs_event(ev: dict) -> dict | None:
             nonlocal obs_used, emitted_text, emitted_reasoning, last_growth_at, saved_href
             nonlocal obs_text_acc, obs_reason_acc
             et = ev.get("type")

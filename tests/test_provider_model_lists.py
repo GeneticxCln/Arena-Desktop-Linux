@@ -1,4 +1,5 @@
 """Provider model lists: live vs cached vs default, honest selection results."""
+
 from __future__ import annotations
 
 from arena.providers.claude import ClaudeProvider
@@ -11,7 +12,9 @@ class _FakeProvider(WebChatEngine):
     id = "fake"
     name = "Fake"
     origin = "https://fake.example"
-    default_models = ({"id": "default", "name": "Fake (Account default)", "capabilities": ["Text"]},)
+    default_models = (
+        {"id": "default", "name": "Fake (Account default)", "capabilities": ["Text"]},
+    )
 
     def __init__(self) -> None:
         super().__init__()
@@ -121,7 +124,12 @@ def test_qwen_marks_the_model_the_page_has_selected_as_active(monkeypatch):
         "fetch_json",
         lambda ep, headers=None, timeout=4.5: {
             "ok": True,
-            "data": {"data": [{"id": "qwen3-max", "name": "Qwen3 Max"}, {"id": "qwq-32b", "name": "QwQ 32B"}]},
+            "data": {
+                "data": [
+                    {"id": "qwen3-max", "name": "Qwen3 Max"},
+                    {"id": "qwq-32b", "name": "QwQ 32B"},
+                ]
+            },
         },
     )
     live = qw._probe_live_models()
@@ -129,7 +137,9 @@ def test_qwen_marks_the_model_the_page_has_selected_as_active(monkeypatch):
     assert [m["active"] for m in live["models"]] == [False, True]
 
 
-def test_claude_label_without_api_slug_uses_the_page_not_the_account_default(monkeypatch):
+def test_claude_label_without_api_slug_uses_the_page_not_the_account_default(
+    monkeypatch,
+):
     cl = ClaudeProvider()
     cl.window = object()
     calls: list[str] = []
@@ -139,7 +149,10 @@ def test_claude_label_without_api_slug_uses_the_page_not_the_account_default(mon
         if url == "/api/organizations":
             return {"ok": True, "data": [{"uuid": "org-1", "capabilities": ["chat"]}]}
         if url in ("/api/bootstrap", "/api/account"):
-            return {"ok": True, "data": {"models": [{"model": "claude-opus-5-5", "name": "Opus 5.5"}]}}
+            return {
+                "ok": True,
+                "data": {"models": [{"model": "claude-opus-5-5", "name": "Opus 5.5"}]},
+            }
         return {"ok": True, "status": 201, "data": {"uuid": "conv-1"}}
 
     monkeypatch.setattr(cl, "fetch_json", fake_fetch)
@@ -166,7 +179,10 @@ def test_model_routes_carry_source_and_reject_unknown_ids(monkeypatch):
 
     prov.live = None
     cached = client.get("/api/providers/fake/models?refresh=1").get_json()
-    assert cached["source"] == "cached" and [m["id"] for m in cached["models"]] == ["m-1", "m-2"]
+    assert cached["source"] == "cached" and [m["id"] for m in cached["models"]] == [
+        "m-1",
+        "m-2",
+    ]
 
     bad = client.post("/api/providers/fake/model", json={"model_id": "ghost"})
     assert bad.status_code == 409
@@ -192,12 +208,37 @@ def test_list_calls_during_a_running_check_wait_for_its_result():
 
     prov._probe_live_models = slow_probe
     results: list[dict] = []
-    first = threading.Thread(target=lambda: results.append(prov.list_models(force=True)))
+    first = threading.Thread(
+        target=lambda: results.append(prov.list_models(force=True))
+    )
     first.start()
     assert started.wait(2)
     second = prov.list_models(force=True)  # the Refresh click
     first.join(2)
 
     assert second["source"] == "live"
-    assert [m["id"] for m in second["models"]] == ["claude-opus-5-5", "claude-sonnet-5-5"]
+    assert [m["id"] for m in second["models"]] == [
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+    ]
     assert results and results[0]["source"] == "live"
+
+
+def test_signed_out_provider_says_so_instead_of_showing_a_default_list():
+    """claude.ai on its /login page: the picker must say "signed out", not offer
+    the account-default placeholder as if it were the model list."""
+    prov = _FakeProvider()
+    prov.login_url_hints = ("/login",)
+    prov.page_url = lambda: "https://fake.example/login?returnTo=/new"
+    probed: list[bool] = []
+    prov._probe_live_models = lambda: probed.append(True) or _live("m-1")
+
+    res = prov.list_models(force=True)
+    assert res["signed_in"] is False
+    assert res["live"] is False
+    assert res["source"] == "default"
+    assert probed == []  # nothing to read on a sign-in page
+
+    prov.page_url = lambda: "https://fake.example/new"
+    back = prov.list_models(force=True)
+    assert back["source"] == "live" and back["signed_in"] is True
