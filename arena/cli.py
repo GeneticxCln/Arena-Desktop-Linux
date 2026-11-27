@@ -5,13 +5,10 @@ Main command implementations and CLI entry point for Arena Code.
 import json
 import os
 import sys
-import time
 import webbrowser
-from pathlib import Path
 from typing import Optional, Dict, Any
 
 from rich.panel import Panel
-from rich.table import Table
 
 from arena.console import con
 from arena.config import (
@@ -25,13 +22,12 @@ from arena.auth import (
 from arena.models import (
     sync_models, fetch_models, get_popular_models,
     format_models_table, display_available_models,
-    get_models_for_modality, check_model_capability,
-    MODALITIES, MAX_ROUTER_ID
+    MAX_ROUTER_ID
 )
 from arena.api import ArenaClient, _cdp_find_arena_tab
 from arena.tools import ToolRegistry, parse_tool_calls
 from arena.ui import (
-    print_banner, render_markdown, print_tool_call, print_tool_result,
+    print_banner, print_tool_call, print_tool_result,
     print_deployment_preview, print_search_sources, get_chat_input
 )
 from arena.menu import show_main_menu

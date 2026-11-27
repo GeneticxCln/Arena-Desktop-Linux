@@ -1,3 +1,31 @@
+## Arena Desktop v7.5.0 (Native Linux)
+
+Introduces **Skills** for the Local Agent and web provider tabs, upgrades **Freebuff Web (`/app`)** model discovery, and resolves **68 audited bugs** across security, backend concurrency, providers/streaming, frontend UI, and Linux packaging.
+
+### Highlights in 7.5.0
+
+- **Skills for Local Agent & Web Provider Tabs (`arena/skills.py`, `arena/builtin_skills`)**:
+  - Added built-in and per-project skills (`.arena/skills` and `.codify/skills`), `use_skill` tool support, and the Settings → Skills management panel.
+- **Freebuff Web (`/app`) & Provider Picker Reliability**:
+  - Upgraded Freebuff to open `freebuff.com/app`, read its live model dialog without reloading the workspace, recognize `/app/<id>` and `/chat/<id>` thread URLs, and accurately detect signed-out guests across provider pickers.
+- **Security Hardening**:
+  - Added shared `_download_public_https()` SSRF validation (per-hop public-HTTPS checks, `allow_redirects=False`, capped redirects, streaming byte caps) across `_save_media`, `_sandbox_call`, `_native_file_bridge`, and `/api/media/save`.
+  - Hardened `/api/settings/import` and `/api/settings` (`import_mcp` defaults `False`, validates MCP entries and forces `disabled: True`, rejects `/` and `$HOME` for `workspace_dir`).
+  - Hardened `auto`-mode shell filtering against quoted paths, `./..` traversal, `/tmp`, and `git diff --no-index`; confined `LocalTools._t_delete` symlink checks; blocked symlink traversal and added a 200 MB cap in `workspace.zip_dir()`; enforced atomic `0600` creation for credential/config files; protected keyring master-key lookups with `_KEY_LOCK` and preserved unreadable Google cookies across transient keyring lockouts; fixed per-track Google `_perm_mode()` and external MCP `_gateway_approve()` `inside=False` checks.
+- **Provider, Streaming & Backend Stability**:
+  - Fixed malformed reCAPTCHA v3 CSS selector in `_VOTE_JS`, `GoogleEngine.ask()` 240s hang on ≤ 12-char final growth, `.NET` cookie collection conversion, `_edge_host()` transient caching, and `jar_signed_in()` order.
+  - Fixed `WebChatEngine` reasoning-turn premature termination and `before_api_count` fallback; fixed ChatGPT `"replace"` patch duplication & guest detection, Kimi `0x7b` binary-frame wedge, DeepSeek `SEARCH` fragment routing, Claude dated-slug & DOM-active selection, OpenCode/Antigravity stdout drain on exit, and `ArenaClient.parse_stream()` / `send_chat_via_cdp()` streaming bugs.
+  - Fixed GTK main-thread wrapping for provider windows, MCP process-group teardown/locking, gateway job/status locking, PTY `setsid -c` & `master_fd` close race, broken-symlink handling in `ls`, `pytest -c` inline-eval false positives, Stop cancellation for web-provider commands/automations/sub-agents, and atomic `config.json` updates.
+- **Frontend UI & Linux Packaging**:
+  - Fixed Settings → Usage panel `DOMException` crash, Escape permanently hiding History search, stuck `+` connector toggles, 3-second `/native-subagents` 404 polling spam, Google expired-session UI, SVG `data:image/svg+xml` XSS filtering, cross-tab parallel streaming corruption, empty-workspace composer lock, `.topbar` stacking-context trap over History/New Tab menus, Command Palette model popover positioning, Git commit textarea persistence, Automation edit button corruption, and absolute `BINARY` / `sed` / `arena.skills` / smoke-test pipe edge cases.
+
+### Verification
+
+- Static checks (`node --check`, `bash -n`, Cyrillic UI hygiene, `qwen.py` untouched) pass.
+- Full test suite: **583 passed, 29 skipped** (including 24 new audit regression tests in `tests/test_full_audit_fixes.py`).
+
+---
+
 ## Arena Desktop v7.4.2 (Native Linux)
 
 Adds the **OpenCode CLI** local agent provider with provider-grouped model selection, and fixes critical model-picker popover rendering and anchoring across all multi-provider tabs.

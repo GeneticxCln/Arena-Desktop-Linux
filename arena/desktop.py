@@ -395,12 +395,12 @@ def main():
 
     import webview
     from arena import contracts, diag, google_ai
-    from arena.config import CONFIG_DIR
+    from arena.config import CONFIG_DIR, ensure_config_dir
     from arena.engine import ENGINE
     from arena.web import app as web_app
 
     contracts.load_overrides()
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_config_dir()
     logging.basicConfig(filename=str(CONFIG_DIR / "desktop.log"), level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
@@ -478,6 +478,10 @@ def main():
             title, url, width=1120, height=780, x=150, y=130,
             hidden=hidden, background_color="#18191c",
         )
+        try:
+            diag.make_window_calls_non_blocking(win)
+        except Exception:
+            LOG.exception("could not wrap %s for GTK thread safety", title)
         try:
             diag.watch_object(win, title, ["show", "hide", "restore", "load_url", "evaluate_js", "get_cookies"])
         except Exception:

@@ -38,8 +38,17 @@ if [ ! -f "$TEMPLATE" ]; then
   echo "arena-desktop.desktop not found next to this script." >&2
   exit 1
 fi
-EXEC_ESCAPED="\"${BIN_DIR//\"/\\\"}/Arena-Desktop\""
-sed "s|@EXEC@|$EXEC_ESCAPED|g" "$TEMPLATE" > "$APP_DIR/arena-desktop.desktop"
+EXEC_ESCAPED="\"$(printf '%s' "$BIN_DIR" | sed 's/\\/\\\\/g; s/"/\\"/g')/Arena-Desktop\""
+EXEC_VAL="$EXEC_ESCAPED" awk '
+  BEGIN { r = ENVIRON["EXEC_VAL"] }
+  {
+    while ((i = index($0, "@EXEC@")) > 0) {
+      printf "%s%s", substr($0, 1, i - 1), r
+      $0 = substr($0, i + 6)
+    }
+    print $0
+  }
+' "$TEMPLATE" > "$APP_DIR/arena-desktop.desktop"
 chmod 644 "$APP_DIR/arena-desktop.desktop"
 
 if command -v update-desktop-database >/dev/null 2>&1; then

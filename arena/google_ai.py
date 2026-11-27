@@ -17,7 +17,7 @@ import logging
 import threading
 import time
 import urllib.parse
-from typing import Dict, Optional
+from typing import Optional
 
 from arena import diag
 
@@ -297,6 +297,7 @@ class GoogleEngine:
     def attach(self, window, main=None):
         self.window = window
         self.main = main
+        self._core_cached = None
         def _loaded(*a):
             # Never run on the caller's thread: pywebview fires `loaded` from
             # the UI thread and that thread may already be blocked in a call
@@ -399,6 +400,7 @@ class GoogleEngine:
         self.visible = False
         self.loaded = False
         self._sign_in_page_opened = False
+        self._core_cached = None
         self._shown_evt.clear()
         self.stop_watch()
         forget = getattr(self.window, "forget", None)
@@ -757,13 +759,13 @@ class GoogleEngine:
             return None
         if self._on_ui_thread(native):
             found = self._read_edge_host_on_ui(native)
-            self._core_cached = found if found is not None else _NO_CORE
+            if found is not None:
+                self._core_cached = found
             return found
         # Off the UI thread: hop over, read there, remember, and return.
         found = self._on_ui(lambda _core: self._read_edge_host_on_ui(native), limit=3.0)
         if found is None:
             LOG.info("google window: could not read CoreWebView2 from the UI thread")
-            self._core_cached = _NO_CORE
             return None
         self._core_cached = found
         return found
@@ -1022,10 +1024,26 @@ class GoogleEngine:
             if isinstance(again, list):
                 if _session_cookies_ready(again):
                     jar = again
+            elif _is_net_collection(again):
+                try:
+                    jar2 = list(again)
+                    if _session_cookies_ready(jar2):
+                        jar = jar2
+                except Exception:
+                    pass
             elif again is not None:
                 ok2, jar2 = _await_task(again, max(0.5, limit))
                 if ok2 and jar2 is not None:
                     jar = jar2
+
+        if ok and jar is not None and _is_net_collection(jar):
+            # Convert pythonnet List[CoreWebView2Cookie] to a plain Python list
+            # before checking isinstance(jar, list), so COM cookies are preserved
+            # and flattened on the UI thread below.
+            try:
+                jar = list(jar)
+            except Exception:
+                jar = None
 
         if not isinstance(jar, list):
             if not ok or jar is None:
@@ -1055,17 +1073,6 @@ class GoogleEngine:
             flat = self._flatten_cookies_on_ui(jar, limit=limit)
             if diag is not None: diag.note(f"[google-cookies] {url}: unpacked {len(flat)}")
             return flat
-        if _is_net_collection(jar):
-            # A .NET collection stays a live COM view of the browser's jar, and
-            # the caller is a Flask thread. Letting it fall out of scope there
-            # runs the collection's release on the wrong apartment -- a native
-            # fault that kills the process with nothing in desktop.log. Handing
-            # back a plain list means the only reference dies where Python can
-            # account for it.
-            try:
-                return list(jar)
-            except Exception:
-                return []
         return jar
 
     def _flatten_cookies_on_ui(self, cookies, limit: float = 4.0) -> list:
@@ -1788,20 +1795,21 @@ class GoogleEngine:
         browser_pairs = (self._cookies_from_browser()
                          if getattr(self.window, "is_browser", False) is True
                          else [])
-        if not browser_pairs:
-            # WebKitGTK has no WebView2 reader above, so the pywebview jar is
-            # the only place its session can be seen. Without this branch the
-            # account was reported signed-out even with SID in the jar.
-            browser_pairs = self._cookies_from_pywebview()
         if browser_pairs:
             names = {name for name, _value in browser_pairs}
             return bool(names & set(self.AUTH_COOKIE_NAMES))
-        if self._edge_manager() is None:
-            return False
-        names = set()
-        for name, _value, _domain in self._cookies_direct("https://www.google.com/", limit=3.0):
-            names.add(name)
-        return bool(names & set(self.AUTH_COOKIE_NAMES))
+        if self._edge_manager() is not None:
+            names = set()
+            for name, _value, _domain in self._cookies_direct("https://www.google.com/", limit=3.0):
+                names.add(name)
+            return bool(names & set(self.AUTH_COOKIE_NAMES))
+        # WebKitGTK has no WebView2 reader above, so the pywebview jar is
+        # the only place its session can be seen.
+        pywebview_pairs = self._cookies_from_pywebview()
+        if pywebview_pairs:
+            names = {name for name, _value in pywebview_pairs}
+            return bool(names & set(self.AUTH_COOKIE_NAMES))
+        return False
 
     def _email_via_http(self) -> str:
         """Ask Google who this cookie jar belongs to (slow path, rare)."""
@@ -2103,7 +2111,7 @@ class GoogleEngine:
             if raw is None:
                 continue
             text = self.clean_answer(raw, prompt)
-            if len(text) > len(best) + 12:
+            if text and text != best:
                 best = text
                 stable = 0
                 continue
@@ -2111,9 +2119,6 @@ class GoogleEngine:
                 stable += 1
                 if stable >= 3:
                     break
-            elif text and not best:
-                best = text
-                stable = 0
         elapsed = round(time.time() - started, 1)
         if not best:
             hint = self.last_error or "Google did not render an answer in this window."

@@ -151,7 +151,7 @@ class SearchTool(BaseTool):
 
         ws_root = Path(self.cwd).expanduser().resolve()
         results = []
-        file_list = [target] if target.is_file() else list(target.rglob("*"))
+        skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", ".tox", ".mypy_cache"}
         binary_extensions = {".exe", ".dll", ".bin", ".zip", ".gz", ".png", ".jpg", ".pyc", ".iso"}
 
         try:
@@ -159,7 +159,19 @@ class SearchTool(BaseTool):
         except re.error as e:
             return f"Error: Invalid regex pattern '{pattern}': {e}"
 
-        for f in file_list[:600]:
+        def _iter_files():
+            if target.is_file():
+                yield target
+                return
+            for dirpath, dirnames, filenames in os.walk(target):
+                dirnames[:] = sorted(d for d in dirnames if d not in skip_dirs)
+                for fn in sorted(filenames):
+                    yield Path(dirpath) / fn
+
+        scanned = 0
+        for f in _iter_files():
+            if scanned >= 600:
+                break
             if f.is_symlink():
                 try:
                     resolved = f.resolve()
@@ -169,6 +181,7 @@ class SearchTool(BaseTool):
                     continue
             if not f.is_file() or f.suffix.lower() in binary_extensions:
                 continue
+            scanned += 1
             try:
                 if f.stat().st_size > 500_000:
                     continue
@@ -215,7 +228,11 @@ class LsTool(BaseTool):
                 if item.is_dir():
                     output_lines.append(f"  📁 {item.name}/")
                 else:
-                    sz = item.stat().st_size
+                    try:
+                        sz = item.stat().st_size
+                    except OSError:
+                        output_lines.append(f"  🔗 {item.name:<35s} (broken symlink)")
+                        continue
                     human_sz = (
                         f"{sz/1048576:.1f}MB" if sz > 1048576
                         else f"{sz/1024:.1f}KB" if sz > 1024

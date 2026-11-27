@@ -166,24 +166,23 @@ class PtySession:
             env["ARENA_TERMINAL"] = "1"
             env.setdefault("LANG", "C.UTF-8")
 
-            sfd = slave_fd
-
-            def _preexec() -> None:
-                os.setsid()
-                try:
-                    fcntl.ioctl(sfd, termios.TIOCSCTTY, 0)
-                except OSError:
-                    pass
+            setsid_bin = shutil.which("setsid")
+            if setsid_bin:
+                argv = [setsid_bin, "-c", "--", self.shell]
+                popen_kwargs: dict = {}
+            else:
+                argv = [self.shell]
+                popen_kwargs = {"start_new_session": True}
 
             self.proc = subprocess.Popen(
-                [self.shell],
+                argv,
                 cwd=self.cwd,
                 env=env,
                 stdin=slave_fd,
                 stdout=slave_fd,
                 stderr=slave_fd,
                 close_fds=True,
-                preexec_fn=_preexec,
+                **popen_kwargs,
             )
         except Exception:
             if master_fd is not None:
@@ -480,8 +479,8 @@ class PtySession:
             except Exception:
                 pass
         # Let _read_loop exit and close master_fd safely so select() never races with os.close()
-        self._reader_done.wait(timeout=2.0)
-        self._close_fd()
+        if self._reader_done.wait(timeout=6.0):
+            self._close_fd()
         with self._lock:
             subs = list(self._subscribers)
             for q in subs:

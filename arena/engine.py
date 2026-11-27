@@ -286,7 +286,7 @@ _VOTE_JS = r"""
   }
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
   async function mintToken() {
-    var tag = document.querySelector('script[src*="recaptcha"][src*="render="');
+    var tag = document.querySelector('script[src*="recaptcha"][src*="render="]');
     var key = (tag && new URL(tag.src).searchParams.get('render')) || opts.v3key;
     if (!key) { trace.push('v3key=none'); return null; }
     if (!window.grecaptcha) {

@@ -13,6 +13,7 @@ import secrets
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -38,20 +39,28 @@ def main() -> int:
     port = int(os.environ.get("ARENA_SMOKE_PORT") or 43871)
     boot_nonce = secrets.token_urlsafe(32)
     env = dict(os.environ, ARENA_PORT=str(port), ARENA_BOOT_NONCE=boot_nonce)
+    log_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
     proc = subprocess.Popen(
         [binary], env=env, start_new_session=True,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        stdout=log_file, stderr=subprocess.STDOUT,
     )
     base = f"http://127.0.0.1:{port}"
     boot_url = f"{base}/?{urllib.parse.urlencode({'boot': boot_nonce})}"
+
+    def _tail_log() -> str:
+        try:
+            log_file.flush()
+            log_file.seek(0)
+            return log_file.read()[-4000:]
+        except OSError:
+            return ""
+
     try:
         html = None
         last_err = None
         deadline = time.time() + 90
         while time.time() < deadline:
             if proc.poll() is not None:
-                output = (proc.stdout.read() if proc.stdout else "")[-4000:]
-                print(output, file=sys.stderr)
                 raise SystemExit(f"binary exited with {proc.returncode} before serving the UI")
             try:
                 html = urllib.request.urlopen(boot_url, timeout=2).read().decode("utf-8", "replace")
@@ -68,7 +77,7 @@ def main() -> int:
             raise SystemExit("GET / without boot nonce unexpectedly succeeded (expected 403)")
         except urllib.error.HTTPError as exc:
             if exc.code != 403:
-                raise SystemExit(f"GET / without boot nonce returned HTTP {exc.code} (expected 403)")
+                raise SystemExit(f"GET / without boot nonce returned HTTP {exc.code} (expected 403)") from exc
 
         match = re.search(r'name="api-token" content="([^"]+)"', html)
         if not match:
@@ -106,8 +115,17 @@ def main() -> int:
         print(f"smoke OK: UI {len(html)} bytes, desktop={status['desktop']}, "
               f"engine attached={engine['attached']}, host={engine.get('host')!r}{note}")
         return 0
+    except BaseException:
+        output = _tail_log()
+        if output:
+            print(output, file=sys.stderr)
+        raise
     finally:
         _stop(proc)
+        try:
+            log_file.close()
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":

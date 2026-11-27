@@ -253,10 +253,15 @@ class ClaudeProvider(WebChatEngine):
                     ex_toks = set(re.split(r"[\s\-_.]+", f"{existing['id']} {existing['name']}".lower()))
                     if toks and all(t in ex_toks for t in toks):
                         if m.get("active"):
+                            for other in models:
+                                other["active"] = False
                             existing["active"] = True
                         matched_existing = True
                         break
                 if not matched_existing:
+                    if m.get("active"):
+                        for other in models:
+                            other["active"] = False
                     _add(name, name, str(m.get("description") or ""), bool(m.get("active")))
 
         # Host and first path segment only: later segments hold chat ids.
@@ -530,7 +535,10 @@ class ClaudeProvider(WebChatEngine):
         want = (model_id or "").strip()
         if not want or want.lower() == "default":
             return True
-        want_tokens = [tok for tok in re.split(r"[\s\-_/.]+", want.lower()) if tok and tok != "claude"]
+        want_tokens = [
+            tok for tok in re.split(r"[\s\-_/.]+", want.lower())
+            if tok and tok != "claude" and not (len(tok) == 8 and tok.isdigit())
+        ]
         open_script = f"""(() => {{
           const wantFull = {json.dumps(want.lower())};
           const wantTokens = {json.dumps(want_tokens)};

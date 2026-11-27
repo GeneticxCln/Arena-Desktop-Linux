@@ -196,6 +196,7 @@ class AntigravityProvider(Provider):
             try:
                 proc = subprocess.run(
                     [cli, "models"],
+                    stdin=subprocess.DEVNULL,
                     capture_output=True,
                     text=True,
                     timeout=12,
@@ -224,8 +225,9 @@ class AntigravityProvider(Provider):
             "active_model": models[0]["id"] if models else "",
             "models": models,
         }
-        self._models_cache = out
-        self._models_at = now
+        if live:
+            self._models_cache = out
+            self._models_at = now
         return dict(out)
 
     def open_sign_in(self) -> dict:
@@ -364,10 +366,10 @@ class AntigravityProvider(Provider):
             cmd.append("--dangerously-skip-permissions")
         # Guard against Linux MAX_ARG_STRLEN (128 KiB per argv entry) and leading '-' flag parsing
         safe_prompt = prompt
-        if safe_prompt.startswith("-"):
-            safe_prompt = " " + safe_prompt
         if len(safe_prompt.encode("utf-8")) > 110_000:
             safe_prompt = safe_prompt.encode("utf-8")[-105_000:].decode("utf-8", errors="ignore")
+        if safe_prompt.startswith("-"):
+            safe_prompt = " " + safe_prompt
         cmd.extend(["-p", safe_prompt])
         try:
             proc = subprocess.Popen(
@@ -436,6 +438,22 @@ class AntigravityProvider(Provider):
                     break
                 if not rlist:
                     if proc.poll() is not None:
+                        while True:
+                            try:
+                                r2, _, _ = select.select([stdout_fd], [], [], 0)
+                            except (OSError, ValueError):
+                                break
+                            if not r2:
+                                break
+                            try:
+                                extra = os.read(stdout_fd, 4096)
+                            except OSError:
+                                break
+                            if not extra:
+                                break
+                            text = decoder.decode(extra, final=False)
+                            if text:
+                                yield {"type": "text", "text": text}
                         break
                     continue
                 try:

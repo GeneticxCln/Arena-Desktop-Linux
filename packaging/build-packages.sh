@@ -26,7 +26,7 @@ case "$MACHINE" in
 esac
 BINARY="${BINARY:-$DEFAULT_BINARY}"
 VERSION="${VERSION:-$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' arena/web/app.py | head -1)}"
-VERSION="${VERSION:-7.4.2}"
+VERSION="${VERSION:-7.5.0}"
 MAINTAINER="${MAINTAINER:-Quinton Titus <93550885+GeneticxCln@users.noreply.github.com>}"
 VENDOR="${VENDOR:-Quinton Titus}"
 HOMEPAGE="${HOMEPAGE:-https://github.com/GeneticxCln/Arena-Desktop-Linux}"
@@ -78,9 +78,14 @@ fi
 sed 's|@EXEC@|/usr/bin/Arena-Desktop|g' packaging/arena-desktop.desktop > build/arena-desktop.desktop
 chmod 644 build/arena-desktop.desktop
 
+case "$BINARY" in
+  /*) BINARY_ABS="$BINARY" ;;
+  *)  BINARY_ABS="$ROOT/$BINARY" ;;
+esac
+
 sed \
   -e "s|__ROOT__|$ROOT|g" \
-  -e "s|__BINARY__|$ROOT/$BINARY|g" \
+  -e "s|__BINARY__|$BINARY_ABS|g" \
   -e "s|__DESKTOP_FILE__|$ROOT/build/arena-desktop.desktop|g" \
   -e "s|__NFPM_ARCH__|$NFPM_ARCH|g" \
   -e "s|__VERSION__|$VERSION|g" \

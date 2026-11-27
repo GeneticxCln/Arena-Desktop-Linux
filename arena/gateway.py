@@ -91,7 +91,7 @@ class _Handler(BaseHTTPRequestHandler):
         elif path.startswith("/v1/jobs/"):
             job_id = path[len("/v1/jobs/"):]
             wait = self._wait_seconds()
-            job = self.mgr.wait_job(job_id, wait) if wait else self.mgr._jobs.get(job_id)
+            job = self.mgr.wait_job(job_id, wait) if wait else self.mgr.get_job(job_id)
             if job is None:
                 self._json(404, {"ok": False, "error": "job not found"})
             else:
@@ -193,24 +193,28 @@ class GatewayManager:
 
     # ---------- status ----------
     def summary(self) -> Dict[str, Any]:
-        return {"active": self._state == "on", "state": self._state,
-                "servers": len(self._servers) if self._state == "on" else 0}
+        with self._start_lock:
+            return {"active": self._state == "on", "state": self._state,
+                    "servers": len(self._servers) if self._state == "on" else 0}
 
     def status(self, include_pairing: bool = False) -> Dict[str, Any]:
-        out = {
-            "state": self._state, "url": self._url, "servers": list(self._servers),
-            "started_at": self._created or None, "expires_at": self._expires or None,
-            "error": self._last_error, "calls": list(reversed(self._calls)),
-            "tunnel_log": list(self._tunnel_log),
-            "tunnel_protocol": self._tunnel_protocol,
-            "cloudflared": self._cf_path,
-            "used_fallback": self._used_fallback,
-            "tunnel_registered": self._tunnel_registered,
-            "public_check": self._public_check,
-        }
-        if include_pairing and self._state == "on":
-            out["pairing"] = self._token
-        return out
+        with self._start_lock:
+            with self._lock:
+                calls_copy = list(reversed(self._calls))
+            out = {
+                "state": self._state, "url": self._url, "servers": list(self._servers),
+                "started_at": self._created or None, "expires_at": self._expires or None,
+                "error": self._last_error, "calls": calls_copy,
+                "tunnel_log": list(self._tunnel_log),
+                "tunnel_protocol": self._tunnel_protocol,
+                "cloudflared": self._cf_path,
+                "used_fallback": self._used_fallback,
+                "tunnel_registered": self._tunnel_registered,
+                "public_check": self._public_check,
+            }
+            if include_pairing and self._state == "on":
+                out["pairing"] = self._token
+            return out
 
     def _expired(self) -> bool:
         return bool(self._expires) and time.time() > self._expires
@@ -446,10 +450,17 @@ class GatewayManager:
         self._info("QUIC tunnel did not become healthy; retrying with --protocol http2")
         self._tunnel_log.append("[gateway] QUIC tunnel unhealthy; retrying with --protocol http2")
         if old is not None and old is not dying:
-            try:
-                old.terminate()
-            except Exception:
-                pass
+            def _reap(proc):
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=2)
+                except Exception:
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=2)
+                    except Exception:
+                        pass
+            threading.Thread(target=_reap, args=(old,), daemon=True, name="gateway-reap").start()
         try:
             self._start_tunnel(self._cf_path, generation, protocol="http2")
             return True
@@ -644,19 +655,25 @@ class GatewayManager:
         self._touch()
         return job_id, None
 
+    def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return None
+            return {**job, "results": [dict(r) for r in job.get("results", [])]}
+
     def wait_job(self, job_id: str, seconds: float) -> Optional[Dict[str, Any]]:
-        """Block until the job finishes or the timeout passes; returns the
+        """Block until the job finishes or the timeout passes; returns a snapshot of the
         job either way (None if unknown). This is what makes the sync
         ``?wait=`` mode possible: one agent request, one response with the
         result, instead of a poll loop of separate agent tool calls."""
         with self._lock:
             event = self._job_events.get(job_id)
-            job = self._jobs.get(job_id)
-        if job is None:
-            return None
+            if job_id not in self._jobs:
+                return None
         if event is not None and seconds > 0:
             event.wait(min(float(seconds), MAX_WAIT_SECONDS))
-        return job
+        return self.get_job(job_id)
 
     def _signal_job(self, job: Dict[str, Any]) -> None:
         with self._lock:
@@ -677,12 +694,14 @@ class GatewayManager:
             self._run_job(job, steps, generation)
 
     def _run_job(self, job: Dict[str, Any], steps: List[Dict[str, Any]], generation: int) -> None:
-        job["status"] = "running"
-        server = job["server"]
+        with self._lock:
+            job["status"] = "running"
+            server = job["server"]
         for step in steps:
             if not self._running or generation != self._generation:
-                job["status"] = "error"
-                job["error"] = "gateway session ended"
+                with self._lock:
+                    job["status"] = "error"
+                    job["error"] = "gateway session ended"
                 self._signal_job(job)
                 return
             self._touch()
@@ -696,8 +715,9 @@ class GatewayManager:
                                    step.get("arguments") or {}):
                 result["error"] = "denied by the user (or approval timed out)"
             elif generation != self._generation or not self._running:
-                job["status"] = "error"
-                job["error"] = "gateway session ended"
+                with self._lock:
+                    job["status"] = "error"
+                    job["error"] = "gateway session ended"
                 self._signal_job(job)
                 return
             else:
@@ -709,18 +729,21 @@ class GatewayManager:
                         result["error"] = result["output"][:500]
                 except Exception as e:
                     result["error"] = f"{type(e).__name__}: {e}"
-            job["results"].append(result)
-            self._calls.append({"ts": started, "server": server, "tool": tool,
-                                "ok": bool(result["ok"]),
-                                "ms": int((time.time() - started) * 1000)})
+            with self._lock:
+                job["results"].append(result)
+                self._calls.append({"ts": started, "server": server, "tool": tool,
+                                    "ok": bool(result["ok"]),
+                                    "ms": int((time.time() - started) * 1000)})
             if not result["ok"] and not step.get("continue_on_error"):
                 break
         if generation != self._generation or not self._running:
-            job["status"] = "error"
-            job["error"] = "gateway session ended"
+            with self._lock:
+                job["status"] = "error"
+                job["error"] = "gateway session ended"
             self._signal_job(job)
             return
-        job["status"] = "done" if all(r["ok"] for r in job["results"]) else "error"
+        with self._lock:
+            job["status"] = "done" if all(r["ok"] for r in job["results"]) else "error"
         self._signal_job(job)
         self._touch()
 

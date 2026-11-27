@@ -299,31 +299,42 @@ def send_chat_via_cdp(
         let reasoning = '';
         let sources = [];
         let chunks = 0;
+        let buf = '';
+        const processLine = (line) => {{
+            const l = line.trim();
+            if (!l) return;
+            if (l.length >= 3 && 'ab'.includes(l[0]) && l[2] === ':') {{
+                if (l[0] === 'a' && l[1] === '0') {{
+                    try {{ text += JSON.parse(l.slice(3)); }} catch(e) {{}}
+                }}
+                if (l[0] === 'a' && l[1] === 'g') {{
+                    try {{ reasoning += JSON.parse(l.slice(3)); }} catch(e) {{}}
+                }}
+                if (l[0] === 'a' && l[1] === 'h') {{
+                    try {{ sources.push(JSON.parse(l.slice(3))); }} catch(e) {{}}
+                }}
+            }} else if (l.length >= 2 && l[1] === ':') {{
+                if (l[0] === '0') {{
+                    try {{ text += JSON.parse(l.slice(2)); }} catch(e) {{}}
+                }}
+            }}
+        }};
         while (true) {{
             const {{done, value}} = await reader.read();
             if (done) break;
             chunks++;
-            const chunk = decoder.decode(value, {{stream: true}});
-            for (const line of chunk.split('\\n')) {{
-                const l = line.trim();
-                if (!l) continue;
-                if (l.length >= 3 && 'ab'.includes(l[0]) && l[2] === ':') {{
-                    if (l[0] === 'a' && l[1] === '0') {{
-                        try {{ text += JSON.parse(l.slice(3)); }} catch(e) {{}}
-                    }}
-                    if (l[0] === 'a' && l[1] === 'g') {{
-                        try {{ reasoning += JSON.parse(l.slice(3)); }} catch(e) {{}}
-                    }}
-                    if (l[0] === 'a' && l[1] === 'h') {{
-                        try {{ sources.push(JSON.parse(l.slice(3))); }} catch(e) {{}}
-                    }}
-                }} else if (l.length >= 2 && l[1] === ':') {{
-                    if (l[0] === '0') {{
-                        try {{ text += JSON.parse(l.slice(2)); }} catch(e) {{}}
-                    }}
-                }}
+            buf += decoder.decode(value, {{stream: true}});
+            const lines = buf.split('\\n');
+            buf = lines.pop() || '';
+            for (const line of lines) {{
+                processLine(line);
             }}
-            if (chunks > 500) break;
+        }}
+        buf += decoder.decode();
+        if (buf.trim()) {{
+            for (const line of buf.split('\\n')) {{
+                processLine(line);
+            }}
         }}
 
         return {{text, reasoning, sources, evalId, chunks}};
@@ -523,19 +534,21 @@ class ArenaClient:
         user_msg_id = generate_uuidv7()
         model_a_msg_id = generate_uuidv7()
 
-        # Try CDP browser for fresh reCAPTCHA token (works reliably)
-        recaptcha_token = fetch_recaptcha_via_cdp("chat_submit")
-        if not recaptcha_token:
-            con.print("  [dim yellow]No browser CDP for reCAPTCHA - sending without token[/dim yellow]")
+        # Try CDP browser for fresh reCAPTCHA token & Cloudflare cookies only when CDP is enabled
+        recaptcha_token = None
+        if self.use_cdp:
+            recaptcha_token = fetch_recaptcha_via_cdp("chat_submit", port=self.cdp_port)
+            if not recaptcha_token:
+                con.print("  [dim yellow]No browser CDP for reCAPTCHA - sending without token[/dim yellow]")
 
-        # Only borrow Cloudflare cookies from a CDP browser; mixing its auth cookies would share a refresh-token family
-        cdp_cookies = fetch_cookies_via_cdp()
-        if cdp_cookies:
-            for part in cdp_cookies.split(";"):
-                if "=" in part:
-                    k, v = part.strip().split("=", 1)
-                    if k in ("cf_clearance", "__cf_bm"):
-                        self.session.cookies.set(k, v, domain="arena.ai", path="/")
+            # Only borrow Cloudflare cookies from a CDP browser; mixing its auth cookies would share a refresh-token family
+            cdp_cookies = fetch_cookies_via_cdp(port=self.cdp_port)
+            if cdp_cookies:
+                for part in cdp_cookies.split(";"):
+                    if "=" in part:
+                        k, v = part.strip().split("=", 1)
+                        if k in ("cf_clearance", "__cf_bm"):
+                            self.session.cookies.set(k, v, domain="arena.ai", path="/")
 
         # First message vs follow-up
         if is_new_eval:
@@ -582,10 +595,16 @@ class ArenaClient:
         try:
             resp = self.session.post(url, json=body, stream=True, timeout=180)
         except requests.ConnectionError:
+            if is_new_eval:
+                self.eval_id = None
             return None, "Connection failed: check network connection"
         except requests.Timeout:
+            if is_new_eval:
+                self.eval_id = None
             return None, "Request timed out (180s)"
         except Exception as e:
+            if is_new_eval:
+                self.eval_id = None
             return None, f"Request error: {e}"
 
         self.sync_cookies()
@@ -595,6 +614,8 @@ class ArenaClient:
             return None, "Authentication expired. Run /login to refresh your session."
 
         if resp.status_code == 403:
+            if is_new_eval:
+                self.eval_id = None
             err_text = resp.text.lower()
             if "captcha" in err_text:
                 return None, ("arena.ai requires a reCAPTCHA token generated by its own page in a real browser; "
@@ -604,6 +625,8 @@ class ArenaClient:
             return None, "Access denied (403). Run /login to re-authenticate."
 
         if resp.status_code == 429:
+            if is_new_eval:
+                self.eval_id = None
             return None, "Rate limited by arena.ai — wait 30-60 seconds before sending another message."
 
         if not resp.ok:
@@ -656,90 +679,104 @@ class ArenaClient:
         - 'image': Generated image URLs (Image modality)
         - 'reasoning': Internal chain-of-thought tokens
         """
+        import codecs
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
         buf = ""
+
+        def _parse_line(raw_line: str) -> Generator[Tuple[str, Any], None, None]:
+            line = raw_line.strip()
+            if not line:
+                return
+            if debug:
+                con.print(f"  [dim]RAW: {line[:120]}[/dim]")
+
+            # Format 1: a0:"text" or b0:"text" (Arena Battle format)
+            if len(line) >= 3 and line[0] in "ab" and line[2] == ":":
+                prefix, tc, raw = line[0], line[1], line[3:]
+                if prefix == "b":
+                    return  # Skip Model B in battle mode
+                tn = STREAM_TYPES.get(tc, tc)
+                try:
+                    val = json.loads(raw)
+                except Exception:
+                    val = raw
+
+                # Extract preview/deployment URLs & session ID from data events
+                if tn == "data":
+                    self._extract_data_metadata(val)
+                    p_url = self._find_preview_url(val)
+                    if p_url:
+                        self.last_preview_url = p_url
+                        yield ("preview_url", p_url)
+                elif tn == "source":
+                    self.sources.append(val)
+                    yield ("source", val)
+                    return
+                elif tn == "reasoning":
+                    if show_reasoning:
+                        yield ("reasoning", val)
+                    return
+
+                yield (tn, val)
+                return
+
+            # Format 2: 0:"text" (standard Vercel AI SDK)
+            if len(line) >= 2 and line[1] == ":":
+                tc, raw = line[0], line[2:]
+                tn = STREAM_TYPES.get(tc, tc)
+                try:
+                    val = json.loads(raw)
+                except Exception:
+                    val = raw
+
+                if tn == "data":
+                    self._extract_data_metadata(val)
+                    p_url = self._find_preview_url(val)
+                    if p_url:
+                        self.last_preview_url = p_url
+                        yield ("preview_url", p_url)
+                elif tn == "source":
+                    self.sources.append(val)
+                    yield ("source", val)
+                    return
+                elif tn == "reasoning":
+                    if show_reasoning:
+                        yield ("reasoning", val)
+                    return
+
+                yield (tn, val)
+                return
+
+            # Fallback JSON parsing
+            try:
+                obj = json.loads(line)
+                if isinstance(obj, dict):
+                    self._extract_data_metadata(obj)
+                    p_url = self._find_preview_url(obj)
+                    if p_url:
+                        self.last_preview_url = p_url
+                        yield ("preview_url", p_url)
+                    yield ("data", obj)
+            except Exception:
+                pass
+
         try:
             for chunk in resp.iter_content(chunk_size=None):
                 if not chunk:
                     continue
-                buf += chunk.decode("utf-8", errors="replace")
+                buf += decoder.decode(chunk, final=False)
                 lines = buf.split("\n")
                 buf = lines[-1]
 
                 for line in lines[:-1]:
-                    line = line.strip()
-                    if not line:
-                        continue
+                    yield from _parse_line(line)
 
-                    if debug:
-                        con.print(f"  [dim]RAW: {line[:120]}[/dim]")
-
-                    # Format 1: a0:"text" or b0:"text" (Arena Battle format)
-                    if len(line) >= 3 and line[0] in "ab" and line[2] == ":":
-                        prefix, tc, raw = line[0], line[1], line[3:]
-                        if prefix == "b":
-                            continue  # Skip Model B in battle mode
-                        tn = STREAM_TYPES.get(tc, tc)
-                        try:
-                            val = json.loads(raw)
-                        except Exception:
-                            val = raw
-
-                        # Extract preview/deployment URLs & session ID from data events
-                        if tn == "data":
-                            self._extract_data_metadata(val)
-                            # Check if data contains a deployment or preview URL
-                            p_url = self._find_preview_url(val)
-                            if p_url:
-                                self.last_preview_url = p_url
-                                yield ("preview_url", p_url)
-
-                        elif tn == "source":
-                            # Search citation source
-                            self.sources.append(val)
-                            yield ("source", val)
-
-                        elif tn == "reasoning":
-                            if show_reasoning:
-                                yield ("reasoning", val)
-                            continue
-
-                        yield (tn, val)
-                        continue
-
-                    # Format 2: 0:"text" (standard Vercel AI SDK)
-                    if len(line) >= 2 and line[1] == ":":
-                        tc, raw = line[0], line[2:]
-                        tn = STREAM_TYPES.get(tc, tc)
-                        try:
-                            val = json.loads(raw)
-                        except Exception:
-                            val = raw
-
-                        if tn == "data":
-                            self._extract_data_metadata(val)
-                            p_url = self._find_preview_url(val)
-                            if p_url:
-                                self.last_preview_url = p_url
-                                yield ("preview_url", p_url)
-                        elif tn == "source":
-                            self.sources.append(val)
-                            yield ("source", val)
-
-                        yield (tn, val)
-                        continue
-
-                    # Fallback JSON parsing
-                    try:
-                        obj = json.loads(line)
-                        if isinstance(obj, dict):
-                            self._extract_data_metadata(obj)
-                            p_url = self._find_preview_url(obj)
-                            if p_url:
-                                self.last_preview_url = p_url
-                                yield ("preview_url", p_url)
-                            yield ("data", obj)
-                    except Exception:
-                        pass
+            tail = decoder.decode(b"", final=True)
+            if tail:
+                buf += tail
+            if buf.strip():
+                for line in buf.split("\n"):
+                    yield from _parse_line(line)
 
         except requests.exceptions.ChunkedEncodingError:
             pass
@@ -750,7 +787,7 @@ class ArenaClient:
     def _extract_data_metadata(self, val: Any) -> None:
         """Search nested structures for evaluationSessionId."""
         if isinstance(val, dict):
-            eid = val.get("evaluationSessionId") or val.get("id")
+            eid = val.get("evaluationSessionId")
             if eid and isinstance(eid, str) and len(eid) > 10:
                 self.eval_id = eid
         elif isinstance(val, list):

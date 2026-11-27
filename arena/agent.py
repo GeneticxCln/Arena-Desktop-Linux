@@ -356,11 +356,60 @@ def _interactive_refusal(cmd: str) -> str:
 
 _ACTIVE_SHELL_LOCK = threading.Lock()
 _ACTIVE_SHELL_PROCS: set = set()
+_INTERPRETERS_C = re.compile(r"^(?:python\d*(?:\.\d+)?|py|sh|bash|zsh|dash|ksh)$", re.IGNORECASE)
+_INTERPRETERS_E = re.compile(r"^(?:node|nodejs|perl|ruby|php|pwsh|powershell)$", re.IGNORECASE)
 _INLINE_EVAL_RE = re.compile(
     r"\b(?:python\d*(?:\.\d+)?|py|node|nodejs|perl|ruby|php|sh|bash|zsh|dash|ksh|pwsh|powershell)"
     r"\b[^\r\n;|&]*(?:\s(?:-[a-zA-Z]*[ce]|--eval|-enc|-encodedcommand)(?:\s|['\"]|$))",
     re.IGNORECASE,
 )
+
+
+def _has_inline_eval(cmd: str) -> bool:
+    """Detect inline code execution flags (-c/-e/--eval/-enc) passed to an interpreter/shell
+    without false-positiving on flags passed to a script or module (e.g. `python -m pytest -c ...`)."""
+    import shlex as _shlex
+    for segment in re.split(r"[\r\n;|&]+", cmd or ""):
+        seg = segment.strip()
+        if not seg:
+            continue
+        try:
+            tokens = _shlex.split(seg, posix=True)
+        except ValueError:
+            if _INLINE_EVAL_RE.search(seg):
+                return True
+            continue
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok == "env" or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tok):
+                i += 1
+                continue
+            break
+        if i >= len(tokens):
+            continue
+        exe = Path(tokens[i]).name
+        is_c = bool(_INTERPRETERS_C.match(exe))
+        is_e = bool(_INTERPRETERS_E.match(exe))
+        if not (is_c or is_e):
+            continue
+        for flag in tokens[i + 1:]:
+            if flag == "--":
+                break
+            if not flag.startswith("-"):
+                # First positional argument (script path); remaining flags belong to the script.
+                break
+            low = flag.lower()
+            if low == "-m" and is_c:
+                # `python -m <module> ...`: remaining flags belong to the module (e.g. pytest -c).
+                break
+            if low in ("--eval", "-enc", "-encodedcommand") or low.startswith("--eval="):
+                return True
+            if is_c and re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", flag):
+                return True
+            if is_e and re.fullmatch(r"-[a-zA-Z]*e[a-zA-Z]*", flag):
+                return True
+    return False
 
 
 def _kill_shell_proc(proc) -> None:
@@ -400,7 +449,7 @@ def run_shell_command(cmd: str, cwd, stop_event=None) -> str:
     refusal = _interactive_refusal(cmd)
     if refusal:
         return refusal
-    if _INLINE_EVAL_RE.search(cmd):
+    if _has_inline_eval(cmd):
         return "Error: inline code execution flags (-c, -e, --eval, -enc) on interpreters/shells are blocked for safety."
     argv = ["/bin/sh", "-lc", cmd]
     proc = subprocess.Popen(argv, shell=False, cwd=str(cwd), stdin=subprocess.DEVNULL,
@@ -668,7 +717,13 @@ class LocalTools:
                     kids[child.name] = child
         rows = []
         for child in sorted(kids.values(), key=lambda c: (not c.is_dir(), c.name.lower()))[:300]:
-            rows.append(child.name + "/" if child.is_dir() else f"{child.name}  ({child.stat().st_size} B)")
+            try:
+                if child.is_dir():
+                    rows.append(child.name + "/")
+                else:
+                    rows.append(f"{child.name}  ({child.stat().st_size} B)")
+            except OSError:
+                rows.append(f"{child.name}  (broken symlink)")
         return "\n".join(rows) or "(empty folder)"
 
     def _t_read_file(self, prm) -> str:
@@ -767,8 +822,16 @@ class LocalTools:
     def _t_delete(self, prm) -> str:
         rel_str = (prm.get("path") or "").strip().strip("\"'")
         raw_p = Path(rel_str).expanduser() if rel_str else None
-        raw_cand = (raw_p if (raw_p is not None and raw_p.is_absolute()) else (self.root / raw_p if raw_p is not None else None))
+        base = self.out or self.root
+        raw_cand = (raw_p if (raw_p is not None and raw_p.is_absolute()) else (base / raw_p if raw_p is not None else None))
         if raw_cand is not None and raw_cand.is_symlink():
+            # Verify the symlink itself (not its target) lives inside the writable workspace
+            # and is not inside a protected directory (.git/hooks, checkpoints, etc.).
+            parent_resolved = raw_cand.parent.resolve()
+            link_path = parent_resolved / raw_cand.name
+            inside_base = (parent_resolved == base or base in parent_resolved.parents)
+            if not inside_base or link_path in (self.root, self.out) or self._is_protected_write_path(link_path):
+                raise PermissionError(f"refusing to delete protected or out-of-workspace symlink {self._rel(link_path)}")
             # Unlink the symlink itself; never follow it and rmtree its target.
             raw_cand.unlink()
             return f"Deleted symlink {self._rel(raw_cand)}"

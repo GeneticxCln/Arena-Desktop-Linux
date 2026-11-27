@@ -29,7 +29,6 @@ class ChatGPTProvider(WebChatEngine):
     auth_cookie_names = (
         "__Secure-next-auth.session-token",
         "__Secure-next-auth.session-token.0",
-        "oai-did",
     )
     login_url_hints = ("/auth/login", "auth.openai.com")
     conversation_url_hint = "/c/"
@@ -73,6 +72,30 @@ class ChatGPTProvider(WebChatEngine):
             "capabilities": ["Text", "Code"],
         },
     )
+
+    def verify(self) -> dict:
+        """Verify ChatGPT sign-in without mistaking guest composer pages for signed-in accounts."""
+        res = super().verify()
+        if res.get("human_check") or not res.get("window"):
+            return res
+        cookie_names = self.read_cookie_names()
+        cookie_ok = bool(set(self.auth_cookie_names) & cookie_names)
+        session_ok = False
+        if not cookie_ok:
+            s_resp = self.fetch_json("/api/auth/session", timeout=3.0)
+            s_data = s_resp.get("data") if isinstance(s_resp, dict) else None
+            if isinstance(s_data, dict) and (s_data.get("user") or s_data.get("accessToken")):
+                session_ok = True
+        signed = bool(cookie_ok or session_ok)
+        self._signed_in_cache = signed
+        self._signed_in_at = time.time()
+        res["signed_in"] = signed
+        res["detail"] = (
+            f"Signed in ({self.origin.split('/')[2]})"
+            if signed
+            else f"Open the {self.name} window to sign in."
+        )
+        return res
 
     def _target_url_for_model(self, conversation_url: str, model_id: str) -> str:
         if conversation_url:
@@ -199,8 +222,8 @@ class ChatGPTProvider(WebChatEngine):
           const want = {json.dumps(want.lower())};
           const btn = document.querySelector('[data-testid="model-switcher-dropdown-button"]');
           if (!btn) return JSON.stringify({{ ok: false }});
-          const cur = (btn.innerText || btn.textContent || '').toLowerCase();
-          if (cur.includes(want)) return JSON.stringify({{ ok: true, already: true }});
+          const cur = (btn.innerText || btn.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+          if (cur === want || cur.replace(/^chatgpt\\s+/, '') === want) return JSON.stringify({{ ok: true, already: true }});
           btn.dispatchEvent(new PointerEvent('pointerdown', {{ bubbles: true, cancelable: true, button: 0, pointerType: 'mouse' }}));
           btn.click();
           return JSON.stringify({{ ok: true, opened: true }});
@@ -214,13 +237,25 @@ class ChatGPTProvider(WebChatEngine):
         click_script = f"""(() => {{
           const want = {json.dumps(want.lower())};
           const items = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"]'));
+          const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+          let fallback = null;
           for (const item of items) {{
-            const txt = (item.innerText || item.textContent || '').toLowerCase();
-            const testid = (item.getAttribute('data-testid') || '').toLowerCase();
-            if (testid.includes(want) || txt.includes(want)) {{
+            const raw = String(item.innerText || item.textContent || '');
+            const firstLine = norm(raw.split('\\n')[0] || '');
+            const txt = norm(raw);
+            const testid = norm(item.getAttribute('data-testid') || '');
+            if (testid === want || testid === ('model-switcher-' + want) || firstLine === want || txt === want) {{
               item.click();
               return JSON.stringify({{ ok: true, clicked: txt.slice(0, 60) }});
             }}
+            if (!fallback && (testid.endsWith('-' + want) || txt.includes(want))) {{
+              fallback = item;
+            }}
+          }}
+          if (fallback) {{
+            const txt = norm(fallback.innerText || fallback.textContent || '');
+            fallback.click();
+            return JSON.stringify({{ ok: true, clicked: txt.slice(0, 60) }});
           }}
           document.dispatchEvent(new KeyboardEvent('keydown', {{ key: 'Escape', code: 'Escape', bubbles: true }}));
           return JSON.stringify({{ ok: false }});
@@ -255,9 +290,37 @@ class ChatGPTProvider(WebChatEngine):
                 continue
 
             conv_id = pkt.get("conversation_id")
+            if not conv_id and isinstance(pkt.get("v"), dict):
+                conv_id = pkt["v"].get("conversation_id")
             if isinstance(conv_id, str) and conv_id and not state.get("conv_emitted"):
                 state["conv_emitted"] = True
                 events.append({"type": "meta_update", "external_url": f"https://chatgpt.com/c/{conv_id}"})
+
+            def _emit_patch(path_str: str, patch_op: str, text_val: str) -> None:
+                nonlocal last_full
+                if not text_val:
+                    return
+                if not ("/message/content/parts" in path_str or "thoughts" in path_str or "reasoning" in path_str):
+                    return
+                is_reason = "thoughts" in path_str or "reasoning" in path_str
+                if patch_op == "replace":
+                    if is_reason:
+                        events.append({"type": "reasoning_replace", "text": text_val})
+                    else:
+                        if last_full and text_val.startswith(last_full):
+                            delta = text_val[len(last_full):]
+                            last_full = text_val
+                            if delta:
+                                events.append({"type": "text", "text": delta})
+                        elif text_val != last_full:
+                            last_full = text_val
+                            events.append({"type": "text_replace", "text": text_val})
+                elif patch_op in ("", "append", "add"):
+                    if is_reason:
+                        events.append({"type": "reasoning", "text": text_val})
+                    else:
+                        last_full += text_val
+                        events.append({"type": "text", "text": text_val})
 
             # Format A: ChatGPT v1 delta-encoding patches
             if isinstance(pkt.get("p"), str):
@@ -265,17 +328,8 @@ class ChatGPTProvider(WebChatEngine):
                 state["p"] = cur_p
             op = str(pkt.get("o") or "").lower()
             val = pkt.get("v")
-            is_content_path = (
-                "/message/content/parts" in cur_p
-                or "thoughts" in cur_p
-                or "reasoning" in cur_p
-            )
-            if isinstance(val, str) and val and is_content_path and op in ("", "append"):
-                if "thoughts" in cur_p or "reasoning" in cur_p:
-                    events.append({"type": "reasoning", "text": val})
-                else:
-                    last_full += val
-                    events.append({"type": "text", "text": val})
+            if isinstance(val, str) and val and op in ("", "append", "add", "replace"):
+                _emit_patch(cur_p, op, val)
                 continue
             if isinstance(val, list):
                 for sub in val:
@@ -284,14 +338,13 @@ class ChatGPTProvider(WebChatEngine):
                     sub_op = str(sub.get("o") or "").lower()
                     if sub_op in ("remove", "delete"):
                         continue
+                    if isinstance(sub.get("p"), str):
+                        cur_p = sub["p"]
+                        state["p"] = cur_p
                     sp = str(sub.get("p") or cur_p)
                     sv = sub.get("v")
-                    if isinstance(sv, str) and sv and ("/message/content/parts" in sp or "thoughts" in sp or "reasoning" in sp):
-                        if "thoughts" in sp or "reasoning" in sp:
-                            events.append({"type": "reasoning", "text": sv})
-                        else:
-                            last_full += sv
-                            events.append({"type": "text", "text": sv})
+                    if isinstance(sv, str) and sv:
+                        _emit_patch(sp, sub_op, sv)
                 continue
 
             # Format B: Full message snapshots ({"message": {"author": {"role": "assistant"}, "content": {"parts": [...]}}})

@@ -273,13 +273,15 @@ class DeepSeekProvider(WebChatEngine):
                     ftype = frag_types.get(fidx, "")
                     if "THINK" in ftype:
                         events.append({"type": "reasoning", "text": val})
-                    else:
+                    elif not ftype or "RESPONSE" in ftype or "TEXT" in ftype:
                         events.append({"type": "text", "text": val})
                 elif "thinking" in cur_path or "reason" in cur_path:
                     events.append({"type": "reasoning", "text": val})
                 elif "content" in cur_path:
                     events.append({"type": "text", "text": val})
-            elif isinstance(val, list):
+            elif isinstance(val, list) and cur_path.endswith("fragments"):
+                if pkt.get("o") == "SET":
+                    frag_types.clear()
                 base_idx = 0 if pkt.get("o") == "SET" else len(frag_types)
                 for offset, item in enumerate(val):
                     if not isinstance(item, dict):

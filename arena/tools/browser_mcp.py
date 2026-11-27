@@ -9,8 +9,7 @@ import json
 import os
 import subprocess
 import urllib.parse
-from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any
 
 from arena.tools.base import BaseTool
 from arena.auth import detect_installed_browsers
@@ -27,6 +26,7 @@ class BrowserDetectTool(BaseTool):
             lines.append(f"  • {name}: {path}")
 
         # Check for active CDP debugging port (9222)
+        conn = None
         try:
             conn = http.client.HTTPConnection("127.0.0.1", 9222, timeout=2)
             conn.request("GET", "/json/version")
@@ -34,9 +34,14 @@ class BrowserDetectTool(BaseTool):
             if resp.status == 200:
                 ver_info = json.loads(resp.read().decode("utf-8"))
                 lines.append(f"\nActive CDP Browser on port 9222:\n  • {ver_info.get('Browser', 'Unknown')}\n  • User-Agent: {ver_info.get('User-Agent', '')[:80]}...")
-            conn.close()
         except Exception:
             lines.append("\nNo browser currently attached to remote debugging port 9222.")
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
         return "\n".join(lines)
 
@@ -76,7 +81,12 @@ class BrowserOpenUrlTool(BaseTool):
                 return f"Error opening URL: {e}"
 
         try:
-            subprocess.Popen([target_path, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(
+                [target_path, url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
             return f"Successfully launched {browser_name} with '{url}'."
         except Exception as e:
             return f"Error launching {browser_name}: {e}"
@@ -87,7 +97,13 @@ class BrowserListTabsTool(BaseTool):
     description = "List all open pages/tabs in the active CDP browser (port 9222)."
 
     def execute(self, params: Dict[str, Any]) -> str:
-        port = int(params.get("port", 9222))
+        try:
+            port = int(params.get("port", 9222))
+            if not (1 <= port <= 65535):
+                raise ValueError("port out of range")
+        except (TypeError, ValueError):
+            return "Error: Invalid CDP port."
+        conn = None
         try:
             conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
             conn.request("GET", "/json")
@@ -95,7 +111,6 @@ class BrowserListTabsTool(BaseTool):
             if resp.status != 200:
                 return f"Error: Browser CDP port {port} returned status {resp.status}."
             pages = json.loads(resp.read().decode("utf-8"))
-            conn.close()
 
             lines = [f"Open browser tabs on port {port}:"]
             for i, p in enumerate(pages, 1):
@@ -108,6 +123,12 @@ class BrowserListTabsTool(BaseTool):
             return f"Connection refused on port {port}. Please ensure a browser is running with --remote-debugging-port={port}."
         except Exception as e:
             return f"Error querying browser tabs: {e}"
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
 
 class BrowserExecJsTool(BaseTool):
@@ -134,20 +155,23 @@ class BrowserExecJsTool(BaseTool):
         except ImportError:
             return "Error: websocket-client is not installed."
 
+        conn = None
+        ws = None
         try:
             conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
             conn.request("GET", "/json")
             resp = conn.getresponse()
+            if resp.status != 200:
+                return f"Error: Browser CDP port {port} returned status {resp.status}."
             pages = json.loads(resp.read().decode("utf-8"))
-            conn.close()
 
-            # Find matching page
+            # Find matching page (fail closed if url_match is specified and nothing matches)
             page = None
             for p in pages:
                 if target_url in p.get("url", ""):
                     page = p
                     break
-            if not page and pages:
+            if not page and not target_url and pages:
                 page = pages[0]
 
             if not page:
@@ -170,11 +194,28 @@ class BrowserExecJsTool(BaseTool):
                     "awaitPromise": True,
                 }
             }))
-            raw_res = json.loads(ws.recv())
-            ws.close()
+            raw_res = None
+            for _ in range(32):
+                pkt = json.loads(ws.recv())
+                if isinstance(pkt, dict) and pkt.get("id") == 1:
+                    raw_res = pkt
+                    break
+            if raw_res is None:
+                return "Error: Timed out waiting for CDP Runtime.evaluate response."
 
             res_val = raw_res.get("result", {}).get("result", {}).get("value")
             return json.dumps(res_val, indent=2) if isinstance(res_val, (dict, list)) else str(res_val)
         except Exception as e:
             return f"Error evaluating script: {e}"
+        finally:
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 

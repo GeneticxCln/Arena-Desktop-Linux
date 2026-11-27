@@ -57,6 +57,8 @@ from arena.config import (
     CHATS_DIR,
     CONFIG_DIR,
     COOKIE_FILE,
+    _cfg_lock,
+    atomic_write_text,
     ensure_config_dir,
     load_config,
     restrict_permissions,
@@ -408,7 +410,7 @@ _API_TOKEN = secrets.token_urlsafe(32)
 _BOOT_NONCE: str | None = None
 _BOOT_COOKIE_NAME = "_arena_boot"
 
-APP_VERSION = "7.4.2"
+APP_VERSION = "7.5.0"
 
 # One tick of every polling loop that waits on something outside the request
 # (a question the person has to answer, a permission, a preview URL). It is a
@@ -673,8 +675,7 @@ def _read_cookie_file() -> str | None:
         cookie = crypto.decode_cookie(stored)
         if cookie and crypto.protection_available() and not crypto.is_protected(stored):
             try:
-                COOKIE_FILE.write_text(crypto.protect_text(cookie), encoding="utf-8")
-                restrict_permissions(COOKIE_FILE)
+                atomic_write_text(COOKIE_FILE, crypto.protect_text(cookie), mode=0o600)
             except Exception:
                 pass
         return cookie or None
@@ -684,8 +685,7 @@ def _read_cookie_file() -> str | None:
 
 def _write_cookie_file(cookie: str) -> None:
     ensure_config_dir()
-    COOKIE_FILE.write_text(crypto.protect_text(str(cookie or "")), encoding="utf-8")
-    restrict_permissions(COOKIE_FILE)
+    atomic_write_text(COOKIE_FILE, crypto.protect_text(str(cookie or "")), mode=0o600)
 
 
 def get_client() -> ArenaClient:
@@ -835,7 +835,7 @@ def _perm_mode() -> str:
     override = getattr(_tl, "perm_override", None)
     if override:
         return permissions.normalize(override)
-    return permissions.normalize(load_config().get("permission_mode"))
+    return permissions.normalize(_settings_value("permission_mode"))
 
 # ---------- Persistent memory + conversation compaction ----------
 
@@ -888,17 +888,29 @@ def _settings_value(key, default=None):
     return load_config().get(key, default)
 
 
+def _update_config(mutator) -> dict:
+    """Atomic read-modify-write for config.json using module-level load_config/save_config."""
+    with _cfg_lock():
+        cfg = load_config()
+        mutator(cfg)
+        save_config(cfg)
+        return cfg
+
+
 def _settings_store(patch: dict) -> None:
-    """Write settings into the track that is being addressed."""
-    cfg = load_config()
-    if _request_track() == "google":
-        scoped = cfg.get("google_settings")
-        scoped = dict(scoped) if isinstance(scoped, dict) else {}
-        scoped.update(patch)
-        cfg["google_settings"] = scoped
-    else:
-        cfg.update(patch)
-    save_config(cfg)
+    """Write settings atomically into the track that is being addressed."""
+    track = _request_track()
+
+    def _apply(cfg: dict) -> None:
+        if track == "google":
+            scoped = cfg.get("google_settings")
+            scoped = dict(scoped) if isinstance(scoped, dict) else {}
+            scoped.update(patch)
+            cfg["google_settings"] = scoped
+        else:
+            cfg.update(patch)
+
+    _update_config(_apply)
 
 
 def _global_memory_file() -> Path:
@@ -1246,10 +1258,7 @@ def _accounts_save(store: dict):
                 record["cookie"] = crypto.protect_text(str(record["cookie"]))
             elif protected:
                 record["cookie"] = protected
-        temp = ACCOUNTS_FILE.with_suffix(".tmp")
-        temp.write_text(json.dumps(disk_store, ensure_ascii=False, indent=1), encoding="utf-8")
-        os.replace(temp, ACCOUNTS_FILE)
-        restrict_permissions(ACCOUNTS_FILE)
+        atomic_write_text(ACCOUNTS_FILE, json.dumps(disk_store, ensure_ascii=False, indent=1), mode=0o600)
         return True
     except Exception:
         LOG.exception("accounts store save failed")
@@ -2272,6 +2281,21 @@ _TRACKED_SETTING_KEYS = frozenset({
 })
 
 
+def _validate_workspace_dir(raw: object) -> tuple[str | None, str | None]:
+    """Validate a user-provided workspace_dir setting (returns (clean_path, error_msg))."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return "", None
+    if not isinstance(raw, str):
+        return None, "workspace_dir must be a folder path string."
+    root = Path(raw.strip().strip('"')).expanduser()
+    if not root.is_absolute():
+        return None, "Use a full folder path, like /home/you/project"
+    root = root.resolve()
+    if root == Path(root.anchor) or root == Path.home().resolve():
+        return None, "Pick a project folder, not a whole drive or your home folder."
+    return str(root), None
+
+
 @app.route("/api/settings", methods=["GET", "POST"])
 def api_settings():
     if request.method == "GET":
@@ -2284,12 +2308,15 @@ def api_settings():
         return jsonify(cfg)
     data = request.get_json(silent=True) or {}
     patch = {key: value for key, value in data.items() if key in _SETTINGS_ALLOWLIST}
+    if "workspace_dir" in patch:
+        clean_ws, ws_err = _validate_workspace_dir(patch["workspace_dir"])
+        if ws_err:
+            return jsonify({"ok": False, "error": ws_err, "code": "bad_workspace"}), 400
+        patch["workspace_dir"] = clean_ws
     shared = {k: v for k, v in patch.items() if k not in _TRACKED_SETTING_KEYS}
     tracked = {k: v for k, v in patch.items() if k in _TRACKED_SETTING_KEYS}
     if shared:
-        cfg = load_config()
-        cfg.update(shared)
-        save_config(cfg)
+        _update_config(lambda cfg: cfg.update(shared))
     if tracked:
         _settings_store(tracked)
     return jsonify({"ok": True, "track": _request_track()})
@@ -2994,12 +3021,46 @@ def api_settings_import():
         return jsonify({"error": f"Could not back up the current settings first: {e}",
                         "code": "backup_failed"}), 500
     imported_cfg = {key: value for key, value in data["config"].items() if key in _SETTINGS_ALLOWLIST}
+    if "workspace_dir" in imported_cfg:
+        clean_ws, ws_err = _validate_workspace_dir(imported_cfg["workspace_dir"])
+        if ws_err:
+            return jsonify({"error": ws_err, "code": "bad_workspace"}), 400
+        imported_cfg["workspace_dir"] = clean_ws
     # Never let an imported settings file silently turn on bypassPermissions.
     if imported_cfg.get("permission_mode") == "bypassPermissions" and not data.get("allow_unsafe_permissions"):
         imported_cfg["permission_mode"] = "default"
-    cfg = load_config()
-    cfg.update(imported_cfg)
-    save_config(cfg)
+    # Validate MCP payload upfront before mutating config if import_mcp was explicitly requested.
+    sanitized_mcp = None
+    if data.get("import_mcp", False) and data.get("mcp") is not None:
+        raw_mcp = data.get("mcp")
+        if not isinstance(raw_mcp, dict):
+            return jsonify({"error": "Imported MCP configuration must be a JSON object.",
+                            "code": "bad_mcp"}), 400
+        raw_servers = raw_mcp.get("mcpServers")
+        if raw_servers is None and isinstance(raw_mcp.get("servers"), dict):
+            raw_servers = raw_mcp.get("servers")
+        if raw_servers is None:
+            raw_servers = {}
+        if not isinstance(raw_servers, dict):
+            return jsonify({"error": "Imported mcpServers must be a JSON object.",
+                            "code": "bad_mcp"}), 400
+        safe_servers: dict = {}
+        for sname, sentry in raw_servers.items():
+            try:
+                clean_name = connectors.validate_server_name(str(sname))
+                if not isinstance(sentry, dict):
+                    raise ValueError("Server entry must be an object")
+                connectors.normalize_server_entry(clean_name, sentry)
+            except ValueError as exc:
+                return jsonify({"error": f"Invalid MCP server '{sname}': {exc}",
+                                "code": "bad_mcp"}), 400
+            safe_entry = dict(sentry)
+            # Never auto-execute imported commands: require explicit user enablement.
+            safe_entry["disabled"] = True
+            safe_entry.pop("enabled", None)
+            safe_servers[clean_name] = safe_entry
+        sanitized_mcp = {"mcpServers": safe_servers}
+    _update_config(lambda cfg: cfg.update(imported_cfg))
     try:
         if isinstance(data.get("memory_global"), str):
             GLOBAL_MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -3011,10 +3072,8 @@ def api_settings_import():
         folder = _chosen_ws()
         if folder and isinstance(data.get("memory_workspace"), str):
             (Path(folder) / MEMORY_FILE_NAME).write_text(data["memory_workspace"], encoding="utf-8")
-        if isinstance(data.get("mcp"), (dict, list)) and data.get("import_mcp", True):
-            mcp_file = connectors._config_path()
-            mcp_file.parent.mkdir(parents=True, exist_ok=True)
-            mcp_file.write_text(json.dumps(data["mcp"], ensure_ascii=False, indent=1), encoding="utf-8")
+        if sanitized_mcp is not None:
+            connectors.save_config(sanitized_mcp)
     except OSError as e:
         return jsonify({"error": f"Import partially failed: {e}", "code": "save_failed"}), 500
     return jsonify({"ok": True, "backup": stamp})
@@ -4037,7 +4096,7 @@ def _run_automation(item):
     prompt = str(item.get("prompt") or "").strip()
     title = ("Auto: " + str(item.get("name") or "Automation"))[:60]
     _tl.chat_id = chat_id
-    _tl.stop_event = threading.Event()
+    _tl.stop_event = _chat_stop_event(chat_id)
     _tl.error = None
     # Old saved schedules may request bypass; unattended work is always read-only.
     _tl.perm_override = "plan"
@@ -4105,11 +4164,11 @@ def _automation_worker(item):
         with _automation_lock:
             _automation_running.discard(str(item.get("id") or ""))
         try:
-            cfg = load_config()
-            for it in cfg.get("automations") or []:
-                if str(it.get("id")) == str(item.get("id")):
-                    it["last_run"] = int(time.time())
-            save_config(cfg)
+            def _mark_last_run(cfg: dict) -> None:
+                for it in cfg.get("automations") or []:
+                    if str(it.get("id")) == str(item.get("id")):
+                        it["last_run"] = int(time.time())
+            _update_config(_mark_last_run)
         except Exception:
             LOG.exception("automation last_run save failed")
 
@@ -4126,6 +4185,8 @@ def _spawn_automation(item) -> bool:
 
 def _automation_tick():
     for item in load_config().get("automations") or []:
+        if not isinstance(item, dict) or _automation_track(item) != "arena":
+            continue
         if _automation_due(item):
             _spawn_automation(item)
 
@@ -4173,37 +4234,44 @@ def api_automations_save():
                         "code": "bad_request"}), 400
     permission = "plan"  # no unattended write or shell permissions
     track = _request_track()
-    cfg = load_config()
-    items = list(cfg.get("automations") or [])
     aid = str(body.get("id") or "") or generate_uuidv7()
     entry = {"id": aid, "name": name[:80], "prompt": prompt[:4000], "schedule": schedule,
              "enabled": body.get("enabled") is not False, "permission": permission,
              "track": track,
              "model": str(body.get("model") or "") or None,
              "last_run": 0}
-    for i, it in enumerate(items):
-        if str(it.get("id")) == aid:
-            entry["last_run"] = it.get("last_run") or 0
-            items[i] = entry
-            break
-    else:
-        if len(items) >= 25:
-            return jsonify({"error": "Maximum of 25 automations reached. Delete one first.",
-                            "code": "limit_reached"}), 400
-        items.append(entry)
-    cfg["automations"] = items
-    save_config(cfg)
+    limit_hit = False
+
+    def _save_auto(cfg: dict) -> None:
+        nonlocal limit_hit
+        items = list(cfg.get("automations") or [])
+        for i, it in enumerate(items):
+            if str(it.get("id")) == aid:
+                entry["last_run"] = it.get("last_run") or 0
+                items[i] = entry
+                break
+        else:
+            if len(items) >= 25:
+                limit_hit = True
+                return
+            items.append(entry)
+        cfg["automations"] = items
+
+    _update_config(_save_auto)
+    if limit_hit:
+        return jsonify({"error": "Maximum of 25 automations reached. Delete one first.",
+                        "code": "limit_reached"}), 400
     return jsonify({"ok": True, "item": entry})
 
 
 @app.route("/api/automations/<aid>", methods=["DELETE"])
 def api_automations_delete(aid):
-    cfg = load_config()
     track = _request_track()
-    items = [it for it in (cfg.get("automations") or [])
-             if str(it.get("id")) != str(aid) or _automation_track(it) != track]
-    cfg["automations"] = items
-    save_config(cfg)
+    _update_config(lambda cfg: cfg.__setitem__(
+        "automations",
+        [it for it in (cfg.get("automations") or [])
+         if str(it.get("id")) != str(aid) or _automation_track(it) != track]
+    ))
     return jsonify({"ok": True})
 
 
@@ -5067,14 +5135,12 @@ def _save_media(m: dict, lane: str, conv: dict):
         return
     done.add(m["url"])
     try:
-        r = requests.get(m["url"], timeout=120)
-        r.raise_for_status()
-        ext = Path(urlparse(m["url"]).path).suffix[:6] or mimetypes.guess_extension(
-            (r.headers.get("content-type") or "").split(";")[0].strip()) or ".bin"
+        blob, mime, final_url = _download_public_https(m["url"], max_bytes=150 * 1024 * 1024, timeout=120)
+        ext = Path(urlparse(final_url).path).suffix[:6] or mimetypes.guess_extension(mime) or ".bin"
         ws.mkdir(parents=True, exist_ok=True)
         target = ws / f"{workspace.slug(conv['title'])}-{lane}-{uuid.uuid4().hex[:6]}{ext}"
-        target.write_bytes(r.content)
-    except (requests.RequestException, OSError) as e:
+        target.write_bytes(blob)
+    except (requests.RequestException, OSError, ValueError, OverflowError) as e:
         yield _sse({"type": "notice", "model": lane, "text": f"Could not save the {m.get('kind') or 'file'}: {e}"})
         return
     yield _sse({"type": "notice", "model": lane, "text": f"Saved to {target}"})
@@ -5170,9 +5236,7 @@ def _sandbox_call(lane: str, call: dict, conv: dict):
                 if target.exists() and (not target.is_file() or rel not in man or _digest(target.read_bytes()) != man[rel]):
                     raise PermissionError("not copied: file is untracked or has local changes")
                 if op["kind"] == "download":
-                    r = requests.get(op["url"], timeout=60)
-                    r.raise_for_status()
-                    data = r.content
+                    data, _mime, _final = _download_public_https(op["url"], max_bytes=50 * 1024 * 1024, timeout=60)
                     row["verb"] = "Saved"
                 else:
                     if op["kind"] == "edit":
@@ -6039,25 +6103,34 @@ def _gateway_approve(server, tool, read_only, arguments) -> bool:
     if server == "subagents":
         return True  # capability is checked inside _subagent_control
     command = ""
+    inside = False
     if server == _GATEWAY_WORKSPACE_SERVER and tool in permissions.KIND:
         permission_tool = tool
         if tool == "run_cmd":
             command = str(arguments.get("cmd") or "")
+            inside = _chosen_ws() is not None
+        else:
+            ws_root = _chosen_ws()
+            if ws_root is not None:
+                _, inside = agent.LocalTools(ws_root).resolve(
+                    str(arguments.get("path") or "."),
+                    write=tool in ("write_file", "edit_file", "mkdir", "delete"),
+                )
         target = command or str(arguments.get("path") or ".")
         summary = f"Agent Gateway workspace: {tool} {target}".strip()
     else:
         permission_tool = "read_file" if read_only else "run_cmd"
         summary = f"Agent Gateway MCP {server}: {tool}"
     if isinstance(BROKER, permissions.PermissionBroker):
-        verdict = BROKER.check(_perm_mode(), permission_tool, inside=True, command=command, gateway=True)
+        verdict = BROKER.check(_perm_mode(), permission_tool, inside=inside, command=command, gateway=True)
     else:
-        verdict = BROKER.check(_perm_mode(), permission_tool, inside=True, command=command)
+        verdict = BROKER.check(_perm_mode(), permission_tool, inside=inside, command=command)
     if verdict == "allow":
         return True
     if verdict in ("deny", "blocked"):
         return False
     info = {"tool": permission_tool, "summary": summary,
-            "gateway": True, "server": server, "mcp_tool": tool, "inside": True,
+            "gateway": True, "server": server, "mcp_tool": tool, "inside": inside,
             "rel": server, "path": json.dumps(arguments, ensure_ascii=False)[:300]}
     pid = BROKER.ask(info)
     LOG.info("gateway: approval requested for %s:%s", server, tool)
@@ -7540,16 +7613,14 @@ def _native_file_bridge(files, native_state):
                 n += 1
         used_names.add(name)
         try:
-            r = requests.get(item["url"], timeout=120)
-            r.raise_for_status()
-            content = r.content
-        except (requests.RequestException, OSError) as e:
-            yield _sse({"type": "notice", "model": "a",
-                        "text": f"Could not download {name} from Arena Agent: {e}"})
-            continue
-        if len(content) > 50 * 1024 * 1024:
+            content, _mime, _final = _download_public_https(item["url"], max_bytes=50 * 1024 * 1024, timeout=120)
+        except OverflowError:
             yield _sse({"type": "notice", "model": "a",
                         "text": f"{name} is over 50 MB and was not downloaded."})
+            continue
+        except (requests.RequestException, OSError, ValueError) as e:
+            yield _sse({"type": "notice", "model": "a",
+                        "text": f"Could not download {name} from Arena Agent: {e}"})
             continue
         digest = hashlib.sha256(content).hexdigest()
         target = root / name
@@ -9664,7 +9735,11 @@ def _google_accounts_load() -> dict:
                     rec = dict(raw)
                     ck = rec.get("cookie")
                     if isinstance(ck, str) and ck:
-                        rec["cookie"] = crypto.decode_cookie(ck) or ""
+                        decoded = crypto.decode_cookie(ck) or ""
+                        rec["cookie"] = decoded
+                        if not decoded:
+                            # Preserve unreadable ciphertext at rest so transient keyring errors never wipe sessions.
+                            rec["_protected_cookie"] = ck
                     accounts.append(rec)
                 return {"current": data.get("current"), "accounts": accounts}
         except (OSError, ValueError):
@@ -9682,16 +9757,15 @@ def _google_accounts_save(store: dict):
                 if not isinstance(raw, dict):
                     continue
                 rec = dict(raw)
+                protected = rec.pop("_protected_cookie", None)
                 ck = rec.get("cookie")
                 if isinstance(ck, str) and ck:
                     rec["cookie"] = crypto.protect_text(ck)
+                elif protected:
+                    rec["cookie"] = protected
                 encoded["accounts"].append(rec)
             payload = json.dumps(encoded, ensure_ascii=False, indent=1)
-            tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-            tmp.write_text(payload, encoding="utf-8")
-            tmp.chmod(0o600)
-            os.replace(tmp, path)
-            path.chmod(0o600)
+            atomic_write_text(path, payload, mode=0o600)
         except OSError:
             LOG.exception("could not save google accounts")
 
@@ -10129,7 +10203,7 @@ def _google_track_stream(chat_id, message):
                 if report:
                     answer = (answer + "\n\n---\n\n**Superviser · Arena Agent**\n\n"
                               + report)
-                    yield _sse({"type": "text", "text": answer, "model": "a"})
+                    yield _sse({"type": "text", "text": answer, "model": "a", "replace": True})
 
         if answer:
             assistant = {"role": "assistant", "text": answer}
@@ -11453,14 +11527,14 @@ def _provider_track_stream(
                                 status = ("blocked: plan mode is read-only" if perm_mode == "plan"
                                           else "blocked by safety rules") if verdict == "blocked" else "denied by the user"
                     elif cname not in permissions.KIND:
-                        ok, output = local_tools.run(call)
+                        ok, output = local_tools.run(call, stop_event=stop_evt)
                         status = "error"
                     else:
                         verdict = yield from _permit(perm_mode, cname, info)
                         if verdict == "allow":
                             if cname in ("write_file", "edit_file", "delete"):
                                 _checkpoint_capture(conv_ctx, "a", info)
-                            ok, output = local_tools.run(call)
+                            ok, output = local_tools.run(call, stop_event=stop_evt)
                             status = "ok" if ok else "error"
                         else:
                             ok, output = False, ""
@@ -12170,7 +12244,7 @@ def api_stop():
         with _generation_lock:
             for ev in _chat_stops.values():
                 ev.set()
-        cancelled = BROKER.cancel_all()
+        cancelled = BROKER.cancel_all() + _NATIVE_SUBAGENTS.cancel_all()
     if _engine_on() and ENGINE.challenge == "recaptcha":
         ENGINE.cancel_check()
     return jsonify({"ok": True, "cancelled": cancelled})
@@ -12455,15 +12529,19 @@ def _workspaces_load() -> dict:
     }
 
 
-def _workspaces_save_items(cfg: dict, folder_items: list, active_id: str) -> None:
-    cfg["workspaces"] = [
+def _workspaces_save_items(_cfg: dict, folder_items: list, active_id: str) -> None:
+    clean_items = [
         {"id": it["id"], "name": it["name"], "path": it["path"]}
         for it in folder_items if it.get("path")
     ]
-    cfg["active_workspace_id"] = active_id
     active_path = next((it["path"] for it in folder_items if it["id"] == active_id), "")
-    _sync_workspace_dir_for_all_tracks(cfg, active_path)
-    save_config(cfg)
+
+    def _apply(cfg: dict) -> None:
+        cfg["workspaces"] = clean_items
+        cfg["active_workspace_id"] = active_id
+        _sync_workspace_dir_for_all_tracks(cfg, active_path)
+
+    _update_config(_apply)
 
 
 @app.route("/api/workspaces", methods=["GET", "POST"])
@@ -12542,10 +12620,11 @@ def api_workspace_set():
         folder_items = [w for w in state["workspaces"] if not w.get("builtin")]
         cfg = load_config()
         if payload.get("track") == "google":
-            scoped = dict(cfg.get("google_settings") or {})
-            scoped.pop("workspace_dir", None)
-            cfg["google_settings"] = scoped
-            save_config(cfg)
+            def _clear_google_ws(cfg: dict) -> None:
+                scoped = dict(cfg.get("google_settings") or {})
+                scoped.pop("workspace_dir", None)
+                cfg["google_settings"] = scoped
+            _update_config(_clear_google_ws)
         else:
             _workspaces_save_items(cfg, folder_items, "general")
         return jsonify({"ok": True, "workspace": str(_workspace_dir()), "cleared": True,
@@ -12574,10 +12653,11 @@ def api_workspace_set():
         folder_items.append({"id": ws_id, "name": root.name or path_str, "path": path_str})
     cfg = load_config()
     if payload.get("track") == "google":
-        scoped = dict(cfg.get("google_settings") or {})
-        scoped["workspace_dir"] = path_str
-        cfg["google_settings"] = scoped
-        save_config(cfg)
+        def _set_google_ws(cfg: dict) -> None:
+            scoped = dict(cfg.get("google_settings") or {})
+            scoped["workspace_dir"] = path_str
+            cfg["google_settings"] = scoped
+        _update_config(_set_google_ws)
     else:
         _workspaces_save_items(cfg, folder_items, ws_id)
     return jsonify({"ok": True, "workspace": path_str, "track": track, "workspace_id": ws_id})
@@ -12603,7 +12683,11 @@ def api_workspace_zip():
     root = _allowed_root(request.args.get("path"))
     if not root or not root.is_dir():
         return jsonify({"error": "Only project folders can be zipped."}), 403
-    return send_file(io.BytesIO(workspace.zip_dir(root)), mimetype="application/zip", as_attachment=True,
+    try:
+        archive = workspace.zip_dir(root)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 413
+    return send_file(io.BytesIO(archive), mimetype="application/zip", as_attachment=True,
                      download_name=f"{root.parent.name}-{root.name}.zip")
 
 
@@ -13297,46 +13381,71 @@ def _is_public_https_url(url: str) -> bool:
     return all(_ip_ok(info[4][0]) for info in infos)
 
 
+def _download_public_https(
+    url: str,
+    *,
+    max_bytes: int,
+    timeout: int = 60,
+    max_redirects: int = 5,
+) -> tuple[bytes, str, str]:
+    """Stream-download a public HTTPS URL with per-hop SSRF validation and hard byte cap."""
+    cur_url = str(url or "").strip()
+    r = None
+    for _hop in range(max_redirects + 1):
+        if not _is_public_https_url(cur_url):
+            raise ValueError("Only public https links are allowed.")
+        r = requests.get(cur_url, timeout=timeout, stream=True, allow_redirects=False)
+        if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("Location"):
+            next_url = urllib.parse.urljoin(cur_url, r.headers["Location"])
+            r.close()
+            r = None
+            cur_url = next_url
+            continue
+        break
+    if r is None:
+        raise ValueError("Too many redirects.")
+    try:
+        r.raise_for_status()
+        chunks = []
+        total_len = 0
+        for chunk in r.iter_content(1 << 16):
+            if not chunk:
+                continue
+            chunks.append(chunk)
+            total_len += len(chunk)
+            if total_len > max_bytes:
+                raise OverflowError(f"File is larger than {max_bytes // (1024 * 1024)} MB.")
+        mime = (r.headers.get("Content-Type") or "").split(";")[0].strip()
+        return b"".join(chunks), mime, cur_url
+    finally:
+        r.close()
+
+
 @app.route("/api/media/save", methods=["POST"])
 def api_media_save():
     """Download a generated image, video or audio file into the projects folder."""
     url = str((request.get_json(silent=True) or {}).get("url") or "")
     folder = workspace.PROJECTS_DIR / "media"
+    max_media_bytes = 300 * 1024 * 1024
     try:
         if url.startswith("data:"):
-            head, _, payload = url.partition(",")
+            head, sep, payload = url.partition(",")
+            if not sep:
+                return jsonify({"ok": False, "error": "Invalid data URL."}), 400
+            if len(payload) > (max_media_bytes * 4) // 3 + 16:
+                return jsonify({"ok": False, "error": "File is larger than 300 MB."}), 413
             mime = head[5:].split(";")[0]
             blob, stem = base64.b64decode(payload), "media"
+            if len(blob) > max_media_bytes:
+                return jsonify({"ok": False, "error": "File is larger than 300 MB."}), 413
         else:
-            cur_url = url
-            r = None
-            for _hop in range(6):
-                if not _is_public_https_url(cur_url):
-                    return jsonify({"ok": False, "error": "Only public https media links can be saved."}), 400
-                r = requests.get(cur_url, timeout=60, stream=True, allow_redirects=False)
-                if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("Location"):
-                    next_url = urllib.parse.urljoin(cur_url, r.headers["Location"])
-                    r.close()
-                    cur_url = next_url
-                    continue
-                break
-            if r is None:
-                return jsonify({"ok": False, "error": "Too many redirects."}), 400
-            try:
-                r.raise_for_status()
-                chunks = []
-                total_len = 0
-                for chunk in r.iter_content(1 << 16):
-                    chunks.append(chunk)
-                    total_len += len(chunk)
-                    if total_len > 300 * 1024 * 1024:
-                        return jsonify({"ok": False, "error": "File is larger than 300 MB."}), 413
-                blob = b"".join(chunks)
-                mime = r.headers.get("Content-Type", "").split(";")[0]
-                stem = Path(urllib.parse.urlparse(cur_url).path).stem or "media"
-            finally:
-                r.close()
-    except (requests.RequestException, ValueError) as e:
+            blob, mime, final_url = _download_public_https(url, max_bytes=max_media_bytes, timeout=60)
+            stem = Path(urllib.parse.urlparse(final_url).path).stem or "media"
+    except OverflowError as e:
+        return jsonify({"ok": False, "error": str(e)}), 413
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except requests.RequestException as e:
         return jsonify({"ok": False, "error": f"Download failed: {e}"}), 502
     ext = mimetypes.guess_extension(mime) or Path(urllib.parse.urlparse(url).path).suffix or ".bin"
     folder.mkdir(parents=True, exist_ok=True)

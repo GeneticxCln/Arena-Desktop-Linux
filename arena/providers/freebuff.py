@@ -163,7 +163,7 @@ class FreebuffProvider(WebChatEngine):
         "freebuff_session",
     )
     login_url_hints = ("/login", "/signin", "/sign-in", "/auth/signin", "/api/auth")
-    conversation_url_hint = "/chat/"
+    conversation_url_hint = ("/chat/", "/app/")
     observed_fetch_patterns = (
         "/api/chat",
         "/api/v1/chat",
@@ -224,6 +224,16 @@ class FreebuffProvider(WebChatEngine):
             "capabilities": ["Text", "Code", "Reasoning"],
         },
     )
+
+    def _is_conversation_url(self, href: str) -> bool:
+        """True only for specific thread URLs (/app/<id> or /chat/<id>), not bare /app or /chat."""
+        if not href:
+            return False
+        path = (urlparse(href).path or "/").rstrip("/")
+        for prefix in ("/app/", "/chat/"):
+            if path.startswith(prefix) and len(path) > len(prefix):
+                return True
+        return False
 
     def _is_non_chat_url(self, href: str) -> bool:
         """Keep Freebuff tabs on /app or /chat (and their /<id> pages), not landing routes."""

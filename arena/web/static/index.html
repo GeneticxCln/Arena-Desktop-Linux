@@ -6,8 +6,8 @@
   <meta name="color-scheme" content="dark">
   <meta name="description" content="Arena Desktop — an unofficial local desktop client for arena.ai. A desktop interface over a local Flask + pywebview backend.">
   <title>Arena Desktop</title>
-  <link rel="stylesheet" href="/static/vendor/xterm.css?v=7.4.2" onerror="this.onerror=null;this.href='static/vendor/xterm.css?v=7.4.2'">
-  <link rel="stylesheet" href="/static/style.css?v=7.4.2" onerror="this.onerror=null;this.href='static/style.css?v=7.4.2'">
+  <link rel="stylesheet" href="/static/vendor/xterm.css?v=7.5.0" onerror="this.onerror=null;this.href='static/vendor/xterm.css?v=7.5.0'">
+  <link rel="stylesheet" href="/static/style.css?v=7.5.0" onerror="this.onerror=null;this.href='static/style.css?v=7.5.0'">
 </head>
 <body>
   <a class="skip-link" href="#prompt">Skip to the message box</a>
@@ -67,37 +67,6 @@
               <span class="brand-name" id="railBrandName">Arena Desktop</span>
             </div>
           </div>
-
-          <!-- History popover (opened from the left Workspaces sidebar). -->
-          <aside class="chats-drawer history-drawer" id="chatsDrawer" aria-label="Chat history" hidden>
-            <header class="chats-drawer-head">
-              <div class="chats-drawer-title">
-                <span data-icon="clock"></span>
-                <span>History</span>
-              </div>
-              <button class="icon-button tiny" id="chatsDrawerClose" type="button" aria-label="Close history">
-                <span data-icon="x"></span>
-              </button>
-            </header>
-            <div class="chat-search" id="chatSearchWrap">
-              <label class="sr-only" for="chatSearch">Search history</label>
-              <span class="chat-search-icon" aria-hidden="true" data-icon="search"></span>
-              <input id="chatSearch" type="search" placeholder="Search history" autocomplete="off" aria-controls="chatList">
-              <button class="icon-button tiny" id="clearChatSearch" type="button" aria-label="Clear search" hidden>
-                <span data-icon="x"></span>
-              </button>
-            </div>
-            <div id="recentsBody" class="recents-body">
-              <div class="chat-list" id="chatList" role="list" aria-label="Chat history" aria-busy="true"></div>
-            </div>
-            <footer class="chats-drawer-foot">
-              <nav class="sidebar-legal" aria-label="Arena documents">
-                <a href="https://help.arena.ai/articles/5629909088-terms-of-use" target="_blank" rel="noopener noreferrer">Terms of Use</a>
-                <a href="https://help.arena.ai/articles/3765052346-privacy-policy" target="_blank" rel="noopener noreferrer">Privacy Policy</a>
-                <a href="https://help.arena.ai/articles/1820405001-lmarena-cookie-policy" target="_blank" rel="noopener noreferrer">Cookies</a>
-              </nav>
-            </footer>
-          </aside>
 
           <!-- Right: profile, settings, help, workspace. -->
           <div class="topbar-edge topbar-edge-right">
@@ -459,6 +428,37 @@
     </aside>
   </div>
 
+  <!-- History popover (opened from the left Workspaces sidebar; kept outside .topbar stacking context). -->
+  <aside class="chats-drawer history-drawer" id="chatsDrawer" aria-label="Chat history" hidden>
+    <header class="chats-drawer-head">
+      <div class="chats-drawer-title">
+        <span data-icon="clock"></span>
+        <span>History</span>
+      </div>
+      <button class="icon-button tiny" id="chatsDrawerClose" type="button" aria-label="Close history">
+        <span data-icon="x"></span>
+      </button>
+    </header>
+    <div class="chat-search" id="chatSearchWrap">
+      <label class="sr-only" for="chatSearch">Search history</label>
+      <span class="chat-search-icon" aria-hidden="true" data-icon="search"></span>
+      <input id="chatSearch" type="search" placeholder="Search history" autocomplete="off" aria-controls="chatList">
+      <button class="icon-button tiny" id="clearChatSearch" type="button" aria-label="Clear search" hidden>
+        <span data-icon="x"></span>
+      </button>
+    </div>
+    <div id="recentsBody" class="recents-body">
+      <div class="chat-list" id="chatList" role="list" aria-label="Chat history" aria-busy="true"></div>
+    </div>
+    <footer class="chats-drawer-foot">
+      <nav class="sidebar-legal" aria-label="Arena documents">
+        <a href="https://help.arena.ai/articles/5629909088-terms-of-use" target="_blank" rel="noopener noreferrer">Terms of Use</a>
+        <a href="https://help.arena.ai/articles/3765052346-privacy-policy" target="_blank" rel="noopener noreferrer">Privacy Policy</a>
+        <a href="https://help.arena.ai/articles/1820405001-lmarena-cookie-policy" target="_blank" rel="noopener noreferrer">Cookies</a>
+      </nav>
+    </footer>
+  </aside>
+
   <div id="popoverRoot"></div>
   <div id="modalRoot"></div>
   <div class="toast-region" id="toastRoot" aria-live="polite" aria-relevant="additions" aria-label="Notifications"></div>
@@ -510,8 +510,8 @@
       }, 12000);
     })();
   </script>
-  <script src="/static/vendor/xterm.js?v=7.4.2" defer onerror="this.onerror=null;this.src='static/vendor/xterm.js?v=7.4.2'"></script>
-  <script src="/static/vendor/xterm-addon-fit.js?v=7.4.2" defer onerror="this.onerror=null;this.src='static/vendor/xterm-addon-fit.js?v=7.4.2'"></script>
-  <script src="/static/app.js?v=7.4.2" defer onerror="this.onerror=null;this.src='static/app.js?v=7.4.2'"></script>
+  <script src="/static/vendor/xterm.js?v=7.5.0" defer onerror="this.onerror=null;this.src='static/vendor/xterm.js?v=7.5.0'"></script>
+  <script src="/static/vendor/xterm-addon-fit.js?v=7.5.0" defer onerror="this.onerror=null;this.src='static/vendor/xterm-addon-fit.js?v=7.5.0'"></script>
+  <script src="/static/app.js?v=7.5.0" defer onerror="this.onerror=null;this.src='static/app.js?v=7.5.0'"></script>
 </body>
 </html>

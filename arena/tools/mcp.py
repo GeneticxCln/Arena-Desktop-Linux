@@ -60,6 +60,7 @@ class McpStdioClient:
                 bufsize=1,
                 cwd=self.cwd,
                 env=self.env,
+                start_new_session=True,
             )
             self._running = True
             self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
@@ -163,7 +164,7 @@ class McpStdioClient:
         except Exception:
             return None
 
-        # Poll for response
+        # Poll for response (exit early if the server process died or stopped)
         start_time = time.time()
         while time.time() - start_time < timeout:
             with self._lock:
@@ -174,8 +175,14 @@ class McpStdioClient:
                     if "error" in resp:
                         return {"error": resp["error"]}
                     return resp
+            if not self._running or (self.process and self.process.poll() is not None):
+                return None
             time.sleep(0.05)
 
+        with self._lock:
+            self._responses.pop(req_id, None)
+            if len(self._responses) > 256:
+                self._responses.clear()
         return None
 
     def send_notification(self, method: str, params: Dict[str, Any]) -> None:
@@ -221,22 +228,38 @@ class McpStdioClient:
         return f"MCP Error: {output}" if res.get("isError") else output
 
     def stop(self) -> None:
-        """Shut down the MCP server process."""
+        """Shut down the MCP server process group and close all pipes."""
         self._running = False
-        if self.process:
-            try:
-                if self.process.stdin:
-                    self.process.stdin.close()
-            except Exception:
-                pass
-            try:
-                self.process.terminate()
-                self.process.wait(timeout=2)
-            except Exception:
+        proc = self.process
+        self.process = None
+        if not proc:
+            return
+        import signal as _signal
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream:
                 try:
-                    self.process.kill()
+                    stream.close()
                 except Exception:
                     pass
+        try:
+            if proc.poll() is None:
+                try:
+                    os.killpg(proc.pid, _signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    proc.terminate()
+                proc.wait(timeout=2)
+        except Exception:
+            try:
+                os.killpg(proc.pid, _signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            try:
+                proc.wait(timeout=2)
+            except Exception:
+                pass
 
 
 class McpToolWrapper(BaseTool):

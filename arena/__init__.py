@@ -2,5 +2,5 @@
 Arena Desktop - Unofficial desktop & CLI client for arena.ai
 """
 
-__version__ = "7.4.2"
+__version__ = "7.5.0"
 

@@ -27,7 +27,13 @@ def slug(text: str, limit: int = 40) -> str:
 
 
 def project_dir(chat_id: str, title: str, lane: str, base: Path = None) -> Path:
-    return (Path(base or PROJECTS_DIR) / f"{slug(title)}-{(chat_id or 'chat')[:8]}" / f"model-{lane}").resolve()
+    base_dir = Path(base or PROJECTS_DIR).resolve()
+    safe_chat = re.sub(r"[^a-zA-Z0-9_-]+", "", (chat_id or "chat"))[:8] or "chat"
+    safe_lane = re.sub(r"[^a-zA-Z0-9_-]+", "", (lane or "a"))[:16] or "a"
+    target = (base_dir / f"{slug(title)}-{safe_chat}" / f"model-{safe_lane}").resolve()
+    if base_dir not in target.parents:
+        raise ValueError("unsafe project directory path")
+    return target
 
 
 def _inside(root: Path, rel: str) -> Path:
@@ -120,13 +126,32 @@ def apply_project(plan: Dict[str, Any], write: bool = True, delete: bool = True)
     return written, deleted
 
 
-def zip_dir(root: Path) -> bytes:
-    root = Path(root)
+MAX_ZIP_BYTES = 200 * 1024 * 1024  # 200 MiB uncompressed cap
+
+
+def zip_dir(root: Path, max_bytes: int = MAX_ZIP_BYTES) -> bytes:
+    root = Path(root).resolve()
     buf = io.BytesIO()
+    total = 0
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for p in sorted(root.rglob("*")):
+            if p.is_symlink():
+                continue
+            try:
+                resolved = p.resolve()
+            except OSError:
+                continue
+            if root not in resolved.parents:
+                continue
             rel = p.relative_to(root)
             if p.is_file() and p.name != MANIFEST and not (_SKIP & set(rel.parts)):
+                try:
+                    size = p.stat().st_size
+                except OSError:
+                    continue
+                total += size
+                if total > max_bytes:
+                    raise ValueError(f"Workspace archive exceeds {max_bytes // (1024 * 1024)} MB limit")
                 z.write(p, rel.as_posix())
     return buf.getvalue()
 

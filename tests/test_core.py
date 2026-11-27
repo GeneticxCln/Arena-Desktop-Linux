@@ -912,12 +912,20 @@ def test_generated_media_is_saved_to_the_picked_folder(web, tmp_path, monkeypatc
     cfg["workspace_dir"] = str(tmp_path / "ws")
 
     class Got:
+        status_code = 200
         content, headers = b"PNG", {"content-type": "image/png"}
 
         def raise_for_status(self):
             pass
 
-    monkeypatch.setattr(appmod.requests, "get", lambda url, timeout: Got())
+        def iter_content(self, _chunk_size=65536):
+            yield self.content
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(appmod, "_is_public_https_url", lambda _u: True)
+    monkeypatch.setattr(appmod.requests, "get", lambda url, **kw: Got())
     out = list(appmod._save_media({"url": "https://cdn.example/img/cat.png", "kind": "image"}, "a", {"title": "A cat"}))
     saved = list((tmp_path / "ws").glob("*-a-*.png"))
     assert len(saved) == 1 and saved[0].read_bytes() == b"PNG" and "Saved to" in out[0]
@@ -2143,7 +2151,19 @@ def test_native_file_bridge_downloads_and_dedupes(web, monkeypatch, tmp_path):
     appmod, _c, cfg, _use, _sent = web
     cfg["permission_mode"] = "bypassPermissions"
     cfg["workspace_dir"] = str(tmp_path / "picked")
-    monkeypatch.setattr(appmod.requests, "get", lambda url, timeout=None: _FakeDownload(b"print('hi')\n"))
+    monkeypatch.setattr(appmod, "_is_public_https_url", lambda _u: True)
+
+    class _StreamDL(_FakeDownload):
+        status_code = 200
+        headers = {}
+
+        def iter_content(self, _chunk_size=65536):
+            yield self.content
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(appmod.requests, "get", lambda url, **kw: _StreamDL(b"print('hi')\n"))
     state = {}
     files = [{"url": "https://example.test/snake.py", "title": "snake.py", "kind": "file"}]
     ev, written = _bridge_events(appmod._native_file_bridge(files, state))
@@ -2159,7 +2179,19 @@ def test_native_file_bridge_downloads_and_dedupes(web, monkeypatch, tmp_path):
 def test_native_file_bridge_respects_plan_and_sanitizes_names(web, monkeypatch, tmp_path):
     appmod, _c, cfg, _use, _sent = web
     cfg["workspace_dir"] = str(tmp_path / "picked")
-    monkeypatch.setattr(appmod.requests, "get", lambda url, timeout=None: _FakeDownload(b"x"))
+    monkeypatch.setattr(appmod, "_is_public_https_url", lambda _u: True)
+
+    class _StreamDL(_FakeDownload):
+        status_code = 200
+        headers = {}
+
+        def iter_content(self, _chunk_size=65536):
+            yield self.content
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(appmod.requests, "get", lambda url, **kw: _StreamDL(b"x"))
     files = [{"url": "https://example.test/evil", "title": "../../evil.txt", "kind": "file"}]
     cfg["permission_mode"] = "plan"
     plan_state = {}

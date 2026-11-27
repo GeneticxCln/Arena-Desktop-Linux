@@ -107,17 +107,19 @@ def new_instance_token() -> str:
 
 
 def write_instance(port: int, token: str) -> None:
-    """Publish this process as the deep-link target (atomic replace)."""
-    _INSTANCE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    """Publish this process as the deep-link target (atomic 0600 replace)."""
+    from arena.config import CONFIG_DIR, atomic_write_text, ensure_config_dir
+    if _INSTANCE_FILE.parent == CONFIG_DIR:
+        ensure_config_dir()
+    else:
+        _INSTANCE_FILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     payload = {
         "port": int(port),
         "pid": os.getpid(),
         "token": str(token),
         "executable": sys.executable,
     }
-    tmp = _INSTANCE_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload), encoding="utf-8")
-    os.replace(tmp, _INSTANCE_FILE)
+    atomic_write_text(_INSTANCE_FILE, json.dumps(payload), mode=0o600)
 
 
 def read_instance() -> Optional[Dict[str, Any]]:

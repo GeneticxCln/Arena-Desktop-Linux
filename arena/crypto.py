@@ -19,6 +19,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from typing import Optional
 
 PREFIX = "ARENA-DPAPI-v1:"
@@ -27,6 +28,7 @@ LINUX_KEYRING_ENABLED = sys.platform.startswith("linux")
 
 _SECRET_SERVICE = "arena-desktop"
 _SECRET_ACCOUNT = "master-key"
+_KEY_LOCK = threading.Lock()
 _LINUX_KEY_CACHE: Optional[bytes] = None
 _LINUX_KEYRING_CHECKED = False
 _LAST_LOOKUP_STATUS = "missing"
@@ -87,21 +89,24 @@ def _linux_master_key(create: bool = False) -> Optional[bytes]:
         return None
     if _LINUX_KEY_CACHE is not None:
         return _LINUX_KEY_CACHE
-    _LAST_LOOKUP_STATUS = "missing"
-    existing = _secret_tool_lookup()
-    if existing is not None:
-        _LINUX_KEY_CACHE = existing
+    with _KEY_LOCK:
+        if _LINUX_KEY_CACHE is not None:
+            return _LINUX_KEY_CACHE
+        _LAST_LOOKUP_STATUS = "missing"
+        existing = _secret_tool_lookup()
+        if existing is not None:
+            _LINUX_KEY_CACHE = existing
+            _LINUX_KEYRING_CHECKED = True
+            return existing
+        # Never overwrite an existing key when the real keyring timed out or is locked!
+        if _LAST_LOOKUP_STATUS == "error" or not create or _LINUX_KEYRING_CHECKED:
+            return None
         _LINUX_KEYRING_CHECKED = True
-        return existing
-    # Never overwrite an existing key when the real keyring timed out or is locked!
-    if _LAST_LOOKUP_STATUS == "error" or not create or _LINUX_KEYRING_CHECKED:
+        candidate = os.urandom(32)
+        if _secret_tool_store(candidate):
+            _LINUX_KEY_CACHE = candidate
+            return candidate
         return None
-    _LINUX_KEYRING_CHECKED = True
-    candidate = os.urandom(32)
-    if _secret_tool_store(candidate):
-        _LINUX_KEY_CACHE = candidate
-        return candidate
-    return None
 
 
 def _linux_protect(data: bytes) -> Optional[bytes]:

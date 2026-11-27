@@ -43,6 +43,7 @@ hiddenimports = [
     'arena.appcache',
     'arena.components',
     'arena.gateway',
+    'arena.skills',
     'arena.terminal',
     'arena.providers',
     'arena.providers.base',

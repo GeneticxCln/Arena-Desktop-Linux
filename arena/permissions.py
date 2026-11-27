@@ -10,6 +10,7 @@ bypassPermissions  allow everything except catastrophic commands
 """
 
 import re
+import shlex
 import threading
 import time
 import uuid
@@ -35,7 +36,7 @@ SHELL_META = re.compile(
     r"[\r\n\x00;&|<>`$]|\b(del|erase|rm|rmdir|rd|format|curl|wget|iwr|invoke-webrequest|"
     r"powershell|pwsh|reg|shutdown|move|mv)\b", re.IGNORECASE)
 _UNSAFE_SAFE_CMD_ARGS = re.compile(
-    r"(--output\b|--ext-diff\b|--textconv\b|"
+    r"(--output\b|--ext-diff\b|--textconv\b|--no-index\b|"
     r"\bgit\s+branch\b.*\s(?:-[a-zA-Z]*[dDmMcCf]\b|--delete\b|--move\b|--copy\b|--force\b)|"
     r"(?:^|\s)(?:~|\.\./|/etc/|/proc/|/root/|/home/|/var/|/usr/|\.ssh\b))",
     re.IGNORECASE,
@@ -60,6 +61,23 @@ def _is_safe_auto_cmd(command: str) -> bool:
         return False
     if _UNSAFE_SAFE_CMD_ARGS.search(cmd):
         return False
+    try:
+        tokens = shlex.split(cmd, posix=True)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+    for tok in tokens[1:]:
+        low = tok.lower()
+        # Reject absolute paths, home-relative paths, parent traversal, and .ssh anywhere in args
+        val = tok.split("=", 1)[1] if (tok.startswith("-") and "=" in tok) else tok
+        if val.startswith(("/", "~")) or re.match(r"^[a-zA-Z]:[\\/]", val):
+            return False
+        parts = [p for p in re.split(r"[/\\]", val) if p]
+        if ".." in parts or ".ssh" in [p.lower() for p in parts]:
+            return False
+        if low in ("--no-index", "--output", "--ext-diff", "--textconv"):
+            return False
     return True
 
 
@@ -165,7 +183,7 @@ class PermissionBroker:
     def cancel_all(self) -> int:
         ids = [info["id"] for info in self.pending()]
         for pid in ids:
-            self.resolve(pid, "deny")
+            self.cancel(pid)
         return len(ids)
 
     def reset_always(self, chat_id: str | None = None):

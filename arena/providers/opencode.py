@@ -553,6 +553,24 @@ class OpenCodeProvider(Provider):
                     break
                 if not rlist:
                     if proc.poll() is not None:
+                        # Drain any bytes written right before exit
+                        while True:
+                            try:
+                                r2, _, _ = select.select([stdout_fd], [], [], 0)
+                            except (OSError, ValueError):
+                                break
+                            if not r2:
+                                break
+                            try:
+                                extra = os.read(stdout_fd, 4096)
+                            except OSError:
+                                break
+                            if not extra:
+                                break
+                            line_buf += decoder.decode(extra, final=False)
+                            while "\n" in line_buf:
+                                one_line, line_buf = line_buf.split("\n", 1)
+                                yield from _process_line(one_line)
                         break
                     continue
                 try:

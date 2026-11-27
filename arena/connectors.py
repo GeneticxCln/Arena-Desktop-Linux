@@ -14,7 +14,6 @@ import os
 import re
 import shlex
 import subprocess
-import sys
 import threading
 import time
 from pathlib import Path
@@ -70,13 +69,12 @@ def read_config(path: Optional[Path] = None) -> Dict[str, Any]:
 
 
 def save_config(data: Dict[str, Any], path: Optional[Path] = None) -> Path:
+    from arena.config import atomic_write_text
     target = _config_path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     if not isinstance(data.get("mcpServers"), dict):
         data["mcpServers"] = {}
-    tmp = target.with_suffix(target.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(target)
+    atomic_write_text(target, json.dumps(data, ensure_ascii=False, indent=2) + "\n", mode=0o600)
     return target
 
 
@@ -362,6 +360,10 @@ class ConnectorManager:
         if client and not running:
             self._errors.setdefault(name, client.last_error or "MCP server exited")
             self._clients.pop(name, None)
+            try:
+                client.stop()
+            except Exception:
+                pass
             client = None
         if not server["enabled"]:
             status = "disabled"
@@ -443,14 +445,16 @@ class ConnectorManager:
                 self._errors.pop(name, None)
                 self._failed_at.pop(name, None)
             else:
-                self._errors[name] = client.last_error or "MCP server did not start"
-                self._failed_at[name] = time.monotonic()
+                if name not in self._clients:
+                    self._errors[name] = client.last_error or "MCP server did not start"
+                    self._failed_at[name] = time.monotonic()
             return self._summary(server)
 
     def disconnect(self, name: str) -> None:
-        client = self._clients.pop(name, None)
-        self._signatures.pop(name, None)
-        self._failed_at.pop(name, None)
+        with self._lock:
+            client = self._clients.pop(name, None)
+            self._signatures.pop(name, None)
+            self._failed_at.pop(name, None)
         if client:
             client.stop()
 
@@ -466,8 +470,7 @@ class ConnectorManager:
         entry.pop("enabled", None)
         save_config(data, self._config_path)
         if not enabled:
-            with self._lock:
-                self.disconnect(name)
+            self.disconnect(name)
         return self.list()
 
     def remove(self, name: str) -> Dict[str, Any]:
@@ -475,11 +478,11 @@ class ConnectorManager:
         servers = data.setdefault("mcpServers", {})
         if name not in servers:
             raise KeyError(f"Connector not found: {name}")
-        with self._lock:
-            self.disconnect(name)
+        self.disconnect(name)
         servers.pop(name, None)
         save_config(data, self._config_path)
-        self._errors.pop(name, None)
+        with self._lock:
+            self._errors.pop(name, None)
         return self.list()
 
     def add_entry(self, name: str, entry: Dict[str, Any], overwrite: bool = False) -> Dict[str, Any]:
@@ -489,11 +492,11 @@ class ConnectorManager:
         if name in servers and not overwrite:
             raise ValueError(f"Connector already exists: {name}")
         normalize_server_entry(name, entry)
-        with self._lock:
-            self.disconnect(name)
+        self.disconnect(name)
         servers[name] = entry
         save_config(data, self._config_path)
-        self._errors.pop(name, None)
+        with self._lock:
+            self._errors.pop(name, None)
         return self.list()
 
     def add_cli(self, name: str, command_line: str, env: Optional[Dict[str, Any]] = None,
@@ -538,6 +541,10 @@ class ConnectorManager:
                 if not client.process or client.process.poll() is not None:
                     self._errors[server_name] = client.last_error or "MCP server exited"
                     self._clients.pop(server_name, None)
+                    try:
+                        client.stop()
+                    except Exception:
+                        pass
                     continue
                 for tool in client.tools:
                     original = str(tool.get("name") or "")

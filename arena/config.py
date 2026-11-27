@@ -6,6 +6,8 @@ import json
 import os
 import sys
 import atexit
+import threading
+import uuid
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -61,14 +63,39 @@ def restrict_permissions(path: Path, mode: int = 0o600) -> None:
             pass
 
 
-_CONFIG_LOCK = None
+def atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
+    """Atomically write text to *path* with *mode* applied at file creation (no 0644 TOCTOU)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(str(tmp), flags, mode)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+        restrict_permissions(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+_CONFIG_LOCK = threading.RLock()
 
 
 def _cfg_lock():
-    global _CONFIG_LOCK
-    if _CONFIG_LOCK is None:
-        import threading as _t
-        _CONFIG_LOCK = _t.RLock()
     return _CONFIG_LOCK
 
 
@@ -88,11 +115,8 @@ def save_config(cfg: Dict[str, Any]) -> None:
     """Atomically save configuration to disk (temp file + os.replace) under a lock."""
     with _cfg_lock():
         ensure_config_dir()
-        tmp = CONFIG_FILE.with_suffix(f".tmp.{os.getpid()}")
         payload = json.dumps(cfg, indent=2)
-        tmp.write_text(payload, encoding="utf-8")
-        restrict_permissions(tmp)
-        os.replace(tmp, CONFIG_FILE)
+        atomic_write_text(CONFIG_FILE, payload, mode=0o600)
 
 
 def update_config(mutator) -> Dict[str, Any]:
@@ -129,11 +153,10 @@ def get_cookie() -> Optional[str]:
 
 
 def save_cookie(val: str) -> None:
-    """Save a cookie string (DPAPI-protected for the current Windows user)."""
+    """Save a cookie string (protected for the current user, owner-only 0600)."""
     ensure_config_dir()
     from arena import crypto
-    COOKIE_FILE.write_text(crypto.protect_text(val.strip()), encoding="utf-8")
-    restrict_permissions(COOKIE_FILE)
+    atomic_write_text(COOKIE_FILE, crypto.protect_text(val.strip()), mode=0o600)
 
 
 def clear_cookie() -> None:
@@ -154,9 +177,12 @@ def write_pid() -> None:
 
 
 def cleanup_pid() -> None:
-    """Remove PID file on clean exit."""
+    """Remove PID file on clean exit only if it belongs to this process."""
     try:
-        PID_FILE.unlink(missing_ok=True)
+        if PID_FILE.exists():
+            raw = PID_FILE.read_text(encoding="utf-8").strip()
+            if raw == str(os.getpid()):
+                PID_FILE.unlink(missing_ok=True)
     except Exception:
         pass
 
@@ -191,8 +217,6 @@ def get_settings() -> Dict[str, Any]:
 
 
 def save_settings(settings: Dict[str, Any]) -> None:
-    """Save settings to config."""
-    cfg = load_config()
-    cfg["settings"] = settings
-    save_config(cfg)
+    """Save settings to config atomically."""
+    update_config(lambda cfg: cfg.__setitem__("settings", settings))
 

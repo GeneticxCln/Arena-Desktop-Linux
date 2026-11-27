@@ -1544,6 +1544,14 @@ class WebChatEngine(Provider):
             time.sleep(0.25)
         return last
 
+    def _is_conversation_url(self, href: str) -> bool:
+        if not href or not self.conversation_url_hint:
+            return False
+        hints = self.conversation_url_hint
+        if isinstance(hints, str):
+            return hints in href
+        return any(bool(h and h in href) for h in hints)
+
     def stream_turn(
         self,
         chat_id: str,
@@ -1615,7 +1623,7 @@ class WebChatEngine(Provider):
             not is_followup_round
             and not conversation_url
             and (
-                (self.conversation_url_hint and self.conversation_url_hint in (current or ""))
+                self._is_conversation_url(current or "")
                 or self._is_non_chat_url(current or "")
             )
         )
@@ -1741,7 +1749,7 @@ class WebChatEngine(Provider):
         before = self._read_messages_snapshot()
         before_count = int(before.get("count") or 0)
         before_text = str(before.get("text") or "")
-        before_api_count = 0
+        before_api_count: int | None = None if conversation_url else 0
         if conversation_url:
             api_before = self._poll_conversation_api(conversation_url)
             if isinstance(api_before, dict):
@@ -1858,6 +1866,9 @@ class WebChatEngine(Provider):
                     new_seq = int(obs.get("seq") or 0)
                     if obs_seq and new_seq and new_seq != obs_seq:
                         obs_cursor = 0
+                        if not obs_used:
+                            obs_state.clear()
+                            obs_state["buf"] = ""
                     if new_seq:
                         obs_seq = new_seq
                     obs_cursor = max(obs_cursor, int(obs.get("nextCursor") or obs_cursor))
@@ -1876,8 +1887,7 @@ class WebChatEngine(Provider):
                             if (
                                 cur_href
                                 and cur_href != saved_href
-                                and self.conversation_url_hint
-                                and self.conversation_url_hint in cur_href
+                                and self._is_conversation_url(cur_href)
                             ):
                                 yield {"type": "meta_update", "external_url": cur_href}
                             return
@@ -1892,6 +1902,15 @@ class WebChatEngine(Provider):
                                 "open_window": True,
                             }
                             return
+                        obs_err = str(obs.get("error") or "").strip()
+                        if obs_err and not emitted_text and not emitted_reasoning:
+                            yield {
+                                "type": "error",
+                                "code": "provider_stream",
+                                "message": f"{self.name} stream error: {obs_err}",
+                                "open_window": True,
+                            }
+                            return
                     if obs_used:
                         continue
 
@@ -1900,8 +1919,7 @@ class WebChatEngine(Provider):
             if (
                 href
                 and href != saved_href
-                and self.conversation_url_hint
-                and self.conversation_url_hint in href
+                and self._is_conversation_url(href)
             ):
                 saved_href = href
                 yield {"type": "meta_update", "external_url": href}
@@ -1917,34 +1935,45 @@ class WebChatEngine(Provider):
             # signed-in conversation history API directly!
             if (
                 href
-                and self.conversation_url_hint
-                and self.conversation_url_hint in href
+                and self._is_conversation_url(href)
                 and (count <= before_count or not cur_text)
                 and (time.time() - last_api_poll) >= 1.0
             ):
                 last_api_poll = time.time()
                 api_snap = self._poll_conversation_api(href)
-                if isinstance(api_snap, dict) and int(api_snap.get("count") or 0) > before_api_count:
-                    using_api_snap = True
-                    count = int(api_snap["count"])
-                    cur_text = str(api_snap.get("text") or "")
-                    cur_reason = str(api_snap.get("reasoning") or "")
-                    streaming = bool(api_snap.get("streaming"))
+                if isinstance(api_snap, dict):
+                    api_count = int(api_snap.get("count") or 0)
+                    api_text = str(api_snap.get("text") or "")
+                    api_advanced = (
+                        (before_api_count is not None and api_count > before_api_count)
+                        or (before_api_count is None and api_text and api_text != before_text)
+                    )
+                    if api_advanced:
+                        using_api_snap = True
+                        count = api_count
+                        cur_text = api_text
+                        cur_reason = str(api_snap.get("reasoning") or "")
+                        streaming = bool(api_snap.get("streaming"))
 
             new_turn = using_api_snap or count > before_count or (count == before_count and cur_text != before_text)
             if streaming or new_turn:
                 saw_activity = True
 
             if saw_activity and new_turn:
+                grew = False
                 if cur_reason and len(cur_reason) > len(emitted_reasoning) and cur_reason.startswith(emitted_reasoning):
                     delta_r = cur_reason[len(emitted_reasoning):]
                     emitted_reasoning = cur_reason
                     dom_used = True
+                    grew = True
+                    stable_ticks = 0
                     last_growth_at = time.time()
                     yield {"type": "reasoning", "text": delta_r}
                 elif cur_reason and cur_reason != emitted_reasoning:
                     emitted_reasoning = cur_reason
                     dom_used = True
+                    grew = True
+                    stable_ticks = 0
                     last_growth_at = time.time()
                     yield {"type": "reasoning_replace", "text": cur_reason}
 
@@ -1952,16 +1981,18 @@ class WebChatEngine(Provider):
                     delta = cur_text[len(emitted_text):]
                     emitted_text = cur_text
                     dom_used = True
+                    grew = True
                     last_growth_at = time.time()
                     stable_ticks = 0
                     yield {"type": "text", "text": delta}
                 elif cur_text and cur_text != emitted_text:
                     emitted_text = cur_text
                     dom_used = True
+                    grew = True
                     last_growth_at = time.time()
                     stable_ticks = 0
                     yield {"type": "text_replace", "text": cur_text}
-                elif not streaming and (emitted_text or emitted_reasoning):
+                elif not grew and not streaming and (emitted_text or emitted_reasoning):
                     stable_ticks += 1
                     if stable_ticks >= 3:
                         return

@@ -175,8 +175,8 @@ class KimiProvider(WebChatEngine):
         want = (model_id or "").strip()
         if not want or want.lower() == "default":
             return True
-        cur = self._read_active_model_label().lower()
-        if cur and (want.lower() == cur or want.lower() in cur):
+        cur = self._read_active_model_label().strip().lower()
+        if cur and want.lower() == cur:
             return True
         opened = self.eval_js(
             """(() => {
@@ -199,12 +199,24 @@ class KimiProvider(WebChatEngine):
               const items = Array.from(document.querySelectorAll(
                 '[role="menuitem"], [role="option"], [class*="model-item"], [class*="kimi-menu"] li, [class*="popover"] [role="button"]'
               ));
+              const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+              let fallback = null;
               for (const item of items) {{
-                const txt = (item.innerText || item.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-                if (txt.includes(wantFull) || (toks.length && toks.every((t) => txt.includes(t)))) {{
+                const raw = String(item.innerText || item.textContent || '');
+                const firstLine = norm(raw.split('\\n')[0] || '');
+                const txt = norm(raw);
+                if (firstLine === wantFull || txt === wantFull) {{
                   item.click();
                   return JSON.stringify({{ ok: true, clicked: txt.slice(0, 60) }});
                 }}
+                if (!fallback && (txt.includes(wantFull) || (toks.length && toks.every((t) => txt.includes(t))))) {{
+                  fallback = item;
+                }}
+              }}
+              if (fallback) {{
+                const txt = norm(fallback.innerText || fallback.textContent || '');
+                fallback.click();
+                return JSON.stringify({{ ok: true, clicked: txt.slice(0, 60) }});
               }}
               document.dispatchEvent(new KeyboardEvent('keydown', {{ key: 'Escape', code: 'Escape', bubbles: true }}));
               return JSON.stringify({{ ok: false }});
@@ -289,6 +301,10 @@ class KimiProvider(WebChatEngine):
                 try:
                     pkt, end = decoder.raw_decode(buf, pos)
                 except ValueError:
+                    next_pos = buf.find("{", pos + 1)
+                    if next_pos != -1:
+                        pos = next_pos
+                        continue
                     break
                 if isinstance(pkt, dict):
                     _handle_pkt(pkt)

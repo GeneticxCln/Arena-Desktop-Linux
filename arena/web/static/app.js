@@ -137,6 +137,7 @@
       if (value === null || value === undefined || value === false) continue;
       if (key === 'class' || key === 'className') node.className = String(value);
       else if (key === 'text') node.textContent = String(value);
+      else if (key === 'value' && tag === 'textarea') node.value = String(value);
       else if (key === 'style' && typeof value === 'object') Object.assign(node.style, value);
       else if (key === 'dataset' && typeof value === 'object') Object.assign(node.dataset, value);
       else if (key.startsWith('on') && typeof value === 'function') node.addEventListener(key.slice(2).toLowerCase(), value);
@@ -174,13 +175,6 @@
     if (!value) return null;
     if (image && value.startsWith('data:image/')) {
       if (/^data:image\/(png|jpe?g|webp|gif);/i.test(value)) return value;
-      if (/^data:image\/svg\+xml[,;]/i.test(value)) {
-        try {
-          const decoded = decodeURIComponent(value.split(',').slice(1).join(','));
-          if (/<script|on[a-z]+\s*=|javascript:/i.test(decoded)) return null;
-        } catch { return null; }
-        return value;
-      }
       return null;
     }
     if (image && /^blob:/i.test(value)) return value;
@@ -1234,7 +1228,7 @@
         permission_mode: demoStore.permissionMode,
         workspace: demoStore.workspace,
         workspace_chosen: true,
-        app_version: '7.4.2',
+        app_version: '7.5.0',
         pending_permissions: demoStore.pendingPermissions.length,
         demo: true
       };
@@ -1778,7 +1772,8 @@
     async terminalResize(sid, cols, rows) { return { ok: true, cols, rows, demo: true }; },
     async terminalClose() { return { ok: true, closed: true, demo: true }; },
     async openNativeAgent() { await sleep(160); return { ok: true, demo: true, url: 'https://arena.ai/agent' }; },
-    async googleStatus() { await sleep(60); return { ok: true, desktop: false, signed_in: false, accounts: [], prefs: { hl: 'en', show_window: false, keep_citations: true, supervisor: false, supervisor_steps: 6 }, demo: true }; },
+    async getGoogleStatus() { await sleep(60); return { ok: true, desktop: false, signed_in: false, accounts: [], prefs: { hl: 'en', show_window: false, keep_citations: true, supervisor: false, supervisor_steps: 6 }, demo: true }; },
+    async googleStatus() { return this.getGoogleStatus(); },
     async googleVerify() { await sleep(80); return { ok: true, signed_in: false, email: '', name: '', accounts: [], demo: true }; },
     async googleImport() { await sleep(80); return { ok: true, imported: 0, updated: 0, chats: [], demo: true }; },
     async googleThreads() { await sleep(80); return { ok: true, threads: [], demo: true }; },
@@ -3887,6 +3882,7 @@ You can start with a more structured option: one script, short captions, and a c
   async function loadGoogleStatus({ silent = false } = {}) {
     try {
       const data = await API.getGoogleStatus();
+      const sessionExpired = Boolean(data?.session_expired || data?.expired);
       state.google = {
         loaded: true,
         signed_in: Boolean(data?.signed_in),
@@ -3894,7 +3890,13 @@ You can start with a more structured option: one script, short captions, and a c
         window: data?.window || null,
         account: data?.account || null,
         accounts: Array.isArray(data?.accounts) ? data.accounts : [],
-        sessionExpired: Boolean(data?.session_expired),
+        has_cookie: data?.has_cookie,
+        configured: Boolean(data?.configured),
+        current_account: data?.current_account || '',
+        mode: data?.mode || '',
+        expired: sessionExpired,
+        session_expired: sessionExpired,
+        sessionExpired,
         sessionReason: data?.session_reason || '',
         prefs: data?.prefs || state.google.prefs,
       };
@@ -3909,15 +3911,15 @@ You can start with a more structured option: one script, short captions, and a c
   function googleIdentity() {
     const acc = state.google?.account || {};
     const saved = (state.google?.accounts || []).find((item) => item.current) || null;
-    const expired = Boolean(acc.expired || state.google?.expired || state.google?.session_expired);
+    const expired = Boolean(acc.expired || state.google?.expired || state.google?.session_expired || state.google?.sessionExpired);
     const signedIn = !expired && Boolean(
       state.google?.signed_in ||
       (acc.signed_in && state.google?.has_cookie)
     );
     return {
       signedIn,
-      name: (signedIn && (acc.name || acc.email)) || saved?.email || saved?.name || '',
-      email: signedIn ? (acc.email || state.google?.current_account || acc.email || '') : '',
+      name: (signedIn && (acc.name || acc.email)) || acc.name || acc.email || saved?.email || saved?.name || '',
+      email: (signedIn || expired) ? (acc.email || state.google?.current_account || saved?.email || '') : '',
       window: Boolean(state.google?.desktop),
       expired: expired,
       expiredReason: saved?.expired_reason || state.google?.sessionReason || '',
@@ -3947,13 +3949,16 @@ You can start with a more structured option: one script, short captions, and a c
     let verifyAttempted = false;
     let sawWindow = false;
     let ticks = 0;
+    let polling = false;
     const MAX_TICKS = 375; // ~5 minutes max
     googleSignInTimer = window.setInterval(async () => {
+      if (polling) return;
       ticks += 1;
       if (ticks > MAX_TICKS) {
         stopGoogleSignInWatch();
         return;
       }
+      polling = true;
       try {
         const data = await API.getGoogleStatus();
         const diag = (data && data.diagnosis) || {};
@@ -4010,6 +4015,9 @@ You can start with a more structured option: one script, short captions, and a c
           stopGoogleSignInWatch();
         }
       } catch (_) {}
+      finally {
+        polling = false;
+      }
     }, 800);
   }
 
@@ -4126,11 +4134,15 @@ You can start with a more structured option: one script, short captions, and a c
       const active = state.chats.find((chat) => String(chat.id) === String(state.activeChatId));
       if (active && chatTrack(active) !== next) {
         // Never show an Arena dialogue inside Google AI mode (or back).
+        state.historyRequest = (state.historyRequest || 0) + 1;
+        state.historyLoading = false;
+        state.historyError = null;
         state.activeChatId = null;
         state.activeChatEvalId = null;
         state.messages = [];
         state.artifacts = [];
         state.view = 'welcome';
+        syncGenerationState();
         renderChatArea();
         setView('welcome');
       }
@@ -4526,14 +4538,19 @@ You can start with a more structured option: one script, short captions, and a c
       if (remaining.length) {
         void openChat(remaining[0].id);
       } else {
+        saveComposerDraft();
+        state.historyRequest = (state.historyRequest || 0) + 1;
+        state.historyLoading = false;
+        state.historyError = null;
         state.activeChatId = null;
         state.activeChatEvalId = null;
         state.messages = [];
         state.artifacts = [];
         state.view = 'welcome';
         syncGenerationState();
-        renderChatArea();
+        restoreComposerDraft();
         setView('welcome');
+        updateComposerState();
       }
     }
     renderRailChats();
@@ -4661,6 +4678,9 @@ You can start with a more structured option: one script, short captions, and a c
   function _resetEmptyWorkspaceView() {
     stashActiveTurns();
     saveComposerDraft();
+    state.historyRequest = (state.historyRequest || 0) + 1;
+    state.historyLoading = false;
+    state.historyError = null;
     state.activeChatId = null;
     state.activeChatEvalId = null;
     state.activeChatExternal = '';
@@ -4669,6 +4689,8 @@ You can start with a more structured option: one script, short captions, and a c
     state.messages = [];
     state.artifacts = [];
     state.view = 'welcome';
+    syncGenerationState();
+    restoreComposerDraft();
     renderChatArea();
     setView('welcome');
     updateTopbarTitle();
@@ -5902,8 +5924,11 @@ You can start with a more structured option: one script, short captions, and a c
 
   async function refreshNativeSubagents() {
     const chatId = state.activeChatId;
-    // Google AI mode runs in the Google window: it never spawns sub-agents.
-    if (!chatId || state.view !== 'chat' || state.track === 'google') return;
+    // Only saved Arena chats can spawn Arena native sub-agents.
+    if (!chatId || state.view !== 'chat' || state.track !== 'arena') return;
+    if (state.serverError || state.networkOffline) return;
+    const activeChat = (state.chats || []).find((c) => String(c.id) === String(chatId));
+    if (activeChat?.unsent) return;
     try {
       const data = await API.getNativeSubagents(chatId);
       if (String(state.activeChatId) !== String(chatId)) return;
@@ -6127,12 +6152,22 @@ You can start with a more structured option: one script, short captions, and a c
         }
       } else if (candidate.url) {
         const isProtected = candidate.url.startsWith('/api/native-cas/');
-        const image = el('img', { src: isProtected ? null : candidate.url, alt: `Generated image option ${candidate.index + 1}`, loading: 'lazy' });
-        const preview = el('a', { class: 'media-choice-preview', href: isProtected ? '#' : candidate.url,
-          target: '_blank', rel: 'noopener noreferrer', title: 'Open full size',
-          'aria-label': `Open image option ${candidate.index + 1} full size` }, image);
-        if (isProtected) void mediaBlobUrl(candidate.url).then((url) => { image.src = url; preview.href = url; }).catch(() => {});
-        figure.appendChild(preview);
+        const safeImg = isProtected ? null : safeUrl(candidate.url, { image: true });
+        const safeHref = isProtected ? '#' : safeUrl(candidate.url);
+        if (isProtected || safeImg) {
+          const image = el('img', { src: safeImg, alt: `Generated image option ${candidate.index + 1}`, loading: 'lazy' });
+          if (isProtected || safeHref) {
+            const preview = el('a', { class: 'media-choice-preview', href: safeHref || '#',
+              target: '_blank', rel: 'noopener noreferrer', title: 'Open full size',
+              'aria-label': `Open image option ${candidate.index + 1} full size` }, image);
+            if (isProtected) void mediaBlobUrl(candidate.url).then((url) => { image.src = url; preview.href = url; }).catch(() => {});
+            figure.appendChild(preview);
+          } else {
+            figure.appendChild(el('div', { class: 'media-choice-preview' }, image));
+          }
+        } else {
+          figure.appendChild(el('div', { class: 'media-choice-preview is-placeholder' }, iconEl('image')));
+        }
       } else {
         figure.appendChild(el('div', { class: 'media-choice-preview is-placeholder' }, iconEl('image')));
       }
@@ -6155,10 +6190,13 @@ You can start with a more structured option: one script, short captions, and a c
       const actions = el('div', { class: 'media-choice-actions' });
       if (candidate.url) {
         const isProtected = candidate.url.startsWith('/api/native-cas/');
-        const link = el('a', { class: 'button button-small button-quiet', href: isProtected ? '#' : candidate.url,
-          target: '_blank', rel: 'noopener noreferrer' }, iconEl('external'), el('span', { text: isVoice ? 'Open audio' : 'Full size' }));
-        if (isProtected) void mediaBlobUrl(candidate.url).then((url) => { link.href = url; }).catch(() => {});
-        actions.appendChild(link);
+        const safeHref = isProtected ? '#' : safeUrl(candidate.url);
+        if (isProtected || safeHref) {
+          const link = el('a', { class: 'button button-small button-quiet', href: safeHref,
+            target: '_blank', rel: 'noopener noreferrer' }, iconEl('external'), el('span', { text: isVoice ? 'Open audio' : 'Full size' }));
+          if (isProtected) void mediaBlobUrl(candidate.url).then((url) => { link.href = url; }).catch(() => {});
+          actions.appendChild(link);
+        }
       }
       if (pending && choice.id) {
         const use = el('button', {
@@ -6408,7 +6446,7 @@ You can start with a more structured option: one script, short captions, and a c
   function arenaPopoverRow(item) {
     const busy = state.arenaConnectorBusy.has(item.slug);
     const connected = Boolean(item.connected || item.auth_status === 'connected');
-    const enabled = connected && !state.arenaConnectorsOff.has(item.slug);
+    let enabled = connected && !state.arenaConnectorsOff.has(item.slug);
     const row = el('div', { class: 'popover-connector-row' });
     row.appendChild(connectorLogoNode(item));
     row.appendChild(el('span', { class: 'popover-connector-name', title: item.name, text: item.name }));
@@ -6418,9 +6456,10 @@ You can start with a more structured option: one script, short captions, and a c
         'aria-label': `Toggle ${item.name}`, 'aria-pressed': String(enabled)
       }, el('span', { class: 'switch-knob' }));
       toggle.addEventListener('click', () => {
-        setArenaConnectorEnabled(item, !enabled);
-        toggle.classList.toggle('is-on', !enabled);
-        toggle.setAttribute('aria-pressed', String(!enabled));
+        enabled = !enabled;
+        setArenaConnectorEnabled(item, enabled);
+        toggle.classList.toggle('is-on', enabled);
+        toggle.setAttribute('aria-pressed', String(enabled));
       });
       row.appendChild(toggle);
     } else {
@@ -6434,7 +6473,7 @@ You can start with a more structured option: one script, short captions, and a c
 
   function mcpPopoverRow(server) {
     const name = String(server.name || server.id || '');
-    const enabled = Boolean(server.enabled);
+    let enabled = Boolean(server.enabled);
     const row = el('div', { class: 'popover-connector-row' });
     row.appendChild(iconEl('plug'));
     row.appendChild(el('span', { class: 'popover-connector-name', title: name, text: name }));
@@ -6444,10 +6483,16 @@ You can start with a more structured option: one script, short captions, and a c
     }, el('span', { class: 'switch-knob' }));
     toggle.addEventListener('click', async () => {
       toggle.disabled = true;
+      const next = !enabled;
       try {
-        await API.setConnectorEnabled(name, !enabled);
-        toggle.classList.toggle('is-on', !enabled);
-        toggle.setAttribute('aria-pressed', String(!enabled));
+        const res = await API.setConnectorEnabled(name, next);
+        enabled = next;
+        server.enabled = enabled;
+        if (res && typeof applyConnectorsPayload === 'function' && Array.isArray(res.servers)) {
+          applyConnectorsPayload(res);
+        }
+        toggle.classList.toggle('is-on', enabled);
+        toggle.setAttribute('aria-pressed', String(enabled));
       } catch { /* keep state */ }
       toggle.disabled = false;
     });
@@ -6902,7 +6947,8 @@ You can start with a more structured option: one script, short captions, and a c
       state.directTools = false;
       syncWorkspaceSyncToggle();
       toast("Choose a folder on this computer first — Workspace Sync lets the models work in that folder like an agent.", 'info', "Workspace Sync");
-      openWorkspacePopover(els.workspaceButton);
+      if (els.workspaceButton) openWorkspacePopover(els.workspaceButton);
+      else openSettings('workspace');
       return;
     }
     state.directTools = Boolean(on);
@@ -7199,7 +7245,6 @@ You can start with a more structured option: one script, short captions, and a c
         el('span', { class: 'chip-label', text: label }),
         iconEl('chevron-down')
       );
-      chip.addEventListener('click', () => openModelPicker(laneKey, chip));
       return chip;
     };
 
@@ -7476,8 +7521,8 @@ You can start with a more structured option: one script, short captions, and a c
     if (state.track === 'google') {
       // Google AI mode shows the Google identity, never the arena.ai account.
       const g = googleIdentity();
-      if (g.signedIn && g.expired) {
-        name = g.name;
+      if (g.expired) {
+        name = g.name || 'Google account';
         sub = 'Session expired: sign in to Google';
         avatarClass = '';
       } else {
@@ -7492,7 +7537,7 @@ You can start with a more structured option: one script, short captions, and a c
         els.accountAvatar.classList.toggle('is-anonymous', avatarClass === 'is-anonymous');
         els.accountAvatar.classList.toggle('is-demo', false);
         delete els.accountAvatar.dataset.avatarUrl;
-        els.accountAvatar.textContent = g.signedIn && g.expired ? '?' : 'G';
+        els.accountAvatar.textContent = g.expired ? '?' : 'G';
         els.accountAvatar.classList.add('is-google');
       }
       if (els.accountDot) {
@@ -8411,16 +8456,16 @@ You can start with a more structured option: one script, short captions, and a c
     if (!event || typeof event !== 'object') return;
     const type = String(event.type || '').toLowerCase();
     const turn = generation.turn;
+    const genTrack = generation.track || state.track;
     if (type === 'ping') return;
     if (type === 'meta') {
-      if (state.track === 'google') {
+      if (genTrack === 'google') {
         // Google AI mode names its own answer: Arena model metadata must not
         // leak into the header ("Model A") or the lane badge.
         const lane = turnLane(turn, 'a');
         lane.modelName = "Google AI mode";
         lane.modelOrg = '';
         if (event.mode) turn.mode = event.mode;
-        if (event.chat_id && !state.activeChatId) state.activeChatId = String(event.chat_id);
         if (!generation._chatsReloaded) {
           generation._chatsReloaded = true;
           void loadChats({ silent: true });
@@ -8464,13 +8509,12 @@ You can start with a more structured option: one script, short captions, and a c
       }
       if (event.names?.b && !metaModels.b) metaModels.b = { id: 'b', name: String(event.names.b), org: '', color: '', capabilities: [] };
       const activeModel = event.model_id ? normalizeModel(event.model_id) : null;
-      if (state.track === 'google' && !state.demo) {
+      if (genTrack === 'google' && !state.demo) {
         // Google AI mode labels its own answers; there is no Arena model here.
         const lane = turnLane(turn, 'a');
         lane.modelName = "Google AI mode";
         lane.modelOrg = '';
         if (event.mode) turn.mode = event.mode;
-        if (event.chat_id && !state.activeChatId) state.activeChatId = String(event.chat_id);
         scheduleChatRender();
         return;
       }
@@ -8492,7 +8536,6 @@ You can start with a more structured option: one script, short captions, and a c
       }
       if (event.mode) turn.mode = event.mode;
       if (event.modality) turn.modality = event.modality;
-      if (event.chat_id && !state.activeChatId) state.activeChatId = String(event.chat_id);
       if (!generation._chatsReloaded) {
         // The backend has saved this chat by now (it does so before the
         // stream starts), so refresh the sidebar with the real entry.
@@ -8512,7 +8555,7 @@ You can start with a more structured option: one script, short captions, and a c
       else if (delta) lane.text += delta;
       // Google AI mode has no tool stages: "writing…" is a spinner line, not
       // a step to keep once the answer itself is on screen.
-      if (delta && state.track === 'google') lane.agentStages = [];
+      if (delta && genTrack === 'google') lane.agentStages = [];
       if (event.model_id && !lane.modelId) {
         const model = normalizeModel(event.model_id);
         if (model) {
@@ -8913,9 +8956,15 @@ You can start with a more structured option: one script, short captions, and a c
       return;
     }
     if (type === 'title' && (event.title || event.text)) {
-      state.activeChatTitle = String(event.title ?? event.text);
-      renderChatHead();
-      updateTopbarTitle();
+      const nextTitle = String(event.title ?? event.text);
+      const chatEntry = (state.chats || []).find((c) => String(c.id) === String(generation.chatId));
+      if (chatEntry) chatEntry.title = nextTitle;
+      if (String(generation.chatId) === String(state.activeChatId)) {
+        state.activeChatTitle = nextTitle;
+        renderChatHead();
+        updateTopbarTitle();
+      }
+      renderRailChats();
       return;
     }
     // Unknown event types are deliberately ignored, not guessed or rendered as HTML.
@@ -9533,7 +9582,7 @@ You can start with a more structured option: one script, short captions, and a c
       renderAttachmentStrip();
       resetPromptHeight();
       const controller = new AbortController();
-      const generation = { turn, controller, chatId: String(chatId), hadError: false, done: false, finished: false, abortTimer: null, stopRequested: false, composerAttachments };
+      const generation = { turn, controller, chatId: String(chatId), track: state.track, hadError: false, done: false, finished: false, abortTimer: null, stopRequested: false, composerAttachments };
       state.generations.set(generation.chatId, generation);
       state.chatTurns[generation.chatId] = state.messages;
       markChatSeen(generation.chatId);
@@ -9636,8 +9685,13 @@ You can start with a more structured option: one script, short captions, and a c
     const liveTrigger = resolveLiveTrigger(trigger);
     let triggerRect = liveTrigger ? liveTrigger.getBoundingClientRect() : null;
     if (!triggerRect || (triggerRect.width === 0 && triggerRect.height === 0 && triggerRect.top === 0 && triggerRect.left === 0)) {
-      triggerRect = popover._lastTriggerRect || null;
-      if (!triggerRect) return;
+      triggerRect = popover._lastTriggerRect || {
+        left: Math.max(8, Math.round((window.innerWidth - 360) / 2)),
+        top: Math.max(64, Math.round(window.innerHeight * 0.2)),
+        bottom: Math.max(64, Math.round(window.innerHeight * 0.2)),
+        width: 0,
+        height: 0
+      };
     } else {
       popover._lastTriggerRect = triggerRect;
       if (activePopover && activePopover.node === popover && liveTrigger) {
@@ -10557,8 +10611,8 @@ You can start with a more structured option: one script, short captions, and a c
         keywords: 'model picker select lane',
         disabled: extraTrack ? Boolean(state.generating) : (!allowsManualModels() || Boolean(reason)),
         run: () => extraTrack
-          ? openProviderModelPicker(state.track, els.modelsNavBtn || els.modeButton)
-          : openModelPicker('a', els.modelsNavBtn || els.modeButton)
+          ? openProviderModelPicker(state.track, document.querySelector('[data-provider-model-picker]') || els.composerCard)
+          : openModelPicker('a', document.querySelector('[data-model-picker="a"]') || els.modelsNavBtn || els.modeButton || els.composerCard)
       });
       actions.push(
         {
@@ -11140,7 +11194,7 @@ You can start with a more structured option: one script, short captions, and a c
       toast(account.email || account.name || 'Account switched.', 'success', 'Account switched');
       state.settingsRerender?.();
     } catch (error) {
-      const payload = error?.payload;
+      const payload = error?.details || error?.payload;
       if (Array.isArray(payload?.accounts)) state.accounts = payload.accounts;
       toast(errorMessage(error), 'error', payload?.expired ? 'Session expired — sign in again' : 'Account not switched');
       await loadStatus({ quiet: true }).catch(() => undefined);
@@ -11169,7 +11223,7 @@ You can start with a more structured option: one script, short captions, and a c
     content.appendChild(el('p', { class: 'account-menu-head', text: 'Google accounts' }));
     // The live window session is the real identity; saved cookie sets are
     // extra accounts that can be pushed back into that window.
-    const liveRow = google.signedIn && google.expired
+    const liveRow = google.expired
       // The session Google no longer honours is not "Current": it is a card
       // that says so and signs in again, the way arena.ai shows its own.
       ? el('button', {
@@ -11692,7 +11746,7 @@ You can start with a more structured option: one script, short captions, and a c
         class: 'settings-scope-btn', type: 'button', 'data-scope': id,
         'aria-pressed': String(state.settingsTrack === id),
         onclick: () => setScope(id)
-      }, iconEl(id === 'google' ? 'spark' : 'grid'), el('span', { text: label }));
+      }, iconEl(id === 'google' ? 'spark' : 'layers'), el('span', { text: label }));
       scopeButtons[id] = button;
       scopeSwitch.appendChild(button);
     });
@@ -11830,7 +11884,7 @@ You can start with a more structured option: one script, short captions, and a c
           type: 'radio', name: 'agent-kind', value: kind.id,
           checked: selected, disabled: controlsDisabled, 'aria-label': kind.label
         });
-        input.addEventListener('change', () => { if (input.checked) setAgentKind(kind.id); });
+        input.addEventListener('change', () => { if (input.checked) { setAgentKind(kind.id); refreshPanel(); } });
         label.append(input,
           el('span', { class: 'radio-indicator', 'aria-hidden': 'true' }),
           el('span', { class: 'radio-copy' },
@@ -12113,7 +12167,8 @@ You can start with a more structured option: one script, short captions, and a c
           nameIn.value = ''; promptIn.value = '';
           if (editingId) {
             editingId = null;
-            saveBtn.querySelector('span').textContent = 'Add automation';
+            const label = saveBtn.querySelector('span:last-child');
+            if (label) label.textContent = 'Add automation';
             formTitle.textContent = 'New automation';
           }
           toast('Automation saved.', 'info', 'Automations');
@@ -12159,7 +12214,8 @@ You can start with a more structured option: one script, short captions, and a c
               } else if (sched === 'hourly') kindSel.value = 'hourly';
               else { kindSel.value = 'every'; minsIn.value = (sched.match(/\d+/) || ['60'])[0]; }
               syncKind();
-              saveBtn.querySelector('span').textContent = 'Save changes';
+              const label = saveBtn.querySelector('span:last-child');
+              if (label) label.textContent = 'Save changes';
               formTitle.textContent = 'Edit automation';
               nameIn.focus();
             }),
@@ -12217,7 +12273,7 @@ You can start with a more structured option: one script, short captions, and a c
       el('p', { class: 'modal-note', text: 'Arena Desktop itself is a single file and needs none of these for regular chats. Optional components unlock specific features and are only ever installed when you ask; downloads come from the official sources shown.' }),
       el('div', { class: 'modal-field-row' },
         el('span', { class: 'modal-field-label', text: 'Status' }),
-        el('button', { class: 'btn ghost small', type: 'button', onclick: () => { void fill(true); } },
+        el('button', { class: 'button button-small button-quiet', type: 'button', onclick: () => { void fill(true); } },
           el('span', { text: 'Check again' }))),
       listHost);
     requestAnimationFrame(() => { void fill(); });
@@ -12374,7 +12430,7 @@ You can start with a more structured option: one script, short captions, and a c
   }
 
   function renderUsagePanel() {
-    const wrap = el('div', 'memory-panel');
+    const wrap = el('div', { class: 'memory-panel' });
     const humanWait = (w) => {
       const s = Number(w) || 0;
       if (!s) return '';
@@ -12433,7 +12489,7 @@ You can start with a more structured option: one script, short captions, and a c
       <h3 class="modal-section-title">Usage &amp; Arena limits</h3>
       <p class="modal-note">Arena now meters every account with a daily balance that resets every 24 hours; heavier models and longer contexts spend more of it, and each agent round re-sends the whole conversation. The numbers below are this app\u2019s own send log \u2014 Arena\u2019s official counter may differ (it also counts arena.ai web use).</p>
       <div class="modal-field-row"><span class="modal-field-label">Send log</span>
-        <button class="btn ghost small" id="usageRefresh" type="button">Refresh</button></div>
+        <button class="button button-small button-quiet" id="usageRefresh" type="button">Refresh</button></div>
       <div id="usageBody"><p class="modal-note">Loading usage\u2026</p></div>`;
     $('#usageRefresh', wrap)?.addEventListener('click', () => { void fill(); });
     requestAnimationFrame(() => { void fill(); });
@@ -13404,8 +13460,9 @@ You can start with a more structured option: one script, short captions, and a c
     const commitBox = el('section', { class: 'git-commit', 'aria-label': 'Create a Git commit' });
     const message = el('textarea', {
       class: 'input git-commit-message', rows: '3', maxlength: '5000',
-      placeholder: 'Commit message…', 'aria-label': 'Commit message', value: state.gitCommitMessage || ''
+      placeholder: 'Commit message…', 'aria-label': 'Commit message'
     });
+    message.value = state.gitCommitMessage || '';
     message.addEventListener('input', () => {
       state.gitCommitMessage = message.value;
       const button = commitBox.querySelector('[data-git-commit]');
@@ -14594,7 +14651,8 @@ You can start with a more structured option: one script, short captions, and a c
       subtitle: localOnly ? 'Ready-made presets, JSON config or a CLI command' : 'Official Arena connectors and local MCP servers',
       size: 'large',
       content: wrap,
-      actions: [{ label: 'Close', variant: 'primary', autofocus: true }]
+      actions: [{ label: 'Close', variant: 'primary', autofocus: true }],
+      onClose: () => { if (addConnectorModalRender === render) addConnectorModalRender = null; }
     });
     if (!state.connectors) void loadConnectors({ silent: true }).then(render);
     if (!localOnly && state.authenticated && !state.arenaConnectors) void loadArenaConnectors({ silent: true }).then(render);
@@ -15390,7 +15448,12 @@ You can start with a more structured option: one script, short captions, and a c
         return;
       }
       if (window.matchMedia('(max-width: 900px)').matches) closeMobileSidebar();
-      if (!els.chatSearchWrap?.hidden) setChatSearchVisible(false);
+      if (state.chatFilter && els.chatSearch) {
+        state.chatFilter = '';
+        els.chatSearch.value = '';
+        if (els.clearChatSearch) els.clearChatSearch.hidden = true;
+        renderChats();
+      }
       return;
     }
     if (state.activeModal) return;
@@ -16080,7 +16143,7 @@ function googleSignedIn() {
   const g = state.google || {};
   const acc = g.account || {};
   const live = g.live || {};
-  const expired = Boolean(acc.expired || g.expired || g.session_expired);
+  const expired = Boolean(acc.expired || g.expired || g.session_expired || g.sessionExpired);
   if (g.has_cookie === false) return false;
   return Boolean(
     !expired &&

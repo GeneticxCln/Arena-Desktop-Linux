@@ -193,7 +193,8 @@ def sync_models(cookie: str | None = None, force: bool = False,
                 seen.add(key)
                 display_name = m.get("displayName") or m.get("publicName") or m_id
                 public_name = m.get("publicName") or display_name
-                org = m.get("organization", "community")
+                raw_org = m.get("organization")
+                org = raw_org if isinstance(raw_org, str) and raw_org.strip() else "community"
                 provider = m.get("provider", "")
                 rank = m.get("rank")
                 # Arena's catalog schema defines this as a boolean.  Do not
@@ -240,15 +241,29 @@ def sync_models(cookie: str | None = None, force: bool = False,
 
     try:
         import os as _os
+        import tempfile as _tempfile
         CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps({
             "_cached_at": time.time(),
             "total": len(models),
             "models": models,
         }, indent=2)
-        tmp = CACHE_FILE.with_name(f".{CACHE_FILE.name}.{_os.getpid()}.tmp")
-        tmp.write_text(payload, encoding="utf-8")
-        _os.replace(tmp, CACHE_FILE)
+        tmp_path = None
+        try:
+            with _tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=CACHE_FILE.parent,
+                prefix=f".{CACHE_FILE.name}.", suffix=".tmp", delete=False,
+            ) as fh:
+                tmp_path = fh.name
+                fh.write(payload)
+            _os.replace(tmp_path, CACHE_FILE)
+            tmp_path = None
+        finally:
+            if tmp_path:
+                try:
+                    _os.unlink(tmp_path)
+                except OSError:
+                    pass
     except Exception:
         pass
 
@@ -521,7 +536,7 @@ def display_available_models(
     table.add_column("Capabilities", style="dim", width=16)
 
     for i, m in enumerate(filtered[:max_display], 1):
-        org = m.get("org", "community")
+        org = str(m.get("org") or "community")
         org_color = get_org_color(org)
         org_styled = f"[{org_color}]{org.upper()}[/{org_color}]"
 
@@ -563,7 +578,7 @@ def format_models_table(models: list[dict[str, Any]], active_id: str | None = No
     t.add_column("Arena", style="dim", width=10)
 
     for i, m in enumerate(models, 1):
-        org = m.get("org", "community")
+        org = str(m.get("org") or "community")
         org_color = get_org_color(org)
         org_styled = f"[{org_color}]{org.upper()}[/{org_color}]"
         marker = " [bold #10B981]★ active[/bold #10B981]" if m["id"] == active_id else ""

@@ -210,8 +210,8 @@ class MiniMaxProvider(WebChatEngine):
         want = (model_id or "").strip()
         if not want or want.lower() == "default":
             return True
-        cur = self._read_active_model_label().lower()
-        if cur and (want.lower() == cur or want.lower() in cur):
+        cur = self._read_active_model_label().strip().lower()
+        if cur and want.lower() == cur:
             return True
         opened = self.eval_js(
             """(() => {
@@ -233,12 +233,24 @@ class MiniMaxProvider(WebChatEngine):
               const nodes = Array.from(document.querySelectorAll(
                 '[role="menuitem"], [role="option"], .ant-popover [role="button"], .ant-dropdown-menu-item, body > div:last-child button, body > div:last-child [class*="cursor-pointer"]'
               ));
+              const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+              let fallback = null;
               for (const item of nodes) {{
-                const txt = (item.innerText || item.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-                if (txt.includes(wantFull) || (toks.length && toks.every((t) => txt.includes(t)))) {{
+                const raw = String(item.innerText || item.textContent || '');
+                const firstLine = norm(raw.split('\\n')[0] || '');
+                const txt = norm(raw);
+                if (firstLine === wantFull || txt === wantFull) {{
                   item.click();
                   return JSON.stringify({{ ok: true, clicked: txt.slice(0, 60) }});
                 }}
+                if (!fallback && (txt.includes(wantFull) || (toks.length && toks.every((t) => txt.includes(t))))) {{
+                  fallback = item;
+                }}
+              }}
+              if (fallback) {{
+                const txt = norm(fallback.innerText || fallback.textContent || '');
+                fallback.click();
+                return JSON.stringify({{ ok: true, clicked: txt.slice(0, 60) }});
               }}
               document.dispatchEvent(new KeyboardEvent('keydown', {{ key: 'Escape', code: 'Escape', bubbles: true }}));
               return JSON.stringify({{ ok: false }});
