@@ -645,6 +645,9 @@
     getMemory() { return this.request('/api/memory' + settingsQuery()); },
     saveMemory(body) { return this.request('/api/memory', { method: 'POST', body: withScope(body) }); },
     syncTabsMemory() { return this.request('/api/memory/sync-tabs', { method: 'POST', body: withScope({}) }); },
+    getSkills() { return this.request('/api/skills'); },
+    toggleSkill(name, enabled) { return this.request('/api/skills/toggle', { method: 'POST', body: { name, enabled } }); },
+    createSkill(body) { return this.request('/api/skills', { method: 'POST', body }); },
     updateCheck(force = false) { return this.request(`/api/update-check${force ? '?force=1' : ''}`); },
     exportSettings() { return this.request('/api/settings/export'); },
     importSettings(bundle) { return this.request('/api/settings/import', { method: 'POST', body: bundle }); },
@@ -1423,6 +1426,12 @@
       list.push({ role: 'notice', compact: true, digest_chars: 1200, text: notice });
       return { ok: true, digest_chars: 1200, history_chars: 1200, memory_saved: Boolean(demoStore.workspace), notice, demo: true };
     },
+    async getSkills() {
+      await sleep(60);
+      return { ok: true, folder: '', skills_dir: '.arena/skills', skills: [], problems: [], shadows: [], demo: true };
+    },
+    async toggleSkill(name, enabled) { await sleep(30); return { ok: true, name, enabled, demo: true }; },
+    async createSkill(body) { await sleep(30); return { ok: true, name: body?.name || '', demo: true }; },
     async getMemory() {
       await sleep(80);
       return { enabled: demoStore.memoryEnabled !== false,
@@ -11657,6 +11666,7 @@ You can start with a more structured option: one script, short captions, and a c
         { id: 'permissions', label: 'Permissions', icon: 'shield' },
         { id: 'workspace', label: 'Folder', icon: 'folder' },
         { id: 'memory', label: 'Memory', icon: 'layers' },
+        { id: 'skills', label: 'Skills', icon: 'code' },
         { id: 'automations', label: 'Automations', icon: 'clock' },
         { id: 'usage', label: 'Usage', icon: 'chart' },
         { id: 'gateway', label: 'Gateway', icon: 'globe' },
@@ -11905,6 +11915,94 @@ You can start with a more structured option: one script, short captions, and a c
         });
         wrap.appendChild(form);
       }
+      return wrap;
+    }
+
+    function renderSkillsPanel() {
+      const wrap = el('div');
+      const data = state.skillsData || null;
+      wrap.appendChild(el('h3', { class: 'modal-section-title', text: 'Skills' }));
+      wrap.appendChild(el('p', { class: 'setting-desc', text: 'Written recipes the Local Agent and the provider tabs (Claude, ChatGPT, DeepSeek, Qwen, Kimi, Z.ai, MiniMax, Freebuff) can follow. The model sees each skill’s name and description, and reads the full instructions with the use_skill tool only when it needs one. A skill is plain text: it cannot add tools or skip permission prompts.' }));
+      if (!data) {
+        wrap.appendChild(el('p', { class: 'setting-desc', text: 'Loading skills…' }));
+        return wrap;
+      }
+      const reload = async () => {
+        try { state.skillsData = await API.getSkills(); } catch (error) { toast(errorMessage(error), 'error', 'Skills'); }
+        refreshPanel();
+      };
+      wrap.appendChild(el('p', { class: 'setting-desc', text: `Project skills are read from ${data.skills_dir || '.arena/skills'} and .codify/skills in the same folder. A project skill with a built-in’s name replaces it.` }));
+      const list = Array.isArray(data.skills) ? data.skills : [];
+      const groups = [
+        ['workspace', 'This project (.arena/skills)'],
+        ['codify', 'This project (.codify/skills)'],
+        ['built-in', 'Built-in']
+      ];
+      groups.forEach(([source, title]) => {
+        const items = list.filter((s) => s.source === source);
+        if (!items.length) return;
+        wrap.appendChild(el('h3', { class: 'modal-section-title', text: `${title} · ${items.length}` }));
+        items.forEach((skill) => {
+          const toggle = el('input', { type: 'checkbox', class: 'switch-input', checked: skill.enabled !== false,
+            'aria-label': `Use skill ${skill.name}` });
+          toggle.addEventListener('change', async () => {
+            toggle.disabled = true;
+            try {
+              await API.toggleSkill(skill.name, toggle.checked);
+              await reload();
+            } catch (error) {
+              toggle.checked = !toggle.checked;
+              toggle.disabled = false;
+              toast(errorMessage(error), 'error', 'Skills');
+            }
+          });
+          const tools = Array.isArray(skill.tools) && skill.tools.length ? ` · tools: ${skill.tools.join(', ')}` : '';
+          wrap.appendChild(el('label', { class: 'setting-toggle-row' },
+            el('span', {},
+              el('strong', { text: skill.name }),
+              el('span', { class: 'setting-desc', style: { display: 'block', margin: '2px 0 0' }, text: `${skill.description || ''}${tools}` })),
+            el('span', { class: 'switch' }, toggle, el('span', { class: 'switch-track', 'aria-hidden': 'true' }))));
+        });
+      });
+      if (!list.length) wrap.appendChild(el('p', { class: 'setting-desc', text: 'No skills found.' }));
+      const shadows = Array.isArray(data.shadows) ? data.shadows : [];
+      if (shadows.length) {
+        wrap.appendChild(el('div', { class: 'note-box is-info', style: { marginTop: '8px' } }, iconEl('info'),
+          el('span', { text: `Replaced by this project: ${shadows.join(', ')}.` })));
+      }
+      const problems = Array.isArray(data.problems) ? data.problems : [];
+      if (problems.length) {
+        const box = el('div', { class: 'note-box is-warning', style: { marginTop: '8px', display: 'block' } },
+          el('strong', { text: `${problems.length} skill file${problems.length === 1 ? '' : 's'} could not be used as written` }));
+        problems.slice(0, 25).forEach((line) => box.appendChild(el('div', { class: 'setting-desc', style: { margin: '4px 0 0' }, text: line })));
+        wrap.appendChild(box);
+      }
+
+      wrap.appendChild(el('h3', { class: 'modal-section-title', text: 'New project skill' }));
+      wrap.appendChild(el('p', { class: 'setting-desc', text: `Saved as a Markdown file in ${data.skills_dir || '.arena/skills'}. Existing skills are never overwritten.` }));
+      const nameIn = el('input', { class: 'input', type: 'text', placeholder: 'name (lowercase-with-dashes)', 'aria-label': 'Skill name' });
+      const descIn = el('input', { class: 'input', type: 'text', placeholder: 'One line: what it is for and when to use it', 'aria-label': 'Skill description' });
+      const toolsIn = el('input', { class: 'input', type: 'text', placeholder: 'Tools it uses, comma separated (optional): read_file, run_cmd', 'aria-label': 'Skill tools' });
+      const bodyIn = el('textarea', { class: 'input mono memory-field', rows: '8', spellcheck: 'false', 'aria-label': 'Skill instructions',
+        placeholder: '# My skill\n\n1. Read the relevant files first.\n2. ...' });
+      [nameIn, descIn, toolsIn, bodyIn].forEach((field) => wrap.appendChild(field));
+      const create = settingsActionButton('Create skill', 'plus', async () => {
+        const body = {
+          name: nameIn.value.trim().toLowerCase(),
+          description: descIn.value.trim(),
+          tools: toolsIn.value.split(',').map((t) => t.trim()).filter(Boolean),
+          body: bodyIn.value
+        };
+        try {
+          const res = await API.createSkill(body);
+          const notes = Array.isArray(res?.notes) && res.notes.length ? ` Note: ${res.notes.join(' ')}` : '';
+          toast(`Skill ${res?.name || body.name} created.${notes}`, 'success', 'Skills');
+          await reload();
+        } catch (error) {
+          toast(errorMessage(error), 'error', 'Skills');
+        }
+      }, { variant: 'primary' });
+      wrap.appendChild(el('div', { class: 'setting-actions' }, create));
       return wrap;
     }
 
@@ -12943,6 +13041,7 @@ You can start with a more structured option: one script, short captions, and a c
       if (tab === 'permissions') return renderPermissionsPanel();
       if (tab === 'workspace') return renderWorkspacePanel();
       if (tab === 'memory') return renderMemoryPanel();
+      if (tab === 'skills') return renderSkillsPanel();
       if (tab === 'automations') return renderAutomationsPanel();
       if (tab === 'usage') return renderUsagePanel();
       if (tab === 'gateway') {
@@ -12985,6 +13084,9 @@ You can start with a more structured option: one script, short captions, and a c
         loadWorkspaceFromServer({ quiet: true }).then(() => { if (state.settingsTab === 'workspace') refreshPanel(); });
       } else if (tab === 'memory') {
         API.getMemory().then((data) => { state.memoryData = data; if (state.settingsTab === 'memory') refreshPanel(); }).catch(() => {});
+      } else if (tab === 'skills') {
+        API.getSkills().then((data) => { state.skillsData = data; if (state.settingsTab === 'skills') refreshPanel(); })
+          .catch((error) => { if (state.settingsTab === 'skills') toast(errorMessage(error), 'error', 'Skills'); });
       } else if (tab === 'about') {
         API.getSettings().then((data) => { state.appSettings = data; if (state.settingsTab === 'about') refreshPanel(); }).catch(() => {});
       }

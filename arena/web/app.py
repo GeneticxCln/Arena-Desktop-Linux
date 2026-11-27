@@ -287,6 +287,7 @@ from arena import (
     history_sync,
     native_agent,
     permissions,
+    skills,
     workspace,
 )
 from arena.api import generate_uuidv7
@@ -460,7 +461,7 @@ def _save_chat(chat_id: str, title: str, messages: list,
                source: str = None, tools_guide: bool = None,
                agent_backend: str = None, native: dict = None,
                mcp_guide_hash: str = None, memory_hash: str = None,
-               pending_digest: str = None, parent_id: str = None,
+               pending_digest: str = None, parent_id: str = None, skills_hash: str = None,
                delegate_guide: bool = None, gateway_session: str = None,
                account_id: str = None, supervisor_of: str = None,
                workspace_dir: str = None, external_url: str = None):
@@ -496,6 +497,7 @@ def _save_chat(chat_id: str, title: str, messages: list,
             "source": source or existing.get("source") or "local",
             "tools_guide": bool(tools_guide) if tools_guide is not None else bool(existing.get("tools_guide")),
             "mcp_guide_hash": mcp_guide_hash if mcp_guide_hash is not None else existing.get("mcp_guide_hash"),
+            "skills_hash": skills_hash if skills_hash is not None else existing.get("skills_hash"),
             "memory_hash": memory_hash if memory_hash is not None else existing.get("memory_hash"),
             "pending_digest": pending_digest if pending_digest is not None else existing.get("pending_digest"),
             "parent_id": (parent_id or None) if parent_id is not None else existing.get("parent_id"),
@@ -2266,7 +2268,7 @@ _TRACKED_SETTING_KEYS = frozenset({
     "gateway_servers", "gateway_workspace", "gateway_tunnel_protocol",
     "persona", "show_reasoning", "auto_copy", "auto_continue", "elo_enabled",
     "cheap_subagents", "multi_session_subagents", "account_failover", "pacing",
-    "pacing_preset", "browser", "agent_kind",
+    "pacing_preset", "browser", "agent_kind", "skills_disabled",
 })
 
 
@@ -2731,6 +2733,74 @@ def api_chat_compact(chat_id):
     return jsonify({"ok": True, "digest_chars": len(digest),
                     "history_chars": len(digest),
                     "memory_saved": bool(memory_path), "notice": marker["text"]})
+
+
+@app.route("/api/skills", methods=["GET"])
+def api_skills_list():
+    """Every skill for the agents' folder, switched-off ones included, with load problems."""
+    root = _workspace_dir()
+    disabled = _settings_value("skills_disabled")
+    disabled = [str(n) for n in disabled] if isinstance(disabled, list) else []
+    found = skills.load_skills(root)
+    return jsonify({
+        "ok": True,
+        "folder": str(root),
+        "skills_dir": str(root / skills.ARENA_SKILLS_DIR),
+        "skills": [
+            {"name": s.name, "description": s.description, "source": s.source,
+             "tools": list(s.tools), "enabled": s.name not in disabled}
+            for s in found.skills
+        ],
+        "problems": list(found.problems),
+        "shadows": list(found.shadows),
+    })
+
+
+@app.route("/api/skills/toggle", methods=["POST"])
+def api_skills_toggle():
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name") or "").strip().lower()
+    if not skills.NAME_RE.match(name):
+        return jsonify({"ok": False, "error": "Not a valid skill name."}), 400
+    current = _settings_value("skills_disabled")
+    disabled = [str(n) for n in current] if isinstance(current, list) else []
+    disabled = [n for n in disabled if n != name]
+    if data.get("enabled") is False:
+        disabled.append(name)
+    _settings_store({"skills_disabled": sorted(set(disabled))})
+    return jsonify({"ok": True, "name": name, "enabled": data.get("enabled") is not False})
+
+
+@app.route("/api/skills", methods=["POST"])
+def api_skills_create():
+    """Write a new project skill to <folder>/.arena/skills/<name>.md (never overwrites)."""
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name") or "").strip().lower()
+    description = " ".join(str(data.get("description") or "").split())
+    body = str(data.get("body") or "")
+    tools = [str(t).strip() for t in (data.get("tools") or []) if str(t).strip()]
+    if not skills.NAME_RE.match(name):
+        return jsonify({"ok": False, "error": "Skill names use lowercase letters, digits and dashes."}), 400
+    text = skills.render_skill(name, description, tools, body)
+    skill, problem = skills.parse_skill(text, name, "workspace")
+    if skill is None:
+        return jsonify({"ok": False, "error": problem}), 400
+    root = _workspace_dir().expanduser()
+    target_dir = root / skills.ARENA_SKILLS_DIR
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        # The folder must be this project's own .arena/skills, not a link elsewhere.
+        if target_dir.resolve() != root.resolve() / skills.ARENA_SKILLS_DIR:
+            return jsonify({"ok": False, "error": ".arena/skills is a link outside the folder; refusing to write."}), 400
+        with open(target_dir / f"{name}.md", "x", encoding="utf-8") as handle:
+            handle.write(text)
+    except FileExistsError:
+        return jsonify({"ok": False, "error": f"A skill named {name} already exists in this folder."}), 409
+    except OSError as exc:
+        LOG.warning("creating skill %s failed: %s", name, exc)
+        return jsonify({"ok": False, "error": "Could not write the skill file."}), 500
+    return jsonify({"ok": True, "name": name, "path": str(target_dir / f"{name}.md"),
+                    "notes": list(skill.notes)})
 
 
 @app.route("/api/memory")
@@ -4676,6 +4746,17 @@ def _sse_wrap(gen, chat_id=None, *, already_reserved: bool = False):
 def _workspace_dir() -> Path:
     raw = _settings_value("workspace_dir")
     return Path(raw).expanduser() if raw else workspace.PROJECTS_DIR / "workspace"
+
+
+def _skill_set(root) -> "skills.SkillSet":
+    """The skills offered for ``root``: built-ins plus the folder's .codify and .arena skills,
+    minus the ones switched off in Settings."""
+    disabled = _settings_value("skills_disabled")
+    try:
+        return skills.load_skills(root, disabled=disabled if isinstance(disabled, list) else ())
+    except Exception:
+        LOG.exception("loading skills for %s failed", root)
+        return skills.EMPTY
 
 
 def _chosen_ws() -> Path | None:
@@ -8286,6 +8367,7 @@ def _run_subagent(client, parent_conv: dict, call: dict, lane: str, child_id: st
                        eval_id=(child_conv.get("eval_id") if not child_conv.get("new") else None),
                        tools_guide=True, parent_id=parent_conv.get("chat_id"),
                        mcp_guide_hash=child_conv.get("mcp_guide_hash"),
+                       skills_hash=child_conv.get("skills_hash"),
                        account_id=execution_account_id)
         except Exception:
             LOG.exception("sub-agent chat save failed")
@@ -8314,7 +8396,9 @@ def _agent_run(client: ArenaClient, message: str, conv: dict):
     root.mkdir(parents=True, exist_ok=True)
     lanes = ("a", "b") if conv["mode"] in ("battle", "side-by-side") else ("a",)
     dual = len(lanes) == 2
-    tools = {l: agent.LocalTools(root, root / agent.LANE_DIRS[l] if dual else None) for l in lanes}
+    skill_set = _skill_set(root)
+    tools = {l: agent.LocalTools(root, root / agent.LANE_DIRS[l] if dual else None, skills=skill_set)
+             for l in lanes}
     mode = _perm_mode()
     total = {"a": "", "b": ""}
     yield _sse({"type": "agent", "root": str(root), "mode": mode, "dual": dual})
@@ -8324,6 +8408,10 @@ def _agent_run(client: ArenaClient, message: str, conv: dict):
         mcp_tools = {}
         yield _sse({"type": "notice", "text": f"MCP connectors are unavailable for this turn: {e}"})
     mcp_guide = CONNECTORS.guide(mcp_tools)
+    # The skill menu has its own hash so each part is resent only when it changes,
+    # and chats started before skills existed learn about them once.
+    skills_section = agent.skills_guide(skill_set)
+    skills_hash = hashlib.sha1(skills_section.encode("utf-8")).hexdigest()[:12] if skills_section else None
     if mcp_tools:
         yield _sse({"type": "agent", "stage": f"MCP tools available: {len(mcp_tools)}",
                     "connectors": sorted({item['server'] for item in mcp_tools.values()})})
@@ -8333,16 +8421,23 @@ def _agent_run(client: ArenaClient, message: str, conv: dict):
         # Also covers enabling tools mid-conversation (e.g. the Direct tools
         # toggle): the model only learns the tool protocol from this guide.
         content = agent.guide(root, permissions.MODES[mode], agent.MODE_NOTES[mode], dual,
-                              extra_tools=mcp_guide, delegate=delegate_section) + message
+                              extra_tools=mcp_guide + skills_section, delegate=delegate_section) + message
         conv["mcp_guide_hash"] = mcp_hash
+        conv["skills_hash"] = skills_hash
         if delegate_section:
             conv["delegate_sent"] = True
-    elif mcp_guide and mcp_hash != conv.get("mcp_guide_hash"):
-        # The connector tool list is only resent when it changed, not on
-        # every turn of the conversation.
-        content = ("[Arena Desktop] Connector tools available for this turn:\n" + mcp_guide
-                   + "\nUser message:\n" + message)
-        conv["mcp_guide_hash"] = mcp_hash
+    elif ((mcp_guide and mcp_hash != conv.get("mcp_guide_hash"))
+          or (skills_section and skills_hash != conv.get("skills_hash"))):
+        # Connector tools and the skill menu are only resent when they changed,
+        # not on every turn of the conversation.
+        changed = ""
+        if mcp_guide and mcp_hash != conv.get("mcp_guide_hash"):
+            changed += "[Arena Desktop] Connector tools available for this turn:\n" + mcp_guide
+            conv["mcp_guide_hash"] = mcp_hash
+        if skills_section and skills_hash != conv.get("skills_hash"):
+            changed += "[Arena Desktop] Skills available in this chat:\n" + skills_section
+            conv["skills_hash"] = skills_hash
+        content = changed + "\nUser message:\n" + message
         if delegate_section and not conv.get("delegate_sent"):
             content = delegate_section + content
             conv["delegate_sent"] = True
@@ -10998,7 +11093,8 @@ def _provider_track_stream(
         error_msg = ""
         stop_evt = getattr(_tl, "stop_event", None)
         perm_mode = _perm_mode()
-        local_tools = agent.LocalTools(ws_root) if use_local_tools and ws_root is not None else None
+        local_tools = (agent.LocalTools(ws_root, skills=_skill_set(ws_root))
+                       if use_local_tools and ws_root is not None else None)
         mcp_tools: dict = {}
         mcp_guide = ""
         conv_ctx = {"chat_id": chat_id, "tools": tools_log, "checkpoints": [], "todos": []}
@@ -11010,7 +11106,7 @@ def _provider_track_stream(
             except Exception as exc:
                 mcp_tools = {}
                 yield _sse({"type": "notice", "text": f"MCP connectors unavailable: {exc}"})
-            mcp_guide = CONNECTORS.guide(mcp_tools) if mcp_tools else ""
+            mcp_guide = (CONNECTORS.guide(mcp_tools) if mcp_tools else "") + agent.skills_guide(local_tools.skills)
 
         turn_prompt = message
         turn_memory = memory_prefix
@@ -11763,6 +11859,7 @@ def _api_chat_impl():
             "attachments": wire_attachments or None,
             "guide_sent": bool(existing.get("tools_guide")),
             "mcp_guide_hash": existing.get("mcp_guide_hash"),
+            "skills_hash": existing.get("skills_hash"),
             "memory_hash": existing.get("memory_hash"),
             "delegate_sent": bool(existing.get("delegate_guide")),
             "title": existing.get("title") or message[:50], "tools": []}
@@ -11875,6 +11972,7 @@ def _api_chat_impl():
                    tools_guide=bool(tools_on) or bool(existing.get("tools_guide")),
                    agent_backend=("local" if ui_mode == "agent" else None),
                    mcp_guide_hash=conv.get("mcp_guide_hash"),
+                   skills_hash=conv.get("skills_hash"),
                    memory_hash=conv.get("memory_hash"),
                    delegate_guide=bool(conv.get("delegate_sent")),
                    pending_digest=("" if conv.get("digest_used") else None))

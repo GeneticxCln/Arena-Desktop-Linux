@@ -13,9 +13,8 @@ import re
 import threading
 import time
 import uuid
-from typing import Dict, List, Optional
 
-MODES: Dict[str, str] = {
+MODES: dict[str, str] = {
     "default": "Ask before edits",
     "acceptEdits": "Accept edits",
     "auto": "Auto",
@@ -25,31 +24,31 @@ MODES: Dict[str, str] = {
 
 KIND = {"read_file": "read", "ls": "read", "search": "read",
         "write_file": "edit", "edit_file": "edit", "mkdir": "edit", "write_project": "edit",
-        "delete": "delete", "run_cmd": "shell"}
+        "delete": "delete", "run_cmd": "shell", "use_skill": "read"}
 
 SAFE_CMD = re.compile(
     r"^\s*(dir|ls|pwd|echo|type|cat|where|which|tree|git\s+(status|log|diff|show|branch)|"
     r"(python|py)(\s+-m)?\s+(pytest|unittest|--version)|node\s+(--version|-v)|"
-    r"npm\s+(test|ls|-v|--version)|npm\s+run\s+(test|build|lint))\b", re.I)
+    r"npm\s+(test|ls|-v|--version)|npm\s+run\s+(test|build|lint))\b", re.IGNORECASE)
 # Block newlines, NULs, shell metacharacters, dangerous flags/paths on otherwise-read commands
 SHELL_META = re.compile(
     r"[\r\n\x00;&|<>`$]|\b(del|erase|rm|rmdir|rd|format|curl|wget|iwr|invoke-webrequest|"
-    r"powershell|pwsh|reg|shutdown|move|mv)\b", re.I)
+    r"powershell|pwsh|reg|shutdown|move|mv)\b", re.IGNORECASE)
 _UNSAFE_SAFE_CMD_ARGS = re.compile(
     r"(--output\b|--ext-diff\b|--textconv\b|"
     r"\bgit\s+branch\b.*\s(?:-[a-zA-Z]*[dDmMcCf]\b|--delete\b|--move\b|--copy\b|--force\b)|"
     r"(?:^|\s)(?:~|\.\./|/etc/|/proc/|/root/|/home/|/var/|/usr/|\.ssh\b))",
-    re.I,
+    re.IGNORECASE,
 )
 CATASTROPHIC = re.compile(
     r"(\brm\s+(?:-[a-zA-Z]+\s+)*(?:-[a-zA-Z]*r[a-zA-Z]*|--recursive)(?:\s+-[a-zA-Z]+)*\s+"
     r"(?:--no-preserve-root\s+)?(?:/\*?|~/?|\*|\$HOME\b|\$\{HOME\}|[a-z]:[\\/]?)(?:\s|$)|"
     r"\bformat\s+[a-z]:|"
     r"\b(rd|rmdir)\s+/s\s+(/q\s+)?[a-z]:[\\/]?\s*$|\bdel\s+(/[a-z]\s+)*[a-z]:[\\/]\*|\bmkfs\b|"
-    r"\bshutdown\b|:\(\)\s*\{|\bdiskpart\b|\bbcdedit\b|\bvssadmin\s+delete\b|\bcipher\s+/w)", re.I)
+    r"\bshutdown\b|:\(\)\s*\{|\bdiskpart\b|\bbcdedit\b|\bvssadmin\s+delete\b|\bcipher\s+/w)", re.IGNORECASE)
 
 
-def normalize(mode: Optional[str]) -> str:
+def normalize(mode: str | None) -> str:
     return mode if mode in MODES else "default"
 
 
@@ -92,9 +91,9 @@ class PermissionBroker:
 
     def __init__(self):
         self._lock = threading.Lock()
-        self._pending: Dict[str, dict] = {}
+        self._pending: dict[str, dict] = {}
         # Scoped per chat_id: {chat_id: set(kinds)} so "Allow in this chat" never leaks globally or to gateway.
-        self._always: Dict[str, set] = {}
+        self._always: dict[str, set] = {}
 
     def check(
         self,
@@ -103,7 +102,7 @@ class PermissionBroker:
         inside: bool = True,
         command: str = "",
         *,
-        chat_id: Optional[str] = None,
+        chat_id: str | None = None,
         gateway: bool = False,
     ) -> str:
         verdict = decide(mode, tool, inside, command)
@@ -137,7 +136,7 @@ class PermissionBroker:
             item["event"].set()
         return True
 
-    def wait(self, pid: str, timeout: Optional[float] = None) -> Optional[str]:
+    def wait(self, pid: str, timeout: float | None = None) -> str | None:
         """'allow' or 'deny' once answered; None if still waiting after timeout."""
         item = self._pending.get(pid)
         if not item:
@@ -159,7 +158,7 @@ class PermissionBroker:
             item["event"].set()
         return True
 
-    def pending(self) -> List[dict]:
+    def pending(self) -> list[dict]:
         with self._lock:
             return [p["info"] for p in self._pending.values() if not p["decision"]]
 
@@ -169,7 +168,7 @@ class PermissionBroker:
             self.resolve(pid, "deny")
         return len(ids)
 
-    def reset_always(self, chat_id: Optional[str] = None):
+    def reset_always(self, chat_id: str | None = None):
         with self._lock:
             if chat_id is None:
                 self._always.clear()

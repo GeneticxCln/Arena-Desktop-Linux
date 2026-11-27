@@ -119,6 +119,7 @@ a = Analysis(
     binaries=[],
     datas=[
         ('arena/web/static', 'arena/web/static'),
+        ('arena/builtin_skills', 'arena/builtin_skills'),
         ('assets/logo.svg', 'assets'),
         ('assets/logo.png', 'assets'),
     ],

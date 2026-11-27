@@ -17,7 +17,9 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any
+
+from arena import skills as skills_lib
 
 MAX_ROUNDS = 8
 OUTPUT_LIMIT = 6000
@@ -28,14 +30,14 @@ INLINE_LIMIT = 1500
 PREVIEW_LIMIT = 600
 ARTIFACTS_DIR = ".arena-artifacts"
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
-_TOOL_RE = re.compile(r"<tool\s+name\s*=\s*[\"']?([\w-]+)[\"']?\s*>(.*?)</tool\s*>", re.S | re.I)
+_TOOL_RE = re.compile(r"<tool\s+name\s*=\s*[\"']?([\w-]+)[\"']?\s*>(.*?)</tool\s*>", re.DOTALL | re.IGNORECASE)
 _EMPTY_FENCE = re.compile(r"```[\w-]*[ \t]*\n?\s*```")
-_PARAM_RE = re.compile(r"<([A-Za-z_][\w-]*)>(.*?)</\1\s*>", re.S | re.I)
+_PARAM_RE = re.compile(r"<([A-Za-z_][\w-]*)>(.*?)</\1\s*>", re.DOTALL | re.IGNORECASE)
 # Some models ignore the guide's tag form and answer with Anthropic-style
 # invokes instead; accept those too so their work is not lost.
-_INVOKE_RE = re.compile(r"<invoke\s+name\s*=\s*[\"']?([\w-]+)[\"']?\s*>(.*?)</invoke\s*>", re.S | re.I)
-_INVOKE_PARAM_RE = re.compile(r"<parameter\s+name\s*=\s*[\"']?([\w-]+)[\"']?\s*>(.*?)</parameter\s*>", re.S | re.I)
-_FUNCTION_CALLS_RE = re.compile(r"<function_calls>.*?</function_calls\s*>", re.S | re.I)
+_INVOKE_RE = re.compile(r"<invoke\s+name\s*=\s*[\"']?([\w-]+)[\"']?\s*>(.*?)</invoke\s*>", re.DOTALL | re.IGNORECASE)
+_INVOKE_PARAM_RE = re.compile(r"<parameter\s+name\s*=\s*[\"']?([\w-]+)[\"']?\s*>(.*?)</parameter\s*>", re.DOTALL | re.IGNORECASE)
+_FUNCTION_CALLS_RE = re.compile(r"<function_calls>.*?</function_calls\s*>", re.DOTALL | re.IGNORECASE)
 _SKIP = {".git", "node_modules", "__pycache__", ".venv", "venv", ".next", "dist", "build"}
 _WRITES = {"write_file", "edit_file", "mkdir", "delete"}
 LANE_DIRS = {"a": "option-a", "b": "option-b"}
@@ -88,7 +90,7 @@ MODE_NOTES = {
 }
 
 
-READ_ONLY_TOOLS = {"ls", "read_file", "read_files", "search", "ask_user", "propose_plan", "set_todos"}
+READ_ONLY_TOOLS = {"ls", "read_file", "read_files", "search", "ask_user", "propose_plan", "set_todos", "use_skill"}
 
 
 def delegate_guide(models) -> str:
@@ -125,7 +127,18 @@ def guide(root, mode_label: str, mode_note: str, dual: bool = False, extra_tools
                         delegate=delegate or "")
 
 
-_FENCED_CODE_RE = re.compile(r"(```[^\n]*\n.*?```|~~~[^\n]*\n.*?~~~|`[^`\n]+`)", re.S)
+def skills_guide(skill_set) -> str:
+    """The tool-guide section listing skills by name and description (bodies via use_skill)."""
+    menu = skill_set.menu() if skill_set is not None else ""
+    if not menu:
+        return ""
+    return ("\nSkills: written recipes for common kinds of work. Before starting one of these, read its "
+            "instructions with use_skill and follow them; skip it when none fits.\n"
+            '<tool name="use_skill"><name>skill-name</name></tool>\n'
+            + menu + "\n")
+
+
+_FENCED_CODE_RE = re.compile(r"(```[^\n]*\n.*?```|~~~[^\n]*\n.*?~~~|`[^`\n]+`)", re.DOTALL)
 
 
 def _strip_code_blocks_for_tools(text: str) -> str:
@@ -135,12 +148,12 @@ def _strip_code_blocks_for_tools(text: str) -> str:
     return _FENCED_CODE_RE.sub(lambda m: " " * len(m.group(0)), text)
 
 
-def parse_tool_calls(text: str) -> List[Dict[str, Any]]:
+def parse_tool_calls(text: str) -> list[dict[str, Any]]:
     calls = []
     found = []
     scan = _strip_code_blocks_for_tools(text or "")
     for m in _TOOL_RE.finditer(scan):
-        params: Dict[str, Any] = {}
+        params: dict[str, Any] = {}
         for p in _PARAM_RE.finditer(m.group(2)):
             # Keep MCP argument names case-sensitive, while retaining the
             # lower-case aliases the built-in file tools have always used.
@@ -158,7 +171,7 @@ def parse_tool_calls(text: str) -> List[Dict[str, Any]]:
     return calls
 
 
-def coerce_mcp_arguments(call: Dict[str, Any], schema: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def coerce_mcp_arguments(call: dict[str, Any], schema: dict[str, Any] | None = None) -> dict[str, Any]:
     """Turn the XML form of an MCP call into JSON arguments.
 
     The preferred form is ``<arguments>{...}</arguments>``.  Plain child
@@ -173,7 +186,7 @@ def coerce_mcp_arguments(call: Dict[str, Any], schema: Dict[str, Any] | None = N
             break
     if raw is not None:
         if raw.startswith("```"):
-            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.I | re.S).strip()
+            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.IGNORECASE | re.DOTALL).strip()
         try:
             value = json.loads(raw)
         except ValueError as e:
@@ -185,7 +198,7 @@ def coerce_mcp_arguments(call: Dict[str, Any], schema: Dict[str, Any] | None = N
     properties = {}
     if isinstance(schema, dict) and isinstance(schema.get("properties"), dict):
         properties = schema["properties"]
-    out: Dict[str, Any] = {}
+    out: dict[str, Any] = {}
     seen_lower = set()
     for key, value in params.items():
         # parse_tool_calls adds lower-case aliases for built-in tools; do not
@@ -198,7 +211,7 @@ def coerce_mcp_arguments(call: Dict[str, Any], schema: Dict[str, Any] | None = N
     return out
 
 
-def _coerce_mcp_value(value: Any, prop: Dict[str, Any]) -> Any:
+def _coerce_mcp_value(value: Any, prop: dict[str, Any]) -> Any:
     if isinstance(value, dict):
         properties = prop.get("properties") if isinstance(prop, dict) else None
         if not isinstance(properties, dict):
@@ -265,7 +278,7 @@ def trim_output(text: str) -> str:
     """Shrink a tool output for the trip back to the model: no ANSI codes,
     repeated lines collapsed, head+tail kept when it is still too long."""
     cleaned = _ANSI_RE.sub("", str(text or ""))
-    out_lines: List[str] = []
+    out_lines: list[str] = []
     run_line, run_count = None, 0
     for line in cleaned.splitlines():
         if line == run_line:
@@ -323,8 +336,7 @@ def _interactive_refusal(cmd: str) -> str:
     if not tokens:
         return ""
     first = tokens[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
-    if first.endswith(".exe"):
-        first = first[:-4]
+    first = first.removesuffix(".exe")
     rest = [t.lower() for t in tokens[1:]]
     why = ""
     if first in _INTERACTIVE_FIRST:
@@ -347,7 +359,7 @@ _ACTIVE_SHELL_PROCS: set = set()
 _INLINE_EVAL_RE = re.compile(
     r"\b(?:python\d*(?:\.\d+)?|py|node|nodejs|perl|ruby|php|sh|bash|zsh|dash|ksh|pwsh|powershell)"
     r"\b[^\r\n;|&]*(?:\s(?:-[a-zA-Z]*[ce]|--eval|-enc|-encodedcommand)(?:\s|['\"]|$))",
-    re.I,
+    re.IGNORECASE,
 )
 
 
@@ -396,8 +408,8 @@ def run_shell_command(cmd: str, cwd, stop_event=None) -> str:
                             start_new_session=True)
     with _ACTIVE_SHELL_LOCK:
         _ACTIVE_SHELL_PROCS.add(proc)
-    out_chunks: List[str] = []
-    err_chunks: List[str] = []
+    out_chunks: list[str] = []
+    err_chunks: list[str] = []
     state = {"last": time.time()}
 
     def pump(stream, sink):
@@ -473,7 +485,7 @@ def run_shell_command(cmd: str, cwd, stop_event=None) -> str:
     return "\n".join(parts)
 
 
-def _result_lines(outcomes, artifact_dir=None, artifact_rel: str = ARTIFACTS_DIR) -> List[str]:
+def _result_lines(outcomes, artifact_dir=None, artifact_rel: str = ARTIFACTS_DIR) -> list[str]:
     lines = []
     for i, (call, status, output) in enumerate(outcomes, 1):
         target = call["params"].get("path") or call["params"].get("cmd") or ""
@@ -509,9 +521,11 @@ class LocalTools:
     """Runs tools against one project folder. With `out` (two-model chats), changes go to that copy
     of the folder and reads prefer it, so the original files stay as they were."""
 
-    def __init__(self, root, out=None):
+    def __init__(self, root, out=None, skills=None):
         self.root = Path(root).expanduser().resolve()
         self.out = Path(out).expanduser().resolve() if out else None
+        # The skills this folder offers (arena/skills.py). use_skill only reads from this set.
+        self.skills = skills if skills is not None else skills_lib.EMPTY
 
     def _is_protected_write_path(self, target: Path) -> bool:
         """Protect sensitive repo/checkpoint metadata (.git/config, .git/hooks, checkpoints) from auto-writes."""
@@ -528,7 +542,7 @@ class LocalTools:
                 return True
         return False
 
-    def resolve(self, rel: str, write: bool = False) -> Tuple[Path, bool]:
+    def resolve(self, rel: str, write: bool = False) -> tuple[Path, bool]:
         rel = (rel or ".").strip().strip("\"'") or "."
         p = Path(rel).expanduser()
         target = (p if p.is_absolute() else self.root / p).resolve()
@@ -578,9 +592,13 @@ class LocalTools:
         except ValueError:
             return str(target)
 
-    def describe(self, call: Dict[str, Any]) -> Dict[str, Any]:
+    def describe(self, call: dict[str, Any]) -> dict[str, Any]:
         """What a call would do, for the permission card."""
         name, prm = call["name"], call["params"]
+        if name == "use_skill":
+            wanted = " ".join(str(prm.get("name") or "").split())[:64]
+            return {"tool": name, "path": str(self.root), "rel": ".", "inside": True,
+                    "summary": f"Use skill {wanted or '?'}"}
         if name == "run_cmd":
             cmd = (prm.get("cmd") or "").strip()
             return {"tool": name, "path": str(self.out or self.root), "rel": ".", "inside": True, "command": cmd,
@@ -614,7 +632,7 @@ class LocalTools:
             pass
         return info
 
-    def run(self, call: Dict[str, Any], stop_event=None) -> Tuple[bool, str]:
+    def run(self, call: dict[str, Any], stop_event=None) -> tuple[bool, str]:
         fn = getattr(self, "_t_" + call["name"], None)
         if fn is None:
             return False, (f"Unknown tool '{call['name']}'. Available: ls, read_file, search, write_file, "
@@ -625,6 +643,18 @@ class LocalTools:
             return True, fn(call["params"])
         except Exception as e:
             return False, f"{type(e).__name__}: {e}"
+
+    def _t_use_skill(self, prm) -> str:
+        """A skill's instructions: text for the model to follow, never anything that runs."""
+        wanted = str(prm.get("name") or "").strip()
+        skill = self.skills.get(wanted)
+        if skill is None:
+            offered = ", ".join(self.skills.names()) or "none"
+            raise LookupError(f"no skill named {wanted[:64]!r}. Skills available: {offered}")
+        tools = f"\nWritten around these tools: {', '.join(skill.tools)}." if skill.tools else ""
+        return (f"Skill {skill.name} ({skill.source}): {skill.description}{tools}\n"
+                "Follow it as guidance; every tool it suggests still runs under the permission mode.\n\n"
+                + skill.body)
 
     def _t_ls(self, prm) -> str:
         target, _ = self.resolve(prm.get("path", "."))
