@@ -187,7 +187,7 @@ class DeepSeekProvider(WebChatEngine):
             "models": models,
         }
 
-    def _apply_model_selection(self, model_id: str) -> Optional[bool]:
+    def _apply_model_selection(self, model_id: str) -> bool:
         want = (model_id or "").strip().lower()
         if not want:
             return True
@@ -218,13 +218,15 @@ class DeepSeekProvider(WebChatEngine):
           if (thinkBtn && isOn(thinkBtn) !== wantThink) {{ thinkBtn.click(); changed.push('think'); }}
           const searchBtn = findPill(/\\bsearch\\b/i);
           if (searchBtn && isOn(searchBtn) !== wantSearch) {{ searchBtn.click(); changed.push('search'); }}
-          const found = Boolean(thinkBtn || searchBtn);
-          return JSON.stringify({{ ok: found, changed }});
+          const ok = (Boolean(thinkBtn) || !wantThink) && (Boolean(searchBtn) || !wantSearch);
+          return JSON.stringify({{ ok, changed }});
         }})()"""
         res = self.eval_js(script, timeout=3.0)
-        if isinstance(res, dict) and res.get("changed"):
+        if not isinstance(res, dict):
+            return False
+        if res.get("changed"):
             time.sleep(0.15)
-        return bool(isinstance(res, dict) and res.get("ok"))
+        return bool(res.get("ok"))
 
     def _parse_observed_sse_chunk(self, raw_chunk: str, state: dict, *, flush: bool = False) -> list[dict]:
         """Parse DeepSeek's live SSE response stream (observation-only)."""

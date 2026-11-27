@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 import uuid
@@ -90,6 +91,21 @@ def _norm_url(u: str) -> str:
     return (u or "").strip().rstrip("/")
 
 
+_DATED_SUFFIX = re.compile(r"^-\d{6,8}(?:$|[-:])")
+
+
+def same_model_id(a: str, b: str) -> bool:
+    """True when two model ids name the same model, ignoring case and a date
+    suffix (``claude-x-5-20260101`` matches ``claude-x-5``)."""
+    a, b = (a or "").strip().lower(), (b or "").strip().lower()
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    longer, shorter = (a, b) if len(a) > len(b) else (b, a)
+    return longer.startswith(shorter) and bool(_DATED_SUFFIX.match(longer[len(shorter):]))
+
+
 def _looks_like_human_check(title: str, body: str) -> bool:
     t = (title or "").lower()
     b = (body or "").lower()
@@ -139,6 +155,7 @@ class WebChatEngine(Provider):
         self._signed_in_at: float = 0.0
         self._models_cache: Optional[dict] = None
         self._models_at: float = 0.0
+        self._models_probe_lock = threading.Lock()
         self._popup_windows: list = []
         self._webkit_configured_uid: str = ""
 
@@ -1032,22 +1049,52 @@ class WebChatEngine(Provider):
         return None
 
     def _apply_model_selection(self, model_id: str) -> Optional[bool]:
-        """Override in subclasses to apply a selected model before submitting."""
+        """Override to switch the provider page to ``model_id``.
+
+        Return True once the page shows that model, False when it could not be
+        switched. None (the default) means no switch happened.
+        """
         return None
+
+    def _known_model_id(self, want: str) -> Optional[str]:
+        """The listed id ``want`` refers to, or None when a live list lacks it.
+
+        Without a live list there is nothing to check against, so ``want`` passes.
+        """
+        cache = self._models_cache or {}
+        ids = [str(m.get("id") or "") for m in cache.get("models") or []]
+        if not ids or want.lower() == "default":
+            return want
+        return next((mid for mid in ids if same_model_id(want, mid)), None)
+
+    def _mark_active_model(self, model_id: str) -> None:
+        """Record a switch in the cached list and make the next list call re-check."""
+        if not self._models_cache:
+            return
+        models = [{**m, "active": str(m.get("id")) == model_id} for m in self._models_cache.get("models") or []]
+        self._models_cache = {**self._models_cache, "models": models, "active_model": model_id}
+        self._models_at = 0.0
 
     def select_model(self, model_id: str) -> dict:
         """Immediately apply a model selection in the live provider window when open."""
         want = (model_id or "").strip()
         if not want or self.window is None:
             return {"ok": True, "applied": False, "model_id": want}
+        known = self._known_model_id(want)
+        if known is None:
+            return {
+                "ok": False,
+                "applied": False,
+                "code": "unknown_model",
+                "error": f"{want} is not in your {self.name} model list. Refresh the models and pick again.",
+                "model_id": want,
+            }
         if not self._turn_lock.acquire(blocking=False):
             return {"ok": True, "applied": False, "busy": True, "model_id": want}
         try:
-            res = self._apply_model_selection(want)
-            applied = True if res is None else bool(res)
+            applied = bool(self._apply_model_selection(want))
             if applied:
-                self._models_cache = None
-                self._models_at = 0.0
+                self._mark_active_model(known)
             return {"ok": True, "applied": applied, "model_id": want}
         except Exception as exc:
             LOG.debug("provider %s select_model(%s) failed: %s", self.id, want, exc)
@@ -1059,40 +1106,70 @@ class WebChatEngine(Provider):
         return conversation_url or self.origin
 
     def list_models(self, *, force: bool = False) -> dict:
-        now = time.time()
-        if not force and self._models_cache and self._models_cache.get("live") and (now - self._models_at) < 60.0:
+        """Models for the picker, tagged with where they came from.
+
+        ``source`` is "live" (just read from the signed-in page), "cached" (the
+        last live list, when the page cannot answer now) or "default" (the
+        built-in placeholder, before any live list was read).
+
+        One check runs at a time. A call made while a check runs waits for it
+        and returns its list: the picker keeps only its newest request, so a
+        quick placeholder answer would replace the real list.
+        """
+        if not force and self._models_cache and (time.time() - self._models_at) < 60.0:
             return dict(self._models_cache)
+        asked_at = time.time()
+        if not self._models_probe_lock.acquire(timeout=20.0):
+            return self._cached_or_default_models()
+        try:
+            if self._models_cache and self._models_at >= asked_at:
+                return dict(self._models_cache)
+            return self._check_live_models(force=force)
+        finally:
+            self._models_probe_lock.release()
+
+    def _check_live_models(self, *, force: bool = False) -> dict:
+        """Read the live list from the provider page, or fall back to the last one."""
         if self.window is None and self.has_desktop_runtime():
             if self.ensure_window(hidden=True):
                 self._wait_for_composer(timeout=6.0 if force else 3.5)
-        live_res = None
-        if self.window is not None:
-            # Never touch the live provider DOM (e.g. clicking dropdowns / Escape) while a turn is running.
-            if self._turn_lock.acquire(blocking=False):
-                try:
-                    live_res = self._probe_live_models()
-                except Exception as exc:
-                    LOG.debug("provider %s live model probe failed: %s", self.id, exc)
-                finally:
-                    self._turn_lock.release()
-            elif self._models_cache:
-                return dict(self._models_cache)
-        if isinstance(live_res, dict) and live_res.get("models"):
-            out = {
-                "ok": True,
-                "provider": self.id,
-                "live": bool(live_res.get("live", True)),
-                "active_model": str(live_res.get("active_model") or ""),
-                "models": list(live_res["models"]),
-            }
-            self._models_cache = out
-            self._models_at = now
-            return dict(out)
+        if self.window is None:
+            return self._cached_or_default_models()
+        # Never touch the live provider DOM (e.g. clicking dropdowns / Escape) while a turn is running.
+        if not self._turn_lock.acquire(blocking=False):
+            return self._cached_or_default_models()
+        try:
+            live_res = self._probe_live_models()
+        except Exception as exc:
+            LOG.debug("provider %s live model probe failed: %s", self.id, exc)
+            live_res = None
+        finally:
+            self._turn_lock.release()
+        if not (isinstance(live_res, dict) and live_res.get("models")):
+            return self._cached_or_default_models()
+        now = time.time()
+        out = {
+            "ok": True,
+            "provider": self.id,
+            "live": True,
+            "source": "live",
+            "active_model": str(live_res.get("active_model") or ""),
+            "models": list(live_res["models"]),
+            "fetched_at": now,
+        }
+        self._models_cache = out
+        self._models_at = now
+        return dict(out)
+
+    def _cached_or_default_models(self) -> dict:
+        if self._models_cache:
+            return {**self._models_cache, "live": False, "source": "cached"}
         fallback = self._fallback_models()
         return {
             "ok": True,
             "provider": self.id,
             "live": False,
+            "source": "default",
             "active_model": str(fallback[0]["id"]) if fallback else "",
             "models": fallback,
         }
@@ -1616,9 +1693,15 @@ class WebChatEngine(Provider):
         # 2. Composer-driven submission + observation-only fetch SSE stream capture
         if model:
             try:
-                self._apply_model_selection(model)
+                switched = bool(self._apply_model_selection(model))
             except Exception as exc:
                 LOG.debug("provider %s apply_model(%s) failed: %s", self.id, model, exc)
+                switched = False
+            if not switched:
+                yield {
+                    "type": "agent",
+                    "stage": f"Could not switch {self.name} to {model}; using the model its page has selected.",
+                }
 
         if self.observed_fetch_patterns:
             self._install_fetch_observer(self.observed_fetch_patterns)

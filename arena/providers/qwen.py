@@ -9,6 +9,18 @@ from typing import Optional
 from arena.providers.web_engine import WebChatEngine
 
 
+def _match_active_label(models: list[dict], label: str) -> str:
+    """Id of the listed model whose name or id equals the page's model button
+    label, or "" when the label names none of them."""
+    want = " ".join((label or "").split()).lower()
+    if not want:
+        return ""
+    for m in models:
+        if want in (str(m.get("name") or "").strip().lower(), str(m.get("id") or "").strip().lower()):
+            return str(m["id"])
+    return ""
+
+
 class QwenProvider(WebChatEngine):
     id = "qwen"
     name = "Qwen"
@@ -111,46 +123,48 @@ class QwenProvider(WebChatEngine):
                     "org": "Alibaba",
                     "description": desc[:120],
                     "capabilities": caps,
-                    "active": len(models) == 0,
+                    "active": False,
                 })
             if models:
                 break
 
-        if not models:
-            dom = self.eval_js(
-                r"""(() => {
-                  const btn = Array.from(document.querySelectorAll('button')).find((b) => {
-                    const t = (b.innerText || b.textContent || '').trim();
-                    return t.length > 0 && t.length < 48 && /\b(Qwen|QwQ)\b/i.test(t);
-                  });
-                  const label = btn ? (btn.innerText || btn.textContent || '').replace(/\s+/g, ' ').trim() : '';
-                  return JSON.stringify({ label });
-                })()""",
-                timeout=3.0,
-            )
-            if isinstance(dom, dict) and dom.get("label"):
-                lbl = str(dom["label"]).strip()
-                models.append({
-                    "id": lbl,
-                    "name": lbl,
-                    "org": "Alibaba",
-                    "description": "Currently active on chat.qwen.ai",
-                    "capabilities": ["Text", "Code"],
-                    "active": True,
-                })
+        # The model button on the page names the model that is selected right now.
+        dom = self.eval_js(
+            r"""(() => {
+              const btn = Array.from(document.querySelectorAll('button')).find((b) => {
+                const t = (b.innerText || b.textContent || '').trim();
+                return t.length > 0 && t.length < 48 && /\b(Qwen|QwQ)\b/i.test(t);
+              });
+              const label = btn ? (btn.innerText || btn.textContent || '').replace(/\s+/g, ' ').trim() : '';
+              return JSON.stringify({ label });
+            })()""",
+            timeout=3.0,
+        )
+        label = str(dom.get("label") or "").strip() if isinstance(dom, dict) else ""
+        if label and not models:
+            models.append({
+                "id": label,
+                "name": label,
+                "org": "Alibaba",
+                "description": "Currently active on chat.qwen.ai",
+                "capabilities": ["Text", "Code"],
+                "active": False,
+            })
 
         if not models:
             return None
+        active_id = _match_active_label(models, label)
+        models = [{**m, "active": m["id"] == active_id} for m in models]
         return {
             "live": True,
-            "active_model": models[0]["id"],
+            "active_model": active_id,
             "models": models,
         }
 
-    def _apply_model_selection(self, model_id: str) -> None:
+    def _apply_model_selection(self, model_id: str) -> bool:
         want = (model_id or "").strip()
         if not want or want.lower() == "default":
-            return
+            return True
         tokens = [t for t in re.split(r"[\s\-_/]+", want.lower()) if t]
         script = f"""(() => {{
           const wantFull = {json.dumps(want.lower())};
@@ -177,8 +191,11 @@ class QwenProvider(WebChatEngine):
           return JSON.stringify({{ ok: false }});
         }})()"""
         res = self.eval_js(script, timeout=3.5)
-        if isinstance(res, dict) and res.get("clicked"):
+        if not (isinstance(res, dict) and res.get("ok")):
+            return False
+        if res.get("clicked"):
             time.sleep(0.2)
+        return True
 
     def _parse_observed_sse_chunk(self, raw_chunk: str, state: dict, *, flush: bool = False) -> list[dict]:
         events: list[dict] = []

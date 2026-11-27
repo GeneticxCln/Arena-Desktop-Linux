@@ -8,6 +8,7 @@ visible (except for manual sign-in or manual human verification).
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 import uuid
@@ -15,6 +16,8 @@ from typing import Iterator, Optional
 
 from arena import diag
 from arena.providers.web_engine import WebChatEngine
+
+LOG = logging.getLogger(__name__)
 
 
 def _extract_claude_chat_uuid(url: str) -> str:
@@ -161,12 +164,7 @@ class ClaudeProvider(WebChatEngine):
             })
 
         # 1. Inspect claude.ai's signed-in bootstrap / account JSON for real model slugs
-        for endpoint in ("/api/bootstrap", "/api/account"):
-            resp = self.fetch_json(endpoint, timeout=4.5)
-            data = resp.get("data")
-            if not (resp.get("ok") and isinstance(data, (dict, list))):
-                continue
-            self._collect_claude_models_from_json(data, _add)
+        self._collect_account_models(_add)
 
         # 2. Also read the live model selector button & dropdown in claude.ai's DOM (pure ASCII JS)
         script = r"""(() => {
@@ -299,7 +297,20 @@ class ClaudeProvider(WebChatEngine):
                 elif isinstance(item, (dict, list)):
                     self._collect_claude_models_from_json(item, add_fn, depth + 1)
 
+    def _collect_account_models(self, add_fn) -> None:
+        """Read real model slugs from claude.ai's signed-in bootstrap and account JSON."""
+        for endpoint in ("/api/bootstrap", "/api/account"):
+            resp = self.fetch_json(endpoint, timeout=4.5)
+            data = resp.get("data")
+            if resp.get("ok") and isinstance(data, (dict, list)):
+                self._collect_claude_models_from_json(data, add_fn)
+
     def _resolve_api_model(self, model_id: str) -> str:
+        """The API slug for a picked model, or "" when it has none.
+
+        A label saved in an earlier session is looked up in the account JSON
+        the first time, since the label map starts empty after a restart.
+        """
         want = (model_id or "").strip()
         if not want or want.lower() == "default":
             return ""
@@ -321,21 +332,15 @@ class ClaudeProvider(WebChatEngine):
                     return slug
             return ""
 
-        slug = _lookup(want)
-        if not slug and not self._model_label_to_slug:
-            # Populate label->slug map lazily from bootstrap/account/org endpoints
+        if not self._model_label_to_slug:
             try:
-                for endpoint in ("/api/bootstrap", "/api/account"):
-                    resp = self.fetch_json(endpoint, timeout=4.0)
-                    if resp.get("ok") and isinstance(resp.get("data"), (dict, list)):
-                        self._collect_claude_models_from_json(resp["data"], lambda *_: None)
+                self._collect_account_models(lambda *_: None)
                 _, org_obj = self._get_org_info()
                 if org_obj:
                     self._collect_claude_models_from_json(org_obj, lambda *_: None)
-                slug = _lookup(want)
-            except Exception:
-                pass
-        return slug
+            except Exception as exc:
+                LOG.debug("claude model slug lookup failed: %s", exc)
+        return _lookup(want)
 
     def _stream_turn_api(
         self,
@@ -347,6 +352,10 @@ class ClaudeProvider(WebChatEngine):
         stop_event=None,
     ) -> Optional[Iterator[dict]]:
         """Stream Claude directly via claude.ai's signed-in same-origin SSE API."""
+        if model and model.strip().lower() != "default" and not self._resolve_api_model(model):
+            # Only the page's own model menu knows this label: the API call would
+            # carry no model and answer with the account default instead.
+            return None
         org_id, _ = self._get_org_info()
         if not org_id:
             return None

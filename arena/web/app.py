@@ -10810,7 +10810,9 @@ def api_provider_select_model(provider_id):
     if callable(fn):
         res = fn(model_id)
         payload = {"ok": True, "provider": provider_id, **(res if isinstance(res, dict) else {})}
-        return jsonify(payload), (200 if payload.get("ok", True) else 500)
+        if payload.get("ok", True):
+            return jsonify(payload), 200
+        return jsonify(payload), (409 if payload.get("code") == "unknown_model" else 500)
     return jsonify({"ok": True, "provider": provider_id, "applied": False, "model_id": model_id})
 
 

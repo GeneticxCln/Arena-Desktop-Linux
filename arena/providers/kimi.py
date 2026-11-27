@@ -171,7 +171,7 @@ class KimiProvider(WebChatEngine):
             "models": models,
         }
 
-    def _apply_model_selection(self, model_id: str) -> Optional[bool]:
+    def _apply_model_selection(self, model_id: str) -> bool:
         want = (model_id or "").strip()
         if not want or want.lower() == "default":
             return True
