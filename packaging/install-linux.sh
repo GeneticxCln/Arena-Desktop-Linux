@@ -15,7 +15,10 @@ ICON_DIR="${ICON_DIR:-$HOME/.local/share/icons/hicolor/256x256/apps}"
 
 BIN="$HERE/Arena-Desktop"
 if [ ! -x "$BIN" ]; then
-  if [ -x "$HERE/../dist/Arena-Desktop" ]; then
+  MACHINE="$(uname -m)"
+  if [ \( "$MACHINE" = "aarch64" -o "$MACHINE" = "arm64" \) -a -x "$HERE/../dist/Arena-Desktop-arm64" ]; then
+    BIN="$HERE/../dist/Arena-Desktop-arm64"
+  elif [ -x "$HERE/../dist/Arena-Desktop" ]; then
     BIN="$HERE/../dist/Arena-Desktop"
   else
     echo "Arena-Desktop binary not found next to this script." >&2

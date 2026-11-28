@@ -5,7 +5,7 @@ Tool registry and XML tool parser for Arena CLI.
 import os
 import re
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 
 from arena.tools.base import BaseTool
 from arena.tools.file_tools import ReadFileTool, WriteFileTool, EditFileTool, SearchTool, LsTool

@@ -1534,7 +1534,7 @@ class WebChatEngine(Provider):
             if self._is_login_url(href):
                 return last
             if origin_host in href:
-                if avoid_stale_hint and self.conversation_url_hint and self.conversation_url_hint in href:
+                if avoid_stale_hint and self._is_conversation_url(href):
                     time.sleep(0.25)
                     continue
                 if expected_url and previous_url and href == previous_url and expected_url != previous_url:
@@ -1687,7 +1687,7 @@ class WebChatEngine(Provider):
         if self.api_nav_not_needed and not need_nav:
             cur_after = self.page_url()
             dom_need_nav = bool(
-                (not is_followup_round and not conversation_url and self.conversation_url_hint and self.conversation_url_hint in (cur_after or ""))
+                (not is_followup_round and not conversation_url and self._is_conversation_url(cur_after or ""))
                 or (conversation_url and conversation_url != cur_after)
             )
             if dom_need_nav:

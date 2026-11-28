@@ -6,8 +6,8 @@
   <meta name="color-scheme" content="dark">
   <meta name="description" content="Arena Desktop — an unofficial local desktop client for arena.ai. A desktop interface over a local Flask + pywebview backend.">
   <title>Arena Desktop</title>
-  <link rel="stylesheet" href="/static/vendor/xterm.css?v=7.5.0" onerror="this.onerror=null;this.href='static/vendor/xterm.css?v=7.5.0'">
-  <link rel="stylesheet" href="/static/style.css?v=7.5.0" onerror="this.onerror=null;this.href='static/style.css?v=7.5.0'">
+  <link rel="stylesheet" href="/static/vendor/xterm.css?v=7.6.0" onerror="this.onerror=null;this.href='static/vendor/xterm.css?v=7.6.0'">
+  <link rel="stylesheet" href="/static/style.css?v=7.6.0" onerror="this.onerror=null;this.href='static/style.css?v=7.6.0'">
 </head>
 <body>
   <a class="skip-link" href="#prompt">Skip to the message box</a>
@@ -287,6 +287,7 @@
               <span data-icon="alert"></span>
               <span id="heavySendLabel">Heavy send</span>
             </button>
+            <span class="composer-secondary-hint" id="composerSecondaryHint" hidden></span>
           </div>
 
           <form class="composer-card" id="composerForm" novalidate>
@@ -372,6 +373,9 @@
               <p id="workspacePanelRoot">Loading folder…</p>
             </div>
           </div>
+          <button class="icon-button tiny" type="button" id="workspacePanelClose" aria-label="Close Workspace panel" title="Close">
+            <span data-icon="x"></span>
+          </button>
         </header>
         <div class="workspace-tabs" role="tablist" aria-label="Workspace views">
           <button class="workspace-tab is-active" id="workspaceFilesTab" type="button" role="tab" aria-selected="true" aria-controls="workspaceFilesPane" data-workspace-tab="files">
@@ -380,12 +384,23 @@
           <button class="workspace-tab" id="workspaceGitTab" type="button" role="tab" aria-selected="false" aria-controls="workspaceGitPane" data-workspace-tab="git">
             <span data-icon="git-branch"></span><span>Git</span><span class="workspace-tab-badge" id="workspaceGitBadge" hidden>0</span>
           </button>
+          <button class="workspace-tab" id="workspaceConnectorsTab" type="button" role="tab" aria-selected="false" aria-controls="connectorsPane" data-workspace-tab="connectors">
+            <span data-icon="plug"></span><span>MCP</span>
+          </button>
         </div>
         <section class="workspace-files-pane" id="workspaceFilesPane" aria-label="Workspace file tree" role="tabpanel" aria-labelledby="workspaceFilesTab">
           <div class="workspace-tree" id="workspaceTree" role="tree" aria-label="Workspace files"></div>
         </section>
         <section class="workspace-git-pane" id="workspaceGitPane" aria-label="Workspace Git status" role="tabpanel" aria-labelledby="workspaceGitTab" hidden>
           <div class="workspace-git" id="workspaceGit"></div>
+        </section>
+        <section class="connectors-pane" id="connectorsPane" aria-label="MCP servers and connectors" role="tabpanel" aria-labelledby="workspaceConnectorsTab" hidden>
+          <div class="connectors-toolbar">
+            <button class="button button-small" type="button" id="addConnectorButton"><span data-icon="plus"></span><span>Add MCP</span></button>
+            <button class="button button-small button-quiet" type="button" id="openMcpJsonButton" title="Open mcp.json"><span data-icon="file-text"></span><span>mcp.json</span></button>
+            <button class="icon-button tiny" type="button" id="reloadConnectorsButton" aria-label="Reload connectors" title="Reload connectors"><span data-icon="refresh"></span></button>
+          </div>
+          <div class="connector-list" id="connectorList"></div>
         </section>
       </section>
 
@@ -510,8 +525,8 @@
       }, 12000);
     })();
   </script>
-  <script src="/static/vendor/xterm.js?v=7.5.0" defer onerror="this.onerror=null;this.src='static/vendor/xterm.js?v=7.5.0'"></script>
-  <script src="/static/vendor/xterm-addon-fit.js?v=7.5.0" defer onerror="this.onerror=null;this.src='static/vendor/xterm-addon-fit.js?v=7.5.0'"></script>
-  <script src="/static/app.js?v=7.5.0" defer onerror="this.onerror=null;this.src='static/app.js?v=7.5.0'"></script>
+  <script src="/static/vendor/xterm.js?v=7.6.0" defer onerror="this.onerror=null;this.src='static/vendor/xterm.js?v=7.6.0'"></script>
+  <script src="/static/vendor/xterm-addon-fit.js?v=7.6.0" defer onerror="this.onerror=null;this.src='static/vendor/xterm-addon-fit.js?v=7.6.0'"></script>
+  <script src="/static/app.js?v=7.6.0" defer onerror="this.onerror=null;this.src='static/app.js?v=7.6.0'"></script>
 </body>
 </html>

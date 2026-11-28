@@ -37,6 +37,8 @@ hiddenimports = [
     'arena.native_subagents',
     'arena.permissions',
     'arena.agent',
+    'arena.browser_agent',
+    'arena.video_render',
     'arena.workspace',
     'arena.engine',
     'arena.diag',

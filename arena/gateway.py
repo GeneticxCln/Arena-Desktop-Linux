@@ -489,13 +489,14 @@ class GatewayManager:
         gates the session: from a machine with flaky DNS it kept failing
         for a minute and tearing down tunnels the agent could reach fine.
         """
-        for _ in range(20):
+        for _ in range(40):
             with self._start_lock:
                 if generation != self._generation or not self._running:
                     return
                 if self._state == "on":
                     return
-            if self._origin_ok():
+                url = self._url
+            if url and self._origin_ok():
                 with self._start_lock:
                     if generation != self._generation or not self._running \
                             or self._state != "starting" or not self._url:
@@ -636,8 +637,13 @@ class GatewayManager:
         for step in steps:
             if not isinstance(step, dict) or not step.get("tool"):
                 return None, "each step needs a tool name"
+            raw_args = step.get("arguments")
+            if raw_args is None:
+                raw_args = {}
+            elif not isinstance(raw_args, dict):
+                return None, "each step's arguments must be a JSON object"
             clean_steps.append({"tool": str(step["tool"]),
-                                "arguments": step.get("arguments") or {},
+                                "arguments": raw_args,
                                 "continue_on_error": bool(step.get("continue_on_error"))})
         job_id = uuid.uuid4().hex[:16]
         job = {"job_id": job_id, "server": server, "status": "queued",
@@ -711,24 +717,33 @@ class GatewayManager:
             spec = self._resolve(server, tool)
             if spec is None:
                 result["error"] = f"tool not available on {server}: {tool}"
-            elif not self._approve(server, tool, bool(spec.get("read_only")),
-                                   step.get("arguments") or {}):
-                result["error"] = "denied by the user (or approval timed out)"
-            elif generation != self._generation or not self._running:
-                with self._lock:
-                    job["status"] = "error"
-                    job["error"] = "gateway session ended"
-                self._signal_job(job)
-                return
             else:
+                step_args = step.get("arguments")
+                if not isinstance(step_args, dict):
+                    step_args = {}
                 try:
-                    output = self._call_tool(spec["alias"], step.get("arguments") or {})
-                    result["output"] = str(output or "")[:MAX_OUTPUT]
-                    result["ok"] = not result["output"].startswith(("MCP Error:", "Error: MCP tool"))
-                    if not result["ok"]:
-                        result["error"] = result["output"][:500]
+                    approved = bool(self._approve(server, tool, bool(spec.get("read_only")), step_args))
                 except Exception as e:
-                    result["error"] = f"{type(e).__name__}: {e}"
+                    approved = False
+                    result["error"] = f"approval error: {type(e).__name__}: {e}"
+                if not approved:
+                    if not result["error"]:
+                        result["error"] = "denied by the user (or approval timed out)"
+                elif generation != self._generation or not self._running:
+                    with self._lock:
+                        job["status"] = "error"
+                        job["error"] = "gateway session ended"
+                    self._signal_job(job)
+                    return
+                else:
+                    try:
+                        output = self._call_tool(spec["alias"], step_args)
+                        result["output"] = str(output or "")[:MAX_OUTPUT]
+                        result["ok"] = not result["output"].startswith(("MCP Error:", "Error: MCP tool"))
+                        if not result["ok"]:
+                            result["error"] = result["output"][:500]
+                    except Exception as e:
+                        result["error"] = f"{type(e).__name__}: {e}"
             with self._lock:
                 job["results"].append(result)
                 self._calls.append({"ts": started, "server": server, "tool": tool,

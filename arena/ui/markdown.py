@@ -6,7 +6,6 @@ Supports code blocks, sandbox deployment previews, and search citations.
 from typing import Dict, Any, List
 from rich.markup import escape as _escape_markup
 from rich.panel import Panel
-from rich.syntax import Syntax
 from rich.markdown import Markdown
 from rich.text import Text
 

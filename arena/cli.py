@@ -60,12 +60,12 @@ def print_cli_help() -> None:
     ))
 
 
-def read_cookie_input(prompt_label: str = "  Cookie> ") -> str:
-    """Read cookie input supporting both clipboard auto-capture and multi-line paste."""
-    # Check clipboard first
-    clip = check_clipboard_for_cookies()
-    if clip:
-        return clip[0]
+def read_cookie_input(prompt_label: str = "  Cookie> ", *, check_clipboard: bool = True) -> str:
+    """Read cookie input supporting optional clipboard auto-capture and multi-line paste."""
+    if check_clipboard:
+        clip = check_clipboard_for_cookies()
+        if clip:
+            return clip[0]
 
     lines = []
     con.print("  [dim]Enter/paste cookie lines below (hit Enter on an empty line when done):[/dim]")
@@ -113,7 +113,7 @@ def cmd_login() -> None:
                 if proc:
                     import time as _t
                     _t.sleep(3)
-                    con.print(f"  [bold #10B981]✓ CDP browser launched on port 9222[/bold #10B981]")
+                    con.print("  [bold #10B981]✓ CDP browser launched on port 9222[/bold #10B981]")
                 else:
                     con.print("  [dim yellow]Could not launch CDP browser. Chat may require manual browser setup.[/dim yellow]")
 
@@ -138,10 +138,9 @@ def cmd_login() -> None:
     con.print("\n  [bold white]Select how you want to log in:[/bold white]\n")
 
     options = []
-    idx = 1
     # Prioritize Brave if present
     if "Brave" in browsers:
-        options.append(("Brave", browsers["Brave"], f"[bold #10B981]Brave Browser[/bold #10B981] [dim](Recommended - already logged in)[/dim]"))
+        options.append(("Brave", browsers["Brave"], "[bold #10B981]Brave Browser[/bold #10B981] [dim](Recommended - already logged in)[/dim]"))
     for b_name, b_path in browsers.items():
         if b_name != "Brave":
             options.append((b_name, b_path, f"{b_name}"))
@@ -191,9 +190,12 @@ def cmd_login() -> None:
                 return
             else:
                 con.print("  [yellow]Clipboard did not contain arena cookies. Paste below directly:[/yellow]")
-                raw_paste = read_cookie_input("  Cookie> ")
+                raw_paste = read_cookie_input("  Cookie> ", check_clipboard=False)
                 if raw_paste:
                     c_str, _, u_info = parse_cookie_input(raw_paste)
+                    if not c_str:
+                        con.print("  [red]No valid Arena cookies found in pasted input.[/red]")
+                        return
                     _on_login_success(c_str, u_info)
         except (EOFError, KeyboardInterrupt):
             con.print("\n  [dim]Cancelled.[/dim]")
@@ -202,11 +204,14 @@ def cmd_login() -> None:
     elif sel == paste_idx:
         con.print("\n  [bold]Paste your Arena cookies[/bold] (Supports raw header or tabbed DevTools copy):")
         try:
-            raw_input_data = read_cookie_input("  Cookie> ")
+            raw_input_data = read_cookie_input("  Cookie> ", check_clipboard=False)
             if not raw_input_data:
                 con.print("  [dim]Empty input.[/dim]")
                 return
             c_str, _, u_info = parse_cookie_input(raw_input_data)
+            if not c_str:
+                con.print("  [red]No valid Arena cookies found in pasted input.[/red]")
+                return
             _on_login_success(c_str, u_info)
         except (EOFError, KeyboardInterrupt):
             con.print("\n  [dim]Cancelled.[/dim]")
@@ -286,24 +291,35 @@ def cmd_set_model() -> None:
         con.print(f"  [bold #10B981]✓ Active model set to {target['name']} ({target['org']})[/bold #10B981]")
 
 
-def cmd_mode() -> None:
-    """Interactive modality switcher."""
-    con.print(Panel(
-        "[bold #299BFF]Select Modality / Capability Mode[/bold #299BFF]\n"
-        "[dim]Arena.ai handles each modality differently with dedicated models & sandboxes[/dim]",
-        border_style="#299BFF",
-        width=75,
-    ))
-    con.print("  [bold cyan]1[/bold cyan]  [bold #10B981]Code / Webdev[/bold #10B981] — Builds and deploys live web preview sandboxes")
-    con.print("  [bold cyan]2[/bold cyan]  [bold #38BDF8]Search / Grounding[/bold #38BDF8] — Real-time web search with live source citations")
-    con.print("  [bold cyan]3[/bold cyan]  [bold #EC4899]Image Generation[/bold #EC4899] — AI image generation models")
-    con.print("  [bold cyan]4[/bold cyan]  [bold white]Text / Chat[/bold white] — General multi-turn coding and conversation")
-    con.print("  [bold cyan]5[/bold cyan]  [bold #EAB308]⚡ Max Router[/bold #EAB308] — Automatically routes each prompt to the top-ranking S-tier model\n")
+def cmd_mode(mode_arg: Optional[str] = None) -> None:
+    """Interactive or direct modality switcher."""
+    if mode_arg:
+        norm = mode_arg.strip().lower()
+        alias_map = {
+            "webdev": "1", "code": "1",
+            "search": "2",
+            "image": "3",
+            "chat": "4", "text": "4",
+            "router": "5", "max": "5",
+        }
+        c = alias_map.get(norm, norm)
+    else:
+        con.print(Panel(
+            "[bold #299BFF]Select Modality / Capability Mode[/bold #299BFF]\n"
+            "[dim]Arena.ai handles each modality differently with dedicated models & sandboxes[/dim]",
+            border_style="#299BFF",
+            width=75,
+        ))
+        con.print("  [bold cyan]1[/bold cyan]  [bold #10B981]Code / Webdev[/bold #10B981] — Builds and deploys live web preview sandboxes")
+        con.print("  [bold cyan]2[/bold cyan]  [bold #38BDF8]Search / Grounding[/bold #38BDF8] — Real-time web search with live source citations")
+        con.print("  [bold cyan]3[/bold cyan]  [bold #EC4899]Image Generation[/bold #EC4899] — AI image generation models")
+        con.print("  [bold cyan]4[/bold cyan]  [bold white]Text / Chat[/bold white] — General multi-turn coding and conversation")
+        con.print("  [bold cyan]5[/bold cyan]  [bold #EAB308]⚡ Max Router[/bold #EAB308] — Automatically routes each prompt to the top-ranking S-tier model\n")
 
-    try:
-        c = input("  Choice [1-5]> ").strip()
-    except (EOFError, KeyboardInterrupt):
-        return
+        try:
+            c = input("  Choice [1-5]> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return
 
     cfg = load_config()
     if c == "1":
@@ -323,6 +339,9 @@ def cmd_mode() -> None:
         cfg["model_id"] = MAX_ROUTER_ID
         cfg["model_name"] = "Max (Router)"
         con.print("  [bold #EAB308]⚡ Max Router activated! Prompts will route to the best model automatically.[/bold #EAB308]")
+    else:
+        con.print(f"  [red]Unknown modality '{c}'. Use: chat, webdev, search, image, or router.[/red]")
+        return
     save_config(cfg)
 
 
@@ -499,6 +518,7 @@ def cmd_chat(initial_msg: Optional[str] = None) -> None:
 
     tools = ToolRegistry(os.getcwd())
     client = ArenaClient(cookie)
+    client.active_mode = "direct"
     client.active_modality = active_modality
     debug = "--debug" in sys.argv
 
@@ -602,7 +622,7 @@ def cmd_chat(initial_msg: Optional[str] = None) -> None:
                         base_prompt = tools.get_system_prompt()
                         first_nl = base_prompt.find("\n")
                         sys_prompt = arg[:500] + (base_prompt[first_nl:] if first_nl != -1 else "")
-                        con.print(f"[bold #10B981]Persona updated.[/bold #10B981]")
+                        con.print("[bold #10B981]Persona updated.[/bold #10B981]")
                     else:
                         con.print("[dim]Usage: /persona <your custom system prompt>[/dim]")
                         con.print("[dim]Example: /persona You are a security expert who writes Python exploits[/dim]")
@@ -717,7 +737,7 @@ def cmd_chat(initial_msg: Optional[str] = None) -> None:
             current_msg = full_msg
 
             # Agentic tool loop (up to 5 rounds)
-            for tool_round in range(5):
+            for _tool_round in range(5):
                 con.print(f"\n[bold #F4F0EB]{model_name}[/bold #F4F0EB]:", end=" ")
 
                 full_text = ""
@@ -728,7 +748,7 @@ def cmd_chat(initial_msg: Optional[str] = None) -> None:
                     if err:
                         if "No CDP browser" in str(err) or "No browser" in str(err):
                             client.use_cdp = False
-                            con.print(f"\n[dim yellow]CDP browser disconnected — falling back to direct API.[/dim yellow]")
+                            con.print("\n[dim yellow]CDP browser disconnected — falling back to direct API.[/dim yellow]")
                         elif "429" in str(err) or "Rate limit" in str(err):
                             con.print(f"\n[yellow]{err}[/yellow]")
                             break
@@ -742,10 +762,18 @@ def cmd_chat(initial_msg: Optional[str] = None) -> None:
                             con.print(f"\n[yellow]{err}[/yellow]")
                             break
                         elif "CDP connection error" in str(err):
-                            con.print(f"\n[dim yellow]Browser connection lost. Retrying...[/dim yellow]")
+                            con.print("\n[dim yellow]Browser connection lost. Retrying...[/dim yellow]")
                             client.use_cdp = _cdp_find_arena_tab(client.cdp_port) is not None
-                            if not client.use_cdp:
-                                con.print(f"[dim yellow]CDP unavailable — falling back to direct API.[/dim yellow]")
+                            if client.use_cdp:
+                                retry_text, retry_err = client.send_chat_browser(model_id, current_msg)
+                                if not retry_err:
+                                    print(retry_text or "", flush=True)
+                                    full_text = retry_text or ""
+                                else:
+                                    client.use_cdp = False
+                                    con.print("[dim yellow]CDP retry failed — falling back to direct API.[/dim yellow]")
+                            else:
+                                con.print("[dim yellow]CDP unavailable — falling back to direct API.[/dim yellow]")
                         else:
                             con.print(f"\n[red]{err}[/red]")
                             break
@@ -831,7 +859,8 @@ def cmd_chat(initial_msg: Optional[str] = None) -> None:
 
 def main() -> None:
     """CLI dispatcher."""
-    if len(sys.argv) < 2:
+    pos_args = [a for a in sys.argv[1:] if a != "--debug"]
+    if not pos_args:
         # Interactive arrow-key menu loop
         while True:
             choice = show_main_menu()
@@ -861,14 +890,14 @@ def main() -> None:
             con.print()
         return
 
-    cmd = sys.argv[1].lower().strip("-")
+    cmd = pos_args[0].lower().strip("-")
     try:
         if cmd in ("help", "h"):
             print_cli_help()
         elif cmd == "login":
             cmd_login()
         elif cmd in ("mode", "modality"):
-            cmd_mode()
+            cmd_mode(pos_args[1] if len(pos_args) > 1 else None)
         elif cmd == "models":
             cmd_models()
         elif cmd in ("set-model", "model", "set"):
@@ -878,13 +907,13 @@ def main() -> None:
         elif cmd == "mcp":
             cmd_mcp()
         elif cmd == "ask":
-            msg = " ".join(sys.argv[2:])
+            msg = " ".join(pos_args[1:])
             if msg:
                 cmd_chat(initial_msg=msg)
             else:
                 con.print("[red]Usage: arena.bat ask \"your question\"[/red]")
         else:
-            cmd_chat(initial_msg=" ".join(sys.argv[1:]))
+            cmd_chat(initial_msg=" ".join(pos_args))
     except (KeyboardInterrupt, UserAbort):
         con.print("\n[dim]Cancelled.[/dim]")
     except Exception as e:

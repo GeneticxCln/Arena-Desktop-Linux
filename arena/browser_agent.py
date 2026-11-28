@@ -33,6 +33,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import threading
 import time
 from collections.abc import Callable
@@ -72,20 +73,47 @@ def find_chrome() -> str | None:
 _SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
 _HOST_PORT_RE = re.compile(r"^(\[[0-9a-fA-F:]+\]|[^:/\[\]]+)(:\d{1,5})?$")
 _PRIVATE_SUFFIXES = (".localhost", ".local", ".internal", ".lan", ".home.arpa")
+_CGNAT_NET = ipaddress.ip_network("100.64.0.0/10")
 
 
-def is_private_host(host: str) -> bool:
-    """True for loopback, private, link-local and local-only names (no DNS lookup)."""
+def _ip_is_private(ip) -> bool:
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    if isinstance(ip, ipaddress.IPv4Address) and ip in _CGNAT_NET:
+        return True
+    return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_unspecified
+
+
+def is_private_host(host: str, *, resolve_dns: bool = False) -> bool:
+    """True for loopback, private, CGNAT, link-local, non-canonical IPv4 and local-only names."""
     name = (host or "").strip().lower().strip("[]")
     if not name:
         return False
     if name == "localhost" or name.endswith(_PRIVATE_SUFFIXES):
         return True
     try:
-        ip = ipaddress.ip_address(name)
+        return _ip_is_private(ipaddress.ip_address(name))
     except ValueError:
-        return False
-    return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_unspecified
+        pass
+    # Catch non-canonical IPv4 forms accepted by browsers (e.g. 2130706433, 127.1, 0x7f000001, 0177.0.0.1).
+    try:
+        packed = socket.inet_aton(name)
+        return _ip_is_private(ipaddress.IPv4Address(packed))
+    except OSError:
+        pass
+    if resolve_dns:
+        try:
+            infos = socket.getaddrinfo(name, None)
+        except OSError:
+            return False
+        for _fam, _type, _proto, _canon, sockaddr in infos:
+            addr_text = str(sockaddr[0]).split("%", 1)[0]
+            try:
+                if _ip_is_private(ipaddress.ip_address(addr_text)):
+                    return True
+            except ValueError:
+                continue
+    return False
 
 
 def url_host(url: str) -> str:
@@ -260,11 +288,11 @@ class CdpPipe:
 
     def send(self, method: str, params: dict | None = None, session_id: str | None = None,
              timeout: float = 15.0) -> dict:
-        if self._closed:
-            raise BrowserError("The browser is closed.")
         done = threading.Event()
         slot: list = [done, None]
         with self._lock:
+            if self._closed:
+                raise BrowserError("The browser is closed.")
             self._next_id += 1
             msg_id = self._next_id
             self._waiting[msg_id] = slot
@@ -274,6 +302,8 @@ class CdpPipe:
         data = json.dumps(message).encode("utf-8") + b"\0"
         try:
             with self._write_lock:
+                if self._closed or self._write_fd < 0:
+                    raise OSError("pipe closed")
                 while data:
                     data = data[os.write(self._write_fd, data):]
         except OSError as exc:
@@ -316,8 +346,8 @@ class CdpPipe:
                         self._on_event(message.get("sessionId"), message["method"], message.get("params") or {})
                     except Exception:
                         LOG.exception("browser event handler failed")
-        self._closed = True
         with self._lock:
+            self._closed = True
             waiting, self._waiting = self._waiting, {}
         for slot in waiting.values():
             slot[1] = {"error": {"message": "the browser exited"}}
@@ -325,9 +355,30 @@ class CdpPipe:
 
     def close(self) -> None:
         self._closed = True
-        for fd in (self._write_fd, self._read_fd):
+        waiting = {}
+        if self._lock.acquire(timeout=0.5):
             try:
-                os.close(fd)
+                waiting, self._waiting = self._waiting, {}
+            finally:
+                self._lock.release()
+        for slot in waiting.values():
+            slot[1] = {"error": {"message": "the browser closed"}}
+            slot[0].set()
+        acquired_w = self._write_lock.acquire(timeout=0.5)
+        try:
+            wfd, self._write_fd = self._write_fd, -1
+            if wfd >= 0:
+                try:
+                    os.close(wfd)
+                except OSError:
+                    pass
+        finally:
+            if acquired_w:
+                self._write_lock.release()
+        rfd, self._read_fd = self._read_fd, -1
+        if rfd >= 0:
+            try:
+                os.close(rfd)
             except OSError:
                 pass
 
@@ -345,6 +396,7 @@ class Tab:
         self.lock = threading.RLock()
         self._loads = 0
         self._navigations = 0
+        self._local_allowed = False
         self._load_event = threading.Condition()
         self.last_used = time.time()
 
@@ -391,7 +443,7 @@ class Tab:
             return
         if href is None:
             href = str(self._eval("location.href") or "")
-        if is_private_host(url_host(href)):
+        if is_private_host(url_host(href), resolve_dns=True):
             self._send("Page.navigate", {"url": "about:blank"})
             self.refs = {}
             raise BrowserError(
@@ -426,13 +478,14 @@ class Tab:
         target = check_url(url)
         with self.lock:
             self.last_used = time.time()
+            self._local_allowed = is_private_host(url_host(target), resolve_dns=True)
             before = self._loads
             result = self._send("Page.navigate", {"url": target}, timeout=timeout)
             if result.get("errorText"):
                 raise BrowserError(f"Could not open {target}: {result['errorText']}")
             loaded = self._wait_for_load(before, timeout) if result.get("loaderId") else True
             title, href = self._eval("[document.title, location.href]") or ["", target]
-            self._guard_local_network(is_private_host(url_host(target)), str(href or ""))
+            self._guard_local_network(self._local_allowed, str(href or ""))
             note = "" if loaded else " (still loading; use browser_wait before acting)"
             return f"Opened {href}{note}. Title: {title}"
 
@@ -442,6 +495,7 @@ class Tab:
             navigations = self._navigations
             nodes = self._send("Accessibility.getFullAXTree", {}, timeout=20.0).get("nodes") or []
             title, href = self._eval("[document.title, location.href]") or ["", ""]
+            self._guard_local_network(self._local_allowed, str(href or ""))
             text, refs = render_snapshot(nodes, title=title, url=href, full=full)
             with self._load_event:
                 if self._navigations != navigations:
@@ -462,7 +516,6 @@ class Tab:
                 raise BrowserError(f"Cannot click {ref}: {exc}. Take a new browser_snapshot.") from exc
             if not quads:
                 raise BrowserError(f"{ref} is not visible on the page, so it cannot be clicked.")
-            was_local = is_private_host(url_host(str(self._eval("location.href") or "")))
             quad = quads[0]
             x = sum(quad[0::2]) / 4
             y = sum(quad[1::2]) / 4
@@ -475,13 +528,15 @@ class Tab:
             time.sleep(0.15)
             if self._navigations != navigations:
                 self._wait_for_load(loads, 10.0)
-                self._guard_local_network(was_local)
+                self._guard_local_network(self._local_allowed)
                 return f"Clicked {ref}; the page navigated, so take a new browser_snapshot."
+            self._guard_local_network(self._local_allowed)
             return f"Clicked {ref}."
 
     def fill(self, ref: str, text: str) -> str:
         with self.lock:
             self.last_used = time.time()
+            self._guard_local_network(self._local_allowed)
             backend = self._backend(ref)
             self._send("DOM.scrollIntoViewIfNeeded", {"backendNodeId": backend})
             self._send("DOM.focus", {"backendNodeId": backend})
@@ -506,19 +561,20 @@ class Tab:
         with self.lock:
             self.last_used = time.time()
             navigations, loads = self._navigations, self._loads
-            was_local = is_private_host(url_host(str(self._eval("location.href") or "")))
             self._send("Input.dispatchKeyEvent", down)
             self._send("Input.dispatchKeyEvent", up)
             time.sleep(0.1)
             if self._navigations != navigations:
                 self._wait_for_load(loads, 10.0)
-                self._guard_local_network(was_local)
+                self._guard_local_network(self._local_allowed)
                 return f"Pressed {key}; the page navigated, so take a new browser_snapshot."
+            self._guard_local_network(self._local_allowed)
             return f"Pressed {key}."
 
     def select(self, ref: str, value: str) -> str:
         with self.lock:
             self.last_used = time.time()
+            self._guard_local_network(self._local_allowed)
             backend = self._backend(ref)
             chosen = self._call_on(backend, """function(want) {
                 if (this.tagName !== 'SELECT') return null;
@@ -545,6 +601,7 @@ class Tab:
         while True:
             with self.lock:
                 self.last_used = time.time()
+                self._guard_local_network(self._local_allowed)
                 if kind == "text":
                     found = bool(self._eval(f"!!(document.body && document.body.innerText.includes({json.dumps(value)}))"))
                 elif kind == "url":
@@ -564,6 +621,7 @@ class Tab:
     def read(self, ref: str | None = None) -> str:
         with self.lock:
             self.last_used = time.time()
+            self._guard_local_network(self._local_allowed)
             if ref:
                 text = self._call_on(self._backend(ref), "function() { return this.innerText || this.value || this.textContent || ''; }")
             else:
@@ -576,6 +634,7 @@ class Tab:
     def screenshot(self, path: Path) -> Path:
         with self.lock:
             self.last_used = time.time()
+            self._guard_local_network(self._local_allowed)
             data = self._send("Page.captureScreenshot", {"format": "png"}, timeout=30.0).get("data") or ""
             path = Path(path)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -593,6 +652,7 @@ class Tab:
             loads = self._loads
             self._send("Page.navigateToHistoryEntry", {"entryId": entries[index - 1]["id"]})
             self._wait_for_load(loads, timeout)
+            self._guard_local_network(self._local_allowed)
             return f"Went back to {entries[index - 1].get('url', '')}."
 
 
@@ -641,17 +701,32 @@ class ChromeBrowser:
         if self.headless:
             args.insert(1, "--headless=new")
         devnull = os.open(os.devnull, os.O_RDWR)
+        pid = None
         try:
-            self.pid = os.posix_spawn(chrome, args, dict(os.environ), file_actions=[
+            pid = os.posix_spawn(chrome, args, dict(os.environ), file_actions=[
                 (os.POSIX_SPAWN_DUP2, devnull, 0), (os.POSIX_SPAWN_DUP2, devnull, 1),
                 (os.POSIX_SPAWN_DUP2, devnull, 2),
                 (os.POSIX_SPAWN_DUP2, child_in, 3), (os.POSIX_SPAWN_DUP2, child_out, 4),
             ], setsid=True)
+        except Exception:
+            for fd in (cmd_write, resp_read):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            raise
         finally:
             for fd in (devnull, child_in, child_out):
                 os.close(fd)
-        self._conn = CdpPipe(cmd_write, resp_read, self._dispatch)
-        self._conn.send("Target.setDiscoverTargets", {"discover": False}, timeout=20.0)
+        conn = CdpPipe(cmd_write, resp_read, self._dispatch)
+        try:
+            conn.send("Target.setDiscoverTargets", {"discover": False}, timeout=20.0)
+        except Exception:
+            conn.close()
+            self._reap(pid)
+            raise
+        self.pid = pid
+        self._conn = conn
         LOG.info("agent browser started (pid %s, headless=%s)", self.pid, self.headless)
         return self._conn
 
@@ -742,8 +817,15 @@ class ChromeBrowser:
     def close_idle(self, idle_seconds: float = 600.0) -> None:
         cutoff = time.time() - idle_seconds
         for key, tab in list(self.tabs.items()):
-            if tab.last_used < cutoff and not tab.lock._is_owned():
-                self.close_tab(key)
+            if tab.last_used >= cutoff:
+                continue
+            if not tab.lock.acquire(blocking=False):
+                continue
+            try:
+                if tab.last_used < cutoff:
+                    self.close_tab(key)
+            finally:
+                tab.lock.release()
 
     def shutdown(self) -> None:
         with self._lock:

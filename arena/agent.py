@@ -304,7 +304,7 @@ def _diff(old: str, new: str, name: str, limit: int = 80) -> str:
     return "\n".join(lines)
 
 
-def trim_output(text: str) -> str:
+def trim_output(text: str, limit: int = OUTPUT_LIMIT) -> str:
     """Shrink a tool output for the trip back to the model: no ANSI codes,
     repeated lines collapsed, head+tail kept when it is still too long."""
     cleaned = _ANSI_RE.sub("", str(text or ""))
@@ -325,9 +325,9 @@ def trim_output(text: str) -> str:
     elif run_count == 2 and run_line is not None:
         out_lines.append(run_line)
     cleaned = "\n".join(out_lines)
-    if len(cleaned) > OUTPUT_LIMIT:
-        head = cleaned[: OUTPUT_LIMIT * 3 // 5]
-        tail = cleaned[-(OUTPUT_LIMIT * 2 // 5):]
+    if len(cleaned) > limit:
+        head = cleaned[: limit * 3 // 5]
+        tail = cleaned[-(limit * 2 // 5):]
         cleaned = head + f"\n... [{len(cleaned) - len(head) - len(tail)} chars omitted] ...\n" + tail
     return cleaned
 
@@ -564,16 +564,28 @@ def run_shell_command(cmd: str, cwd, stop_event=None) -> str:
     return "\n".join(parts)
 
 
+_INLINE_ALWAYS_TOOLS = frozenset({
+    "read_file", "read_files", "use_skill", "mcp_describe", "browser_snapshot", "browser_read",
+})
+
+
 def _result_lines(outcomes, artifact_dir=None, artifact_rel: str = ARTIFACTS_DIR) -> list[str]:
     lines = []
     for i, (call, status, output) in enumerate(outcomes, 1):
-        target = call["params"].get("path") or call["params"].get("cmd") or ""
+        name = call.get("name") or ""
+        target = (call["params"].get("path") or call["params"].get("cmd")
+                  or call["params"].get("name") or call["params"].get("url")
+                  or call["params"].get("ref") or "")
         lines.append(f"[{i}] {call['name']} {target}: {status}")
         if output:
             cleaned = _ANSI_RE.sub("", str(output))
-            if (artifact_dir is not None and call.get("name") not in ("read_file", "read_files")
+            if (artifact_dir is not None and name not in _INLINE_ALWAYS_TOOLS
                     and len(cleaned) > INLINE_LIMIT):
                 lines.append(_offload(cleaned, call, artifact_dir, artifact_rel))
+            elif name == "use_skill":
+                lines.append(trim_output(cleaned, limit=skills_lib.MAX_SKILL_CHARS + 512))
+            elif name == "mcp_describe":
+                lines.append(trim_output(cleaned, limit=10000))
             else:
                 lines.append(trim_output(cleaned))
     return lines
@@ -692,7 +704,9 @@ class LocalTools:
                 from arena import browser_agent
                 try:
                     inside = not browser_agent.is_private_host(
-                        browser_agent.url_host(browser_agent.check_url(str(prm.get("url") or ""))))
+                        browser_agent.url_host(browser_agent.check_url(str(prm.get("url") or ""))),
+                        resolve_dns=True,
+                    )
                 except browser_agent.BrowserError:
                     inside = True  # refused later by check_url with a clear message
                 if not inside:
@@ -746,8 +760,11 @@ class LocalTools:
     def run(self, call: dict[str, Any], stop_event=None) -> tuple[bool, str]:
         fn = getattr(self, "_t_" + call["name"], None)
         if fn is None:
-            return False, (f"Unknown tool '{call['name']}'. Available: ls, read_file, search, write_file, "
-                           "edit_file, mkdir, delete, run_cmd.")
+            return False, (f"Unknown tool '{call['name']}'. Available: ls, read_file, read_files, search, "
+                           "write_file, edit_file, mkdir, delete, run_cmd, use_skill, mcp_describe, "
+                           "render_video, browser_open, browser_snapshot, browser_click, browser_fill, "
+                           "browser_press, browser_select, browser_wait, browser_read, browser_screenshot, "
+                           "browser_back, browser_close.")
         try:
             if call["name"] in ("run_cmd", "render_video"):
                 return True, fn(call["params"], stop_event=stop_event)
@@ -818,7 +835,6 @@ class LocalTools:
     def _t_render_video(self, prm, stop_event=None) -> str:
         from arena import video_render
         target, inside = self.resolve(prm.get("path", "."))
-        base = self.out if self.out is not None and (self.out == target or self.out in target.parents) else self.root
         if not inside:
             raise PermissionError("render_video only renders pages inside the project folder.")
         if self.browser is None:
@@ -826,11 +842,20 @@ class LocalTools:
         browser = self.browser()
         if browser is None:
             raise RuntimeError("render_video uses the agent browser, which is switched off in Settings > Permissions.")
+        # In Battle/dual mode (`self.out` set), serve `self.out` overlaid on `self.root`
+        # so edited HTML can load existing project assets while output stays isolated in `self.out`.
+        serve_root = self.out if self.out is not None else self.root
+        fallback_root = self.root if self.out is not None else None
+        if self.out is not None and (self.out == target or self.out in target.parents):
+            rel_page = str(target.relative_to(self.out))
+        else:
+            rel_page = str(target.relative_to(self.root))
         try:
             spec = video_render.make_spec(
-                base, path=str(target.relative_to(base)), duration=prm.get("duration") or None,
+                serve_root, path=rel_page, duration=prm.get("duration") or None,
                 fps=prm.get("fps") or 30, width=prm.get("width") or 1280, height=prm.get("height") or 720,
-                audio=prm.get("audio") or None, out=prm.get("out") or None)
+                audio=prm.get("audio") or None, out=prm.get("out") or None,
+                fallback_root=fallback_root, output_root=serve_root)
             result = video_render.render(browser, spec, key=f"render:{self.browser_key}", stop_event=stop_event)
         except video_render.RenderError as exc:
             raise RuntimeError(str(exc)) from exc

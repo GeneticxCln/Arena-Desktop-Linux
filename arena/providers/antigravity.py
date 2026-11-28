@@ -312,6 +312,8 @@ class AntigravityProvider(Provider):
             name="antigravity-sdk",
         )
         thread.start()
+        started_at = time.time()
+        last_item_at = started_at
         try:
             while True:
                 if stop_event is not None and stop_event.is_set():
@@ -327,9 +329,20 @@ class AntigravityProvider(Provider):
                 try:
                     item = out_q.get(timeout=0.20)
                 except queue.Empty:
+                    if not thread.is_alive() and out_q.empty():
+                        return
+                    now = time.time()
+                    if now - last_item_at > 600.0 or now - started_at > 1800.0:
+                        yield {
+                            "type": "error",
+                            "code": "antigravity_timeout",
+                            "message": "Antigravity SDK timed out waiting for output.",
+                        }
+                        return
                     continue
                 if item is None:
                     return
+                last_item_at = time.time()
                 yield item
         finally:
             # Always cancel any still-running SDK task on stop OR SSE client disconnect

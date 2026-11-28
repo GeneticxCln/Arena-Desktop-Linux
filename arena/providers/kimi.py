@@ -292,7 +292,9 @@ class KimiProvider(WebChatEngine):
                     if isinstance(pkt, dict):
                         _handle_pkt(pkt)
                     pos = line.find("{", end)
-        # Also parse Connect/gRPC-web JSON frames incrementally when they lack trailing newlines
+        # Also parse Connect/gRPC-web JSON frames incrementally when they lack trailing newlines.
+        # Distinguish binary 0x7b ('{') prefix bytes (syntax error before EOF) from legitimately
+        # split/truncated JSON frames (unterminated string or error at EOF, wait for next chunk).
         if buf and "\n" not in buf and "{" in buf and not buf.lstrip().startswith("data:"):
             decoder = json.JSONDecoder()
             pos = buf.find("{")
@@ -300,11 +302,18 @@ class KimiProvider(WebChatEngine):
             while pos != -1 and pos < len(buf):
                 try:
                     pkt, end = decoder.raw_decode(buf, pos)
+                except json.JSONDecodeError as err:
+                    is_truncated = (
+                        err.pos >= len(buf)
+                        or err.msg.startswith("Unterminated")
+                    )
+                    if not is_truncated:
+                        next_pos = buf.find("{", pos + 1)
+                        if next_pos != -1:
+                            pos = next_pos
+                            continue
+                    break
                 except ValueError:
-                    next_pos = buf.find("{", pos + 1)
-                    if next_pos != -1:
-                        pos = next_pos
-                        continue
                     break
                 if isinstance(pkt, dict):
                     _handle_pkt(pkt)
@@ -312,5 +321,8 @@ class KimiProvider(WebChatEngine):
                 pos = buf.find("{", end)
             if consumed:
                 buf = buf[consumed:]
+            elif len(buf) > 262144:
+                # Safety valve against malformed non-closing garbage frames.
+                buf = ""
         state["buf"] = buf
         return events

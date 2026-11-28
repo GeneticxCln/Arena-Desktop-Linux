@@ -1,3 +1,31 @@
+## Arena Desktop v7.6.0 (Native Linux)
+
+Adds **Agent Browser Tools** (private Chrome over `--remote-debugging-pipe`), **HTML-to-MP4 Video Rendering (`render_video` + `motion-video` skill)**, the **`reverse-engineer` skill**, **lazy MCP tool schemas (`mcp_describe`)**, and fixes **36 audited bugs** across security, concurrency, streaming providers, CLI, frontend UI, and Linux packaging.
+
+### Highlights in 7.6.0
+
+- **Agent Browser Tools & Video Rendering (`arena/browser_agent.py`, `arena/video_render.py`)**:
+  - Local Agent and web provider tabs can open pages, read accessibility snapshots (`@eN` refs), click/fill/press/select, wait, screenshot, and render frame-exact HTML compositions to MP4 via local `ffmpeg`.
+  - Fixed Settings → Permissions persistence for `browser_tools_enabled` and `browser_headless` (added to `_SETTINGS_ALLOWLIST`), portrait 9:16 video sizing (`720x1280` / `1080x1920`), `window.__seek(t)` error detection, `ffmpeg` stderr pipe draining, Battle-mode overlay serving & lane isolation, `close_idle()` thread-safe locking, and local-network/SSRF redirect & non-canonical IP protections.
+- **Lazy MCP Schemas & Built-in Skills (`arena/connectors.py`, `arena/builtin_skills/`)**:
+  - Added `reverse-engineer` and `motion-video` built-in skills and on-demand `mcp_describe` schema fetching.
+  - Kept `use_skill`, `mcp_describe`, `browser_snapshot`, and `browser_read` inline instead of truncating to 600 chars in `.arena-artifacts/`, and updated anti-loop `target_key` tracking and `skills.KNOWN_TOOLS`.
+- **Security, Backend & Gateway Hardening**:
+  - Blocked symlink exfiltration/overwrites in `_checkpoint_capture()`, `AGENTS.md`/`MEMORY.md` helpers, `_native_file_bridge()`, and `api_skills_create()` (checked prior to `mkdir`, plus frontmatter sanitization); added `--no-textconv` to Git diff, bounded `api_uploads()` reads, IPv4-mapped IPv6 CGNAT filtering in `_is_public_https_url()`, and `"servers"`/header/CLI-flag scrubbing in `_strip_mcp_secrets()`.
+  - Fixed Gateway worker DoS on non-dict `arguments` / `_approve()` exceptions and `_verify_registered()` URL race; fixed same-chat generation reservation (`already_reserved=True`), released `_chat_setup_lock` across slow auto-modality/gateway startup, added `try...finally` persistence to main `/api/chat` streaming, and synchronized `google_accounts.json` and `_PACER_LANES`.
+- **Providers, Engine, CLI & Frontend UI**:
+  - Fixed `FreebuffProvider` tuple `conversation_url_hint` `TypeError`, `KimiProvider` split Connect JSON frames, `ChatGPTProvider` `thoughts/*/summary` reasoning wipe, `AntigravityProvider` SDK wait loop, `EngineResponse` timeout abort & strict `_is_arena_host()`, `GoogleEngine` sign-in & follow-up polling, and `arena/cli.py` direct-mode/cookie/CDP-retry/arg-parsing bugs.
+  - Fixed Workspace panel close button (`#workspacePanelClose`), `Escape` dismissal, drag/resize bounds, restored the **MCP** management tab (`#workspaceConnectorsTab` / `#connectorsPane`), fixed Settings Memory/Skills hydration invalidation, Google "Sign in with another account", Arena modality leaks on extra providers, account badge leaks, rate-limit timer DOM thrashing, Find bar placement/cleanup, Gateway poll state, and Demo Mode fixes.
+- **Linux Packaging & Hygiene**:
+  - Added `arena.browser_agent` and `arena.video_render` to `arena-cli.spec`, fixed CI tarball root directory layout, added `LICENSE` to `build-linux.sh`, added `arm64` detection to `install-linux.sh`, and resolved all 41 `ruff` warnings across `arena/` and `scripts/`.
+
+### Verification
+
+- Static checks (`ruff`, `compileall`, `node --check`, `bash -n`, Cyrillic UI hygiene, `qwen.py` untouched) pass with 0 warnings.
+- Full test suite: **667 passed, 0 failed** (including 12 new regression tests in `tests/test_post_v750_audit_fixes.py`).
+
+---
+
 ## Arena Desktop v7.5.0 (Native Linux)
 
 Introduces **Skills** for the Local Agent and web provider tabs, upgrades **Freebuff Web (`/app`)** model discovery, and resolves **68 audited bugs** across security, backend concurrency, providers/streaming, frontend UI, and Linux packaging.

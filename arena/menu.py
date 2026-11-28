@@ -64,7 +64,7 @@ def show_main_menu() -> Optional[str]:
 
         lines.append(("class:dim", "\n  ↑↓ navigate · Enter select · 1-8 jump · Esc exit\n\n"))
 
-        for i, (key, label, desc) in enumerate(menu_items):
+        for i, (_key, label, desc) in enumerate(menu_items):
             if i == selected[0]:
                 lines.append(("class:selected", f"   ▸ {i+1}. {label:<12s}  {desc}\n"))
             else:
@@ -132,7 +132,7 @@ def show_main_menu() -> Optional[str]:
     except Exception:
         # Fallback to numbered text menu if console buffer is unavailable
         print("\n  Arena Code — Main Menu\n")
-        for i, (key, label, desc) in enumerate(menu_items, 1):
+        for i, (_key, label, desc) in enumerate(menu_items, 1):
             print(f"  {i}. {label:<12s} — {desc}")
         try:
             c = input("\n  Choice [1-8]> ").strip()

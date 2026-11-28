@@ -224,7 +224,7 @@ def sync_models(cookie: str | None = None, force: bool = False,
                     "supports_image_input": input_support["image"],
                     "supports_file_input": input_support["file"],
                     "is_router": is_router,
-                    "icon_url": _first_icon_url(m, org if isinstance(org, dict) else None,
+                    "icon_url": _first_icon_url(m, raw_org if isinstance(raw_org, dict) else None,
                                                 provider if isinstance(provider, dict) else None),
                 })
 
@@ -551,7 +551,10 @@ def display_available_models(
             rank_str = f"#{m['rank']}" if m.get("rank") is not None else "-"
             name_display = f"[{org_color}]{m['name']}[/{org_color}]{marker}"
             caps_list = []
-            c = m.get("capabilities", {}).get("outputCapabilities", {})
+            raw_caps = m.get("capabilities")
+            c = raw_caps.get("outputCapabilities") if isinstance(raw_caps, dict) else {}
+            if not isinstance(c, dict):
+                c = {}
             if c.get("web"): caps_list.append("web")
             if c.get("search"): caps_list.append("search")
             if c.get("text"): caps_list.append("text")

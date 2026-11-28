@@ -1,8 +1,6 @@
 """Pluggable multi-provider registry for Arena Desktop tabs."""
 from __future__ import annotations
 
-from typing import Optional
-
 from arena.providers.antigravity import AntigravityProvider
 from arena.providers.base import Provider
 from arena.providers.chatgpt import ChatGPTProvider

@@ -44,14 +44,14 @@ jobs:
 
       - name: Stage release
         run: |
-          mkdir -p release
+          mkdir -p release/Arena-Desktop-linux-x86_64
           cp dist/Arena-Desktop release/Arena-Desktop
-          cp README_LINUX.md release/README.md
-          cp LICENSE release/
-          cp assets/logo.png release/arena-desktop.png
-          cp packaging/arena-desktop.desktop packaging/install-linux.sh release/
-          tar -C release -czf release/Arena-Desktop-linux-x86_64.tar.gz \
-            Arena-Desktop README.md LICENSE arena-desktop.png arena-desktop.desktop install-linux.sh
+          cp dist/Arena-Desktop release/Arena-Desktop-linux-x86_64/Arena-Desktop
+          cp README_LINUX.md release/Arena-Desktop-linux-x86_64/README.md
+          cp LICENSE release/Arena-Desktop-linux-x86_64/LICENSE
+          cp assets/logo.png release/Arena-Desktop-linux-x86_64/arena-desktop.png
+          cp packaging/arena-desktop.desktop packaging/install-linux.sh release/Arena-Desktop-linux-x86_64/
+          tar -C release -czf release/Arena-Desktop-linux-x86_64.tar.gz Arena-Desktop-linux-x86_64
 
       - name: Build .deb, .rpm, Arch package and AppImage
         # Flatten into release/ so the uploaded artifact has no subdirectories

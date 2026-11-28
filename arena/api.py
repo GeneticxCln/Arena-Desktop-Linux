@@ -44,6 +44,20 @@ def _is_loopback_ws_url(ws_url: Optional[str]) -> bool:
         return False
 
 
+def _is_arena_url(url: str) -> bool:
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse(str(url or "")).hostname or "").strip().lower()
+        return host == "arena.ai" or host.endswith(".arena.ai")
+    except Exception:
+        return False
+
+
+def _is_arena_domain(domain: str) -> bool:
+    d = str(domain or "").strip().lower().lstrip(".")
+    return d == "arena.ai" or d.endswith(".arena.ai")
+
+
 def _cdp_find_arena_tab(port: int = 9222) -> Optional[str]:
     """Find an arena.ai tab's WebSocket debugger URL via CDP."""
     import http.client
@@ -57,7 +71,7 @@ def _cdp_find_arena_tab(port: int = 9222) -> Optional[str]:
         conn.close()
         for p in pages:
             ws = p.get("webSocketDebuggerUrl")
-            if "arena.ai" in p.get("url", "") and _is_loopback_ws_url(ws):
+            if _is_arena_url(p.get("url", "")) and _is_loopback_ws_url(ws):
                 return ws
         # No arena tab found — try any tab and navigate it
         for p in pages:
@@ -84,7 +98,7 @@ def _cdp_ensure_arena_page(port: int = 9222) -> Optional[str]:
         # Check for existing arena tab
         for p in pages:
             ws = p.get("webSocketDebuggerUrl")
-            if "arena.ai" in p.get("url", "") and _is_loopback_ws_url(ws):
+            if _is_arena_url(p.get("url", "")) and _is_loopback_ws_url(ws):
                 return ws
 
         # Navigate first available page tab to arena.ai
@@ -99,6 +113,17 @@ def _cdp_ensure_arena_page(port: int = 9222) -> Optional[str]:
         return None
 
 
+def _cdp_recv_reply(ws, expected_id: int = 1, max_frames: int = 200) -> dict:
+    for _ in range(max_frames):
+        raw = json.loads(ws.recv())
+        if isinstance(raw, dict):
+            if raw.get("id") == expected_id:
+                return raw
+            if "id" not in raw and "method" not in raw and ("result" in raw or "error" in raw):
+                return raw
+    raise TimeoutError(f"CDP reply id={expected_id} not received")
+
+
 def _cdp_execute(ws_url: str, method: str, params: dict = None, timeout: int = 10) -> Optional[dict]:
     """Execute a CDP command and return the result."""
     if not _is_loopback_ws_url(ws_url):
@@ -106,13 +131,14 @@ def _cdp_execute(ws_url: str, method: str, params: dict = None, timeout: int = 1
     try:
         import websocket
         ws = websocket.create_connection(ws_url, timeout=timeout)
-        msg = {"id": 1, "method": method}
-        if params:
-            msg["params"] = params
-        ws.send(json.dumps(msg))
-        result = json.loads(ws.recv())
-        ws.close()
-        return result
+        try:
+            msg = {"id": 1, "method": method}
+            if params:
+                msg["params"] = params
+            ws.send(json.dumps(msg))
+            return _cdp_recv_reply(ws, expected_id=1)
+        finally:
+            ws.close()
     except Exception:
         return None
 
@@ -168,7 +194,7 @@ def fetch_cookies_via_cdp(port: int = 9222) -> Optional[str]:
         return None
 
     cookies = result.get("result", {}).get("cookies", [])
-    arena_cookies = [c for c in cookies if "arena.ai" in c.get("domain", "")]
+    arena_cookies = [c for c in cookies if _is_arena_domain(c.get("domain", ""))]
     if not arena_cookies:
         return None
 
@@ -235,8 +261,11 @@ def send_chat_via_cdp(
 
     js = f"""
     (async () => {{
+        let _lastMs = 0;
         function uuidv7() {{
-            const ms = Date.now();
+            let ms = Date.now();
+            if (ms <= _lastMs) ms = _lastMs + 1;
+            _lastMs = ms;
             const b = new Uint8Array(16);
             const msBytes = [];
             let tmp = ms;
@@ -269,7 +298,6 @@ def send_chat_via_cdp(
             mode: mode,
             userMessageId: uuidv7(),
             modelAMessageId: uuidv7(),
-            modelBMessageId: uuidv7(),
             userMessage: {{
                 content: {json.dumps(message)},
                 experimental_attachments: [],
@@ -278,6 +306,9 @@ def send_chat_via_cdp(
             modality: {js_modality},
             recaptchaV3Token: token,
         }};
+        if (mode === 'battle' || mode === 'side-by-side') {{
+            body.modelBMessageId = uuidv7();
+        }}
         if (mode !== 'battle') {{
             body.modelAId = {js_model_id};
         }}
@@ -347,17 +378,19 @@ def send_chat_via_cdp(
     try:
         import websocket
         ws = websocket.create_connection(ws_url, timeout=timeout)
-        ws.send(json.dumps({
-            "id": 1,
-            "method": "Runtime.evaluate",
-            "params": {
-                "expression": js,
-                "returnByValue": True,
-                "awaitPromise": True,
-            }
-        }))
-        raw = json.loads(ws.recv())
-        ws.close()
+        try:
+            ws.send(json.dumps({
+                "id": 1,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": js,
+                    "returnByValue": True,
+                    "awaitPromise": True,
+                }
+            }))
+            raw = _cdp_recv_reply(ws, expected_id=1)
+        finally:
+            ws.close()
     except Exception as e:
         return None, eval_id, f"CDP connection error: {e}"
 
@@ -610,7 +643,8 @@ class ArenaClient:
         self.sync_cookies()
 
         if resp.status_code == 401:
-            self.eval_id = None
+            if is_new_eval:
+                self.eval_id = None
             return None, "Authentication expired. Run /login to refresh your session."
 
         if resp.status_code == 403:
@@ -630,7 +664,8 @@ class ArenaClient:
             return None, "Rate limited by arena.ai — wait 30-60 seconds before sending another message."
 
         if not resp.ok:
-            self.eval_id = None
+            if is_new_eval:
+                self.eval_id = None
             try:
                 detail = resp.json()
                 if isinstance(detail, dict):

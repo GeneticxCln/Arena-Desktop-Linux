@@ -1228,7 +1228,7 @@
         permission_mode: demoStore.permissionMode,
         workspace: demoStore.workspace,
         workspace_chosen: true,
-        app_version: '7.5.0',
+        app_version: '7.6.0',
         pending_permissions: demoStore.pendingPermissions.length,
         demo: true
       };
@@ -1311,12 +1311,24 @@
       await sleep(160);
       return { ok: true, modality: next };
     },
-    async newChat() {
+    async newChat(body = {}) {
       demoStore.serial += 1;
       const id = `demo-chat-${Date.now()}-${demoStore.serial}`;
+      const track = String(body?.track || 'arena').toLowerCase();
+      const source = track === 'arena' ? 'local' : track;
+      const workspace = String(body?.workspace || '');
       demoStore.activeChatId = id;
       demoStore.messages[id] = [];
-      demoStore.chats.unshift({ id, title: "New chat", updated_at: new Date().toISOString(), mode: demoStore.mode, modality: demoStore.modality, account: demoStore.currentAccountId || 'demo-acc-1' });
+      demoStore.chats.unshift({
+        id,
+        title: track === 'google' ? 'New Google tab' : 'New chat',
+        updated_at: new Date().toISOString(),
+        mode: track === 'arena' ? demoStore.mode : 'direct',
+        modality: track === 'arena' ? demoStore.modality : 'text',
+        source,
+        workspace,
+        account: demoStore.currentAccountId || 'demo-acc-1'
+      });
       await sleep(130);
       return { ok: true, chat_id: id };
     },
@@ -1782,7 +1794,7 @@
     async googleSignIn() { await sleep(80); return { ok: true, pending: false, demo: true }; },
     async googleOpen() { await sleep(80); return { ok: true, state: { attached: false, ready: false, open: false }, demo: true }; },
     async saveGooglePrefs(body = {}) { await sleep(60); return { ok: true, prefs: body, demo: true }; },
-    async addGoogleCookies() { await sleep(80); return { ok: false, error: 'Google cookies are unavailable in demo mode.', demo: true }; },
+    async addGoogleCookies() { await sleep(80); throw new ApiError('Google cookies are unavailable in demo mode.', 400); },
     async useGoogleAccount() { await sleep(80); return { ok: true, demo: true }; },
     async removeGoogleAccount() { await sleep(80); return { ok: true, demo: true }; },
     async saveMedia() { await sleep(180); return { ok: true, path: `${demoStore.workspace}\\demo-media.png`, demo: true }; },
@@ -3198,6 +3210,8 @@ You can start with a more structured option: one script, short captions, and a c
     }
     await API.importSettings(bundle);
     state.memoryData = null;
+    state.skillsData = null;
+    state.settingsHydrateEpoch = (state.settingsHydrateEpoch || 0) + 1;
     toast('Settings imported. Restart the app if the folder or tray setting changed.', 'success', 'Settings');
   }
 
@@ -4139,6 +4153,8 @@ You can start with a more structured option: one script, short captions, and a c
         state.historyError = null;
         state.activeChatId = null;
         state.activeChatEvalId = null;
+        state.activeChatExternal = '';
+        state.historyChars = 0;
         state.messages = [];
         state.artifacts = [];
         state.view = 'welcome';
@@ -4544,6 +4560,8 @@ You can start with a more structured option: one script, short captions, and a c
         state.historyError = null;
         state.activeChatId = null;
         state.activeChatEvalId = null;
+        state.activeChatExternal = '';
+        state.historyChars = 0;
         state.messages = [];
         state.artifacts = [];
         state.view = 'welcome';
@@ -4670,7 +4688,9 @@ You can start with a more structured option: one script, short captions, and a c
       state.workspaceChosen = false;
     }
     state.memoryData = null;
+    state.skillsData = null;
     state.gitStatus = null;
+    state.settingsHydrateEpoch = (state.settingsHydrateEpoch || 0) + 1;
     renderWorkspaceSidebar();
     renderRailChats();
   }
@@ -4834,6 +4854,7 @@ You can start with a more structured option: one script, short captions, and a c
 
   function setView(view, { focus = false } = {}) {
     state.view = view === 'chat' ? 'chat' : 'welcome';
+    if (state.view !== 'chat') closeFindBar({ focus: false });
     if (els.welcomeView) els.welcomeView.hidden = state.view !== 'welcome';
     if (els.chatView) els.chatView.hidden = state.view !== 'chat';
     const mainArea = els.mainArea || document.querySelector('.main-area');
@@ -5145,10 +5166,10 @@ You can start with a more structured option: one script, short captions, and a c
     if (counter) counter.textContent = `${findIndex + 1}/${findHits.length}`;
   }
 
-  function closeFindBar() {
+  function closeFindBar({ focus = true } = {}) {
     clearFindHighlights();
     document.getElementById('findBar')?.remove();
-    focusComposer();
+    if (focus) focusComposer();
   }
 
   function toggleFindBar() {
@@ -7390,16 +7411,15 @@ You can start with a more structured option: one script, short captions, and a c
       if (label) label.textContent = state.stopping ? "Stopping…" : "Stop";
     }
     if (els.attachButton) {
-      // The same plus in both modes. In Google AI mode it only carries
-      // Add files and local MCP servers, so it stays open even when the
-      // current task type could not take an attachment.
-      const allowed = attachmentsAllowedHere() || state.track === 'google';
-      const googleTrack = state.track === 'google';
+      // Non-Arena tracks (Google and extra providers) are never in Arena Web Search,
+      // so the plus menu stays enabled even if Arena was last set to Web Search.
+      const allowed = attachmentsAllowedHere() || state.track !== 'arena';
+      const nonArenaTrack = state.track !== 'arena';
       els.attachButton.disabled = busy || !allowed;
-      els.attachButton.title = googleTrack
+      els.attachButton.title = nonArenaTrack
         ? 'Add files and MCP servers'
         : (allowed ? `Attach files — ${attachmentHint()}` : 'Files cannot be attached in Web Search');
-      els.attachButton.setAttribute('aria-label', googleTrack
+      els.attachButton.setAttribute('aria-label', nonArenaTrack
         ? 'Options: add files and MCP servers'
         : (allowed ? `Attach files. ${attachmentHint()}` : 'Attach files (unavailable in Web Search)'));
     }
@@ -7604,6 +7624,9 @@ You can start with a more structured option: one script, short captions, and a c
     if (els.accountButton) {
       els.accountButton.setAttribute('aria-label', `Profile: ${name}. ${sub}. Open accounts`);
       els.accountButton.setAttribute('aria-haspopup', 'menu');
+      els.accountButton.classList.remove('is-signed-in', 'is-expired');
+      const checkEl = els.accountCheck || document.getElementById('accountCheck');
+      if (checkEl) checkEl.hidden = true;
     }
   }
 
@@ -7878,7 +7901,10 @@ You can start with a more structured option: one script, short captions, and a c
     state.historyRequest = historyToken;
     state.activeChatTitle = known?.title || (retry ? state.activeChatTitle : "Conversation");
     // Freshly created unsent tab: stay open cleanly without hitting 404 on /api/chats/<id>.
+    closeFindBar({ focus: false });
     if (known && known.unsent && !chatIsGenerating(chatId)) {
+      state.activeChatExternal = '';
+      state.historyChars = 0;
       state.messages = state.chatTurns[String(chatId)] || [];
       state.artifacts = [];
       state.challenge = null;
@@ -8032,8 +8058,11 @@ You can start with a more structured option: one script, short captions, and a c
       state.closedTabIds.delete(cid);
       state.openTabMeta[cid] = { track: tabTrack, workspace: wsPath };
       setTrack(tabTrack, { silent: true, keepActive: true });
+      closeFindBar({ focus: false });
       state.activeChatId = cid;
       state.activeChatEvalId = null;
+      state.activeChatExternal = '';
+      state.historyChars = 0;
       const tabSource = tabTrack === 'arena' ? 'local' : tabTrack;
       state.activeChatSource = tabSource;
       restoreComposerDraft();
@@ -8128,7 +8157,11 @@ You can start with a more structured option: one script, short captions, and a c
                 state.generations.delete(String(chatId));
               }
               if (String(state.activeChatId) === String(chatId)) {
+                closeFindBar({ focus: false });
                 state.activeChatId = null;
+                state.activeChatEvalId = null;
+                state.activeChatExternal = '';
+                state.historyChars = 0;
                 state.activeChatTitle = '';
                 state.messages = [];
                 state.artifacts = [];
@@ -8879,14 +8912,18 @@ You can start with a more structured option: one script, short captions, and a c
       if (Array.isArray(lane.agentStages)) lane.agentStages.length = 0;
       if (event.code === 'rate_limit' && Number(event.wait) > 0) {
         state.rateLimitUntil = Date.now() + Number(event.wait) * 1000;
+        syncRateLimitAccountHint(Math.max(0, Math.ceil((state.rateLimitUntil - Date.now()) / 1000)));
         if (!state._rateLimitTimer) {
           state._rateLimitTimer = window.setInterval(() => {
-            if (Date.now() >= state.rateLimitUntil) {
+            const left = Math.max(0, Math.ceil((state.rateLimitUntil - Date.now()) / 1000));
+            if (left <= 0) {
               window.clearInterval(state._rateLimitTimer);
               state._rateLimitTimer = null;
               state.rateLimitUntil = 0;
+              updateComposerState();
+              return;
             }
-            updateComposerState();
+            syncRateLimitAccountHint(left);
           }, 1000);
         }
       }
@@ -9105,6 +9142,7 @@ You can start with a more structured option: one script, short captions, and a c
     return state.mode === 'agent' && state.agentKind === 'native' ? 'agent' : 'evaluation';
   }
   function attachmentsAllowedHere() {
+    if (state.track !== 'arena') return true;
     if (attachmentKind() === 'agent') return true;
     return state.modality !== 'search';
   }
@@ -9435,7 +9473,7 @@ You can start with a more structured option: one script, short captions, and a c
       toast('One file did not upload. Retry it or remove it (×), then send again.', 'warning', 'Attachment failed');
       return;
     }
-    if (state.modality === 'video' && text.length > 2500) {
+    if (state.track === 'arena' && state.modality === 'video' && text.length > 2500) {
       toast('Video prompts can be up to 2,500 characters. Shorten the prompt and send again.', 'warning', 'Prompt too long');
       return;
     }
@@ -11956,7 +11994,12 @@ You can start with a more structured option: one script, short captions, and a c
           state.workspace = normalizeWorkspace(result?.workspace ?? result?.path) || state.workspace;
           state.workspaceChosen = false;
           state.workspacePanelRoot = '';
+          state.memoryData = null;
+          state.skillsData = null;
+          state.gitStatus = null;
+          state.settingsHydrateEpoch = (state.settingsHydrateEpoch || 0) + 1;
           resetWorkspaceTree();
+          await loadWorkspaces({ quiet: true }).catch(() => undefined);
           updateComposerState();
           renderWorkspaceTreePanel();
           refreshPanel();
@@ -12322,10 +12365,12 @@ You can start with a more structured option: one script, short captions, and a c
         el('span', { class: 'switch' }, input, el('span', { class: 'switch-track', 'aria-hidden': 'true' })));
     };
 
+    let startingGateway = false;
     const fill = async () => {
       let data = null;
       try { data = await API.getGateway(); } catch (_err) { /* below */ }
       if (!wrap.isConnected) { stopPoll(); return; }
+      const logWasOpen = Boolean(host.querySelector('details.tunnel-log')?.open);
       clear(host);
       if (!data) {
         host.appendChild(el('p', { class: 'modal-note', text: 'Gateway status is unavailable right now.' }));
@@ -12420,14 +12465,19 @@ You can start with a more structured option: one script, short captions, and a c
       } else {
         if (session.error) host.appendChild(el('p', { class: 'modal-note', text: `Last session: ${session.error}` }));
         if (Array.isArray(session.tunnel_log) && session.tunnel_log.length) {
-          host.appendChild(el('details', { class: 'tunnel-log' },
+          const logDetails = el('details', { class: 'tunnel-log' },
             el('summary', { text: 'cloudflared output (last lines)' }),
-            el('pre', { class: 'gateway-mono', text: session.tunnel_log.slice(-25).join('\n') })));
+            el('pre', { class: 'gateway-mono', text: session.tunnel_log.slice(-25).join('\n') }));
+          if (logWasOpen) logDetails.open = true;
+          host.appendChild(logDetails);
           host.appendChild(el('p', { class: 'modal-note', text: 'If the tunnel keeps failing, copy this output via Settings → About → Copy diagnostics and send it with your report.' }));
         }
+        const isStarting = startingGateway || session.state === 'starting';
         const startBtn = el('button', {
-          class: 'button', type: 'button', disabled: !data.enabled,
+          class: 'button', type: 'button', disabled: !data.enabled || isStarting,
           onclick: async () => {
+            if (startingGateway) return;
+            startingGateway = true;
             startBtn.disabled = true;
             startBtn.querySelector('span:last-child').textContent = 'Starting tunnel…';
             try {
@@ -12439,10 +12489,12 @@ You can start with a more structured option: one script, short captions, and a c
               } else {
                 toast(errorMessage(error), 'error', 'Agent Gateway');
               }
+            } finally {
+              startingGateway = false;
             }
             void fill();
           }
-        }, iconEl('globe'), el('span', { text: 'Start session now' }));
+        }, iconEl('globe'), el('span', { text: isStarting ? 'Starting tunnel…' : 'Start session now' }));
         host.append(startBtn,
           el('p', { class: 'modal-note', text: data.enabled
             ? 'A session lasts until you stop it, the app closes, 45 idle minutes pass, or 8 hours elapse.'
@@ -12845,7 +12897,7 @@ You can start with a more structured option: one script, short captions, and a c
         dot));
       wrap.appendChild(el('div', { class: 'settings-row' },
         el('button', { class: 'button button-small', type: 'button',
-          onclick: () => { void googleSignIn(); } },
+          onclick: () => { void googleSignIn(Boolean(google.signedIn)); } },
           iconEl('login'), el('span', { text: google.signedIn ? 'Sign in with another account' : 'Sign in' })),
         el('button', { class: 'button button-small button-quiet', type: 'button',
           onclick: async () => { await checkGoogleSignIn(); refreshPanel(); } },
@@ -13151,8 +13203,8 @@ You can start with a more structured option: one script, short captions, and a c
           .catch((error) => { if (state.settingsTab === 'cache') toast(errorMessage(error), 'error', 'Cache'); });
         return;
       }
-      // Cache per mode: the same section holds different values per track.
-      const cacheKey = `${state.settingsTrack}:${tab}`;
+      // Cache per mode and workspace/import epoch so switching folders reloads Memory & Skills.
+      const cacheKey = `${state.settingsHydrateEpoch || 0}:${state.settingsTrack}:${tab}`;
       if (hydrated[cacheKey]) return;
       hydrated[cacheKey] = true;
       if (state.serverError || state.networkOffline) return;
@@ -13338,33 +13390,47 @@ You can start with a more structured option: one script, short captions, and a c
 
   async function loadGitDiff(path, staged = false) {
     if (state.gitBusy) return;
+    const reqId = (state.gitDiffRequest = (state.gitDiffRequest || 0) + 1);
     state.gitDiff = { path, staged, loading: true, diff: '', truncated: false, untracked: false };
     renderGitPanel();
     try {
       const payload = await API.getGitDiff(path, staged);
+      if (reqId !== state.gitDiffRequest || !state.gitDiff) return;
       state.gitDiff = { ...payload, loading: false };
     } catch (error) {
+      if (reqId !== state.gitDiffRequest || !state.gitDiff) return;
       state.gitDiff = { path, staged, loading: false, diff: '', error: errorMessage(error) };
     }
     renderGitPanel();
   }
 
   function setWorkspaceTab(tab) {
-    state.workspaceTab = tab === 'git' ? 'git' : 'files';
+    state.workspaceTab = tab === 'git' ? 'git' : tab === 'connectors' ? 'connectors' : 'files';
     const isGit = state.workspaceTab === 'git';
-    if (els.workspaceFilesPane) els.workspaceFilesPane.hidden = isGit;
+    const isConn = state.workspaceTab === 'connectors';
+    const isFiles = state.workspaceTab === 'files';
+    if (els.workspaceFilesPane) els.workspaceFilesPane.hidden = !isFiles;
     if (els.workspaceGitPane) els.workspaceGitPane.hidden = !isGit;
+    if (els.connectorsPane) els.connectorsPane.hidden = !isConn;
     if (els.workspaceFilesTab) {
-      els.workspaceFilesTab.classList.toggle('is-active', !isGit);
-      els.workspaceFilesTab.setAttribute('aria-selected', String(!isGit));
+      els.workspaceFilesTab.classList.toggle('is-active', isFiles);
+      els.workspaceFilesTab.setAttribute('aria-selected', String(isFiles));
     }
     if (els.workspaceGitTab) {
       els.workspaceGitTab.classList.toggle('is-active', isGit);
       els.workspaceGitTab.setAttribute('aria-selected', String(isGit));
     }
+    if (els.workspaceConnectorsTab) {
+      els.workspaceConnectorsTab.classList.toggle('is-active', isConn);
+      els.workspaceConnectorsTab.setAttribute('aria-selected', String(isConn));
+    }
     if (isGit) {
       renderGitPanel();
       if (!state.gitStatus && !state.gitLoading) void loadGitStatus({ silent: true });
+    } else if (isConn) {
+      renderConnectorsPanel();
+      if (!state.connectors && !state.connectorsLoading) void loadConnectors({ silent: true });
+      if (state.authenticated && !state.arenaConnectors && !state.arenaConnectorsLoading) void loadArenaConnectors({ silent: true });
     } else {
       renderWorkspaceTreePanel();
     }
@@ -13551,7 +13617,7 @@ You can start with a more structured option: one script, short captions, and a c
       try { localStorage.setItem('arenaPersonal.workspacePanelOpen.v4', state.workspacePanelOpen ? '1' : '0'); } catch { /* storage unavailable */ }
     }
     if (!state.workspacePanelOpen) return;
-    setWorkspaceTab(state.workspaceTab);
+    setWorkspaceTab(focusConnectors ? 'connectors' : state.workspaceTab);
     renderConnectorsPanel();
     if (load) void refreshWorkspacePanel();
     if (focusConnectors) {
@@ -13750,12 +13816,13 @@ You can start with a more structured option: one script, short captions, and a c
       height: panel.offsetHeight
     });
     const saveGeom = () => { try { localStorage.setItem(KEY, JSON.stringify(readGeom())); } catch { /* storage unavailable */ } };
+    const MIN_TOP = 92;
     const applyGeom = (g) => {
       if (!g) return;
-      if (typeof g.right === 'number') panel.style.right = `${g.right}px`;
-      if (typeof g.top === 'number') panel.style.top = `${g.top}px`;
-      if (typeof g.width === 'number') panel.style.width = `${g.width}px`;
-      if (typeof g.height === 'number') panel.style.height = `${g.height}px`;
+      if (typeof g.right === 'number') panel.style.right = `${Math.max(0, g.right)}px`;
+      if (typeof g.top === 'number') panel.style.top = `${Math.min(Math.max(g.top, MIN_TOP), Math.max(MIN_TOP, window.innerHeight - 60))}px`;
+      if (typeof g.width === 'number') panel.style.width = `${Math.min(720, Math.max(280, g.width))}px`;
+      if (typeof g.height === 'number') panel.style.height = `${Math.max(200, g.height)}px`;
       syncArrow();
     };
 
@@ -13780,7 +13847,7 @@ You can start with a more structured option: one script, short captions, and a c
         const move = (ev) => {
           let left = ev.clientX - offX, top = ev.clientY - offY;
           left = Math.min(Math.max(left, -r.width + 80), window.innerWidth - 80);
-          top = Math.min(Math.max(top, 0), window.innerHeight - 60);
+          top = Math.min(Math.max(top, MIN_TOP), Math.max(MIN_TOP, window.innerHeight - 60));
           panel.style.right = `${Math.max(0, window.innerWidth - (left + r.width))}px`;
           panel.style.top = `${top}px`;
           syncArrow();
@@ -13788,10 +13855,14 @@ You can start with a more structured option: one script, short captions, and a c
         const up = () => {
           window.removeEventListener('pointermove', move);
           window.removeEventListener('pointerup', up);
+          window.removeEventListener('pointercancel', up);
+          window.removeEventListener('blur', up);
           saveGeom();
         };
         window.addEventListener('pointermove', move);
         window.addEventListener('pointerup', up);
+        window.addEventListener('pointercancel', up);
+        window.addEventListener('blur', up);
         e.preventDefault();
       });
     }
@@ -13801,18 +13872,27 @@ You can start with a more structured option: one script, short captions, and a c
         if (window.innerWidth <= 900) return;
         const r = panel.getBoundingClientRect();
         const startX = e.clientX, startY = e.clientY, startW = r.width, startH = r.height;
+        const startRight = Math.max(0, window.innerWidth - (r.left + r.width));
         const move = (ev) => {
-          panel.style.width = `${Math.min(720, Math.max(280, startW - (ev.clientX - startX)))}px`;
-          panel.style.height = `${Math.min(Math.max(200, window.innerHeight - 80), Math.max(200, startH + (ev.clientY - startY)))}px`;
+          const dx = ev.clientX - startX;
+          const nextW = Math.min(720, Math.max(280, startW + dx));
+          const deltaW = nextW - startW;
+          panel.style.width = `${nextW}px`;
+          panel.style.right = `${Math.max(0, startRight - deltaW)}px`;
+          panel.style.height = `${Math.min(Math.max(200, window.innerHeight - MIN_TOP - 16), Math.max(200, startH + (ev.clientY - startY)))}px`;
           syncArrow();
         };
         const up = () => {
           window.removeEventListener('pointermove', move);
           window.removeEventListener('pointerup', up);
+          window.removeEventListener('pointercancel', up);
+          window.removeEventListener('blur', up);
           saveGeom();
         };
         window.addEventListener('pointermove', move);
         window.addEventListener('pointerup', up);
+        window.addEventListener('pointercancel', up);
+        window.addEventListener('blur', up);
         e.preventDefault();
       });
     }
@@ -13843,15 +13923,18 @@ You can start with a more structured option: one script, short captions, and a c
         return state.workspaceChildren[target];
       }
       if (state.workspaceLoadingPaths.has(target)) return state.workspaceChildren[target] || [];
+      const reqEpoch = state.workspaceRequest;
       state.workspaceLoadingPaths.add(target);
       renderWorkspaceTreePanel();
       try {
         const raw = await API.getWorkspaceTree(target);
+        if (reqEpoch !== state.workspaceRequest) return [];
         const entries = (Array.isArray(raw?.entries) ? raw.entries : []).map(normalizeWorkspaceEntry).filter(Boolean);
         state.workspaceChildren[target] = entries;
         if (raw?.root) state.workspacePanelRoot = String(raw.root);
         return entries;
       } catch (error) {
+        if (reqEpoch !== state.workspaceRequest) return [];
         state.workspaceExpanded.delete(target);
         toast(errorMessage(error), 'error', "Folder not opened");
         return [];
@@ -14936,6 +15019,7 @@ You can start with a more structured option: one script, short captions, and a c
     els.workspaceGit = $('#workspaceGit');
     els.workspaceFilesTab = $('#workspaceFilesTab');
     els.workspaceGitTab = $('#workspaceGitTab');
+    els.workspaceConnectorsTab = $('#workspaceConnectorsTab');
     els.workspaceGitBadge = $('#workspaceGitBadge');
     els.workspaceOpenButton = $('#workspaceOpenButton');
     els.workspaceRefreshButton = $('#workspaceRefreshButton');
@@ -15006,6 +15090,7 @@ You can start with a more structured option: one script, short captions, and a c
     els.messageList?.addEventListener('pause', () => { window.setTimeout(flushDeferredChatRender, 60); }, true);
     els.messageList?.addEventListener('ended', () => { window.setTimeout(flushDeferredChatRender, 60); }, true);
     document.addEventListener('keydown', (event) => {
+      if (state.activeModal) return;
       if (event.target?.closest?.('#terminalDrawer, .xterm')) return;
       if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey
         && event.key.toLowerCase() === 'f' && state.view === 'chat') {
@@ -15170,7 +15255,8 @@ You can start with a more structured option: one script, short captions, and a c
         else await loadWorkspaceTree('.', { force: true });
       } finally { els.workspaceRefreshButton.classList.remove('is-spinning'); }
     });
-    [els.workspaceFilesTab, els.workspaceGitTab].forEach((button) => {
+    els.workspacePanelClose?.addEventListener('click', () => setWorkspacePanelOpen(false));
+    [els.workspaceFilesTab, els.workspaceGitTab, els.workspaceConnectorsTab].forEach((button) => {
       button?.addEventListener('click', () => setWorkspaceTab(button.dataset.workspaceTab));
     });
     els.addConnectorButton?.addEventListener('click', () => openAddConnectorModal());
@@ -15471,6 +15557,14 @@ You can start with a more structured option: one script, short captions, and a c
       if (state.activeModal) return;
       if (activePopover) {
         closePopover();
+        return;
+      }
+      if (document.getElementById('findBar')) {
+        closeFindBar();
+        return;
+      }
+      if (state.workspacePanelOpen) {
+        setWorkspacePanelOpen(false);
         return;
       }
       if (window.matchMedia('(max-width: 900px)').matches) closeMobileSidebar();

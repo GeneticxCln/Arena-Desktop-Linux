@@ -72,6 +72,7 @@ _SHOWN_COUNT = 5
 KNOWN_TOOLS = frozenset({
     "ls", "read_file", "read_files", "search", "write_file", "edit_file", "mkdir", "delete",
     "run_cmd", "ask_user", "propose_plan", "set_todos", "use_skill", "mcp_describe", "render_video",
+    "delegate_task", "delete_subagent",
     "browser_open", "browser_snapshot", "browser_click", "browser_fill", "browser_press", "browser_select",
     "browser_wait", "browser_read", "browser_screenshot", "browser_back", "browser_close",
 })
@@ -234,9 +235,12 @@ def parse_skill(text: str, fallback_name: str, source: str) -> tuple[Skill | Non
 
 def render_skill(name: str, description: str, tools: Collection[str], body: str) -> str:
     """The text the Settings form writes: exactly the keys ``parse_skill`` reads."""
-    lines = ["---", f"name: {name}", f"description: {description}"]
-    if tools:
-        lines.append(f"tools: {', '.join(tools)}")
+    clean_name = " ".join(str(name or "").split())
+    clean_desc = " ".join(str(description or "").split())
+    clean_tools = [" ".join(str(t).split()) for t in (tools or ()) if " ".join(str(t).split())]
+    lines = ["---", f"name: {clean_name}", f"description: {clean_desc}"]
+    if clean_tools:
+        lines.append(f"tools: {', '.join(clean_tools)}")
     lines.extend(["---", "", body.strip(), ""])
     return "\n".join(lines)
 

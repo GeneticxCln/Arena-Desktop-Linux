@@ -20,7 +20,6 @@ Everything goes to ``desktop.log`` and, for the heaviest detail, to
 from __future__ import annotations
 
 import functools
-import inspect
 import logging
 import os
 import sys

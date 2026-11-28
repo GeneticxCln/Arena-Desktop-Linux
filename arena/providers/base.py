@@ -1,7 +1,7 @@
 """Common contract for pluggable Arena Desktop tab providers."""
 from __future__ import annotations
 
-from typing import Iterator, Optional
+from typing import Iterator
 
 
 class Provider:

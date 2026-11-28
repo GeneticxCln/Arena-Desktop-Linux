@@ -537,7 +537,7 @@ class GoogleHTTP:
                                         timeout=self.timeout,
                                         allow_redirects=allow_redirects)
         except Exception as exc:  # network problems are reported, never hidden
-            raise GoogleHTTPError("network", f"Google did not answer: {type(exc).__name__}: {exc}")
+            raise GoogleHTTPError("network", f"Google did not answer: {type(exc).__name__}: {exc}") from exc
         return response
 
     # -- public ----------------------------------------------------------
@@ -624,7 +624,7 @@ class GoogleHTTP:
         try:
             data = json.loads(body[start:])
         except ValueError as exc:
-            raise GoogleHTTPError("no_threads", f"The thread list was not JSON: {exc}")
+            raise GoogleHTTPError("no_threads", f"The thread list was not JSON: {exc}") from exc
         items: List[dict] = []
         seen = set()
 

@@ -1450,22 +1450,10 @@ class GoogleEngine:
             LOG.info("[google-window] single-use sign-in window opened")
 
     def _sign_in_in_progress(self) -> bool:
-        """True only when a sign-in the person is using is *already on screen*.
-
-        `_window_is_live()` answers "a browser process exists", which is true
-        from the moment the window object is created — and that made
-        `open_sign_in` return early on the very first click: the pane decided
-        the sign-in was already open, so nothing was shown, nothing was
-        navigated, and the jar was never wiped. The person saw a click that did
-        nothing at all, which is exactly the report.
-        """
+        """True only when a sign-in the person is using is *already on screen*."""
         if not self._window_is_live():
             return False
-        if getattr(self.window, "is_browser", False) is True:
-            # A browser cannot tell us about a page it has not been given yet:
-            # the only honest signal is whether we navigated it ourselves.
-            return bool(self._sign_in_page_opened)
-        return True
+        return bool(self._sign_in_page_opened)
 
     def _window_is_live(self) -> bool:
         """True when a window object exists and its browser is still running.
@@ -2090,9 +2078,14 @@ class GoogleEngine:
             return
         self.last_error = None
         submitted = False
+        prev_text = ""
         if not first and self.host.endswith("google.com"):
+            prev_raw = self._answer_text()
+            if prev_raw:
+                prev_text = self.clean_answer(prev_raw, "")
             submitted = self._submit_in_page(prompt)
         if not submitted:
+            prev_text = ""
             self.load(self.search_url(prompt, hl))
             time.sleep(0.8)
             # A brand-new page needs its own load event. This wait is bounded
@@ -2111,6 +2104,9 @@ class GoogleEngine:
             if raw is None:
                 continue
             text = self.clean_answer(raw, prompt)
+            if prev_text and text == prev_text and not best and (time.time() - started) < 15.0:
+                # Still showing the prior turn's DOM answer while Google prepares the new reply.
+                continue
             if text and text != best:
                 best = text
                 stable = 0

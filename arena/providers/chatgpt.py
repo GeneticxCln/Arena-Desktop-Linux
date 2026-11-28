@@ -303,6 +303,9 @@ class ChatGPTProvider(WebChatEngine):
                 if not ("/message/content/parts" in path_str or "thoughts" in path_str or "reasoning" in path_str):
                     return
                 is_reason = "thoughts" in path_str or "reasoning" in path_str
+                if is_reason and (path_str.endswith("/summary") or "/summary/" in path_str):
+                    # Thought summary titles (e.g. "Analyzing") must not overwrite the detailed chain of thought.
+                    return
                 if patch_op == "replace":
                     if is_reason:
                         events.append({"type": "reasoning_replace", "text": text_val})

@@ -785,7 +785,7 @@ class EngineResponse:
         else:
             self.status_code = 0
             self.error = str(data)
-            self._finish()
+            self.close()
 
     def _next(self, timeout=None):
         try:
@@ -814,9 +814,10 @@ class EngineResponse:
                 kind, data = self._next()
                 if kind == "chunk":
                     yield str(data)
+                elif kind == "error":
+                    self.error = str(data)
+                    self.close()
                 else:
-                    if kind == "error":
-                        self.error = str(data)
                     self._finish()
         finally:
             if not self._done:
@@ -892,18 +893,24 @@ class BrowserEngine:
         timer.daemon = True
         timer.start()
 
+    @staticmethod
+    def _is_arena_host(host: str) -> bool:
+        h = (host or "").split(":", 1)[0].strip().lower()
+        return h == "arena.ai" or h.endswith(".arena.ai")
+
     def _after_load(self):
         try:
             title = str(self.window.evaluate_js("document.title") or "")
             self.host = str(self.window.evaluate_js("location.host") or "")
         except Exception:
             title = ""
+            self.host = ""
         if "just a moment" in title.lower():
             self.loaded = False
             self.challenge = "cloudflare"
             self._present()
             return
-        if not self.host.endswith("arena.ai"):
+        if not self._is_arena_host(self.host):
             self.loaded = False  # e.g. Google's sign-in page during login
             return
         if self.challenge == "cloudflare":
@@ -975,7 +982,7 @@ class BrowserEngine:
     def open_login(self):
         self.login_open = True
         self._present()
-        if not self.host.endswith("arena.ai"):
+        if not self._is_arena_host(self.host):
             self.window.load_url(contracts.ORIGIN)
 
     def finish_login(self):
@@ -1057,12 +1064,12 @@ class BrowserEngine:
                  if "=" in p and p.strip().startswith(contracts.AUTH_COOKIE_PREFIX)]
         if not pairs or not self.window:
             return False
-        if not self.host.endswith("arena.ai"):
+        if not self._is_arena_host(self.host):
             self.window.load_url(contracts.ORIGIN)
             end = time.time() + 20
-            while time.time() < end and not self.host.endswith("arena.ai"):
+            while time.time() < end and not self._is_arena_host(self.host):
                 time.sleep(0.25)
-        if not (self.host == "arena.ai" or self.host.endswith(".arena.ai")):
+        if not self._is_arena_host(self.host):
             return False  # Never inject account cookies into a different site.
         names = [p.split("=", 1)[0] for p in pairs]
         js = ("(function(keep,pairs,prefix){document.cookie.split(';').forEach(function(c){"

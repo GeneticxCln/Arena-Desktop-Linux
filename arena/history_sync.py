@@ -431,7 +431,7 @@ def merge_messages(local_messages: Any, remote_messages: Any) -> Tuple[List[Dict
     # treated as a real shared turn.
     if local and len(remote) >= len(local) and remote_sigs[:len(local)] == local_sigs:
         merged = []
-        for local_message, remote_message in zip(local, remote):
+        for local_message, remote_message in zip(local, remote, strict=False):
             item = dict(local_message)
             for key, value in remote_message.items():
                 if key == "names" and isinstance(value, dict) and isinstance(item.get("names"), dict):
@@ -448,7 +448,7 @@ def merge_messages(local_messages: Any, remote_messages: Any) -> Tuple[List[Dict
     seen = Counter(local_sigs)
     merged = list(local)
     added = 0
-    for message, signature in zip(remote, remote_sigs):
+    for message, signature in zip(remote, remote_sigs, strict=True):
         if seen[signature] > 0:
             seen[signature] -= 1
             continue
