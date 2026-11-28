@@ -4,7 +4,8 @@ Ported from Codify (https://github.com/GeneticxCln/Codify, ``engine/skills.py``,
 MIT License, Copyright (c) 2026 Codify). The built-ins in ``arena/builtin_skills/``
 are adapted from Codify's ``engine/builtin_skills/`` for Arena's tool names
 (engineering-principles and plain-prose are unchanged). reverse-engineer is adapted from
-leanrea (https://github.com/aicodeking/leanrea, MIT) for Linux and Arena's tools. A skill is a name, a one-line
+leanrea (https://github.com/aicodeking/leanrea, MIT) for Linux and Arena's tools; motion-video
+follows the method of OpenMotion (https://github.com/nexu-io/openmotion, Apache-2.0). A skill is a name, a one-line
 description and a body of instructions. The agent is shown the names and
 descriptions in its tool guide and fetches a body with the ``use_skill`` tool
 only when it wants one, so a long skill costs no context until it is used.
@@ -70,7 +71,9 @@ _SHOWN_COUNT = 5
 # The tools Arena's tool loop offers (see arena/agent.py GUIDE).
 KNOWN_TOOLS = frozenset({
     "ls", "read_file", "read_files", "search", "write_file", "edit_file", "mkdir", "delete",
-    "run_cmd", "ask_user", "propose_plan", "set_todos", "use_skill",
+    "run_cmd", "ask_user", "propose_plan", "set_todos", "use_skill", "mcp_describe", "render_video",
+    "browser_open", "browser_snapshot", "browser_click", "browser_fill", "browser_press", "browser_select",
+    "browser_wait", "browser_read", "browser_screenshot", "browser_back", "browser_close",
 })
 
 # Codify move names with an Arena tool of the same job. Codify moves missing here

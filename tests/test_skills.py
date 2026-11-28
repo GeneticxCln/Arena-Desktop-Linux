@@ -155,3 +155,10 @@ def test_every_builtin_skill_loads_cleanly():
     assert len(found) >= 12
     for skill in found:
         assert skill.description and len(skill.description) <= skills.MAX_DESCRIPTION_CHARS
+
+
+def test_skill_headers_know_every_agent_tool():
+    """A skill may name any tool the agent has; the loader's list must not fall behind."""
+    from arena import agent, permissions
+    tools = (set(permissions.KIND) - {"write_project"}) | set(agent.READ_ONLY_TOOLS) | set(agent.BROWSER_TOOLS)
+    assert tools <= skills.KNOWN_TOOLS, sorted(tools - skills.KNOWN_TOOLS)

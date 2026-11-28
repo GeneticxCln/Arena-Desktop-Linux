@@ -47,6 +47,8 @@ KIND = {
     "browser_select": "browser",
     "browser_back": "browser",
     "browser_close": "browser",
+    # Writes an MP4 into the project, like a file edit.
+    "render_video": "edit",
 }
 
 SAFE_CMD = re.compile(
