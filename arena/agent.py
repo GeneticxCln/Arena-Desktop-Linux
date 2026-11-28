@@ -681,7 +681,19 @@ class LocalTools:
                      or prm.get("value") or "")
             label = name.removeprefix("browser_")
             summary = f"Browser: {label}" + (f" {' '.join(str(what).split())[:80]}" if what else "")
-            return {"tool": name, "path": str(self.root), "rel": ".", "inside": True, "summary": summary}
+            inside = True
+            if name == "browser_open":
+                # This computer and the local network are "outside": opening them always asks
+                # (except in Bypass), so a page cannot quietly steer the agent onto them.
+                from arena import browser_agent
+                try:
+                    inside = not browser_agent.is_private_host(
+                        browser_agent.url_host(browser_agent.check_url(str(prm.get("url") or ""))))
+                except browser_agent.BrowserError:
+                    inside = True  # refused later by check_url with a clear message
+                if not inside:
+                    summary += " (local network)"
+            return {"tool": name, "path": str(self.root), "rel": ".", "inside": inside, "summary": summary}
         if name == "mcp_describe":
             wanted = " ".join(str(prm.get("name") or "").split())[:80]
             return {"tool": name, "path": str(self.root), "rel": ".", "inside": True,

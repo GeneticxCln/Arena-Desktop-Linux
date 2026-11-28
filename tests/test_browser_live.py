@@ -7,9 +7,9 @@ import threading
 from functools import partial
 
 import pytest
+from test_core import FakeResp, events, web  # noqa: F401  (web is a fixture)
 
 from arena import browser_agent as ba
-from test_core import FakeResp, events, web  # noqa: F401  (web is a fixture)
 
 CHROME = ba.find_chrome()
 pytestmark = pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
@@ -109,7 +109,8 @@ def test_agent_turn_drives_the_browser_through_api_chat(web, site, tmp_path, mon
     import json as _json
     appmod, c, cfg, use, sent = web
     cfg["workspace_dir"] = str(tmp_path / "ws")
-    cfg["permission_mode"] = "auto"
+    # The test site is on 127.0.0.1, a local address, which asks even in Auto mode.
+    cfg["permission_mode"] = "bypassPermissions"
     real = ba.ChromeBrowser(chrome_path=CHROME, profile_dir=tmp_path / "profile", headless=True)
     monkeypatch.setattr(ba, "get_browser", lambda headless=True: real)
 
@@ -137,3 +138,39 @@ def test_agent_turn_drives_the_browser_through_api_chat(web, site, tmp_path, mon
         assert results.get("browser_click") is True and results.get("browser_read") is True
     finally:
         real.shutdown()
+
+
+
+def test_chats_recover_after_chrome_exits(browser, site):
+    import os
+    import signal
+    import time
+    browser.tab("a").open(site + "/index.html")
+    os.killpg(browser.pid, signal.SIGKILL)
+    time.sleep(1.0)
+    assert "Title: Next" in browser.tab("b").open(site + "/next.html")   # a new chat restarts Chrome
+    assert "Sign up" in browser.tab("a").open(site + "/index.html")      # the old chat gets a fresh tab
+
+
+def test_an_orphaned_chrome_on_the_profile_is_cleared(site, tmp_path):
+    import os
+    import signal
+    first = ba.ChromeBrowser(chrome_path=CHROME, profile_dir=tmp_path / "p", headless=True)
+    first.tab("x").open(site + "/index.html")
+    orphan = first.pid
+    first._conn, first.pid = None, None        # Arena died without shutting Chrome down
+    second = ba.ChromeBrowser(chrome_path=CHROME, profile_dir=tmp_path / "p", headless=True)
+    try:
+        assert "Sign up" in second.tab("y").open(site + "/index.html")
+        try:
+            os.kill(orphan, 0)
+            alive = open(f"/proc/{orphan}/stat").read().split()[2] != "Z"
+        except ProcessLookupError:
+            alive = False
+        assert not alive
+    finally:
+        second.shutdown()
+        try:
+            os.killpg(orphan, signal.SIGKILL)
+        except ProcessLookupError:
+            pass

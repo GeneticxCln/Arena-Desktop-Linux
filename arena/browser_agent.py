@@ -26,9 +26,11 @@ import atexit
 import base64
 import fcntl
 import fnmatch
+import ipaddress
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import threading
@@ -67,22 +69,50 @@ def find_chrome() -> str | None:
     return None
 
 
+_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+_HOST_PORT_RE = re.compile(r"^(\[[0-9a-fA-F:]+\]|[^:/\[\]]+)(:\d{1,5})?$")
+_PRIVATE_SUFFIXES = (".localhost", ".local", ".internal", ".lan", ".home.arpa")
+
+
+def is_private_host(host: str) -> bool:
+    """True for loopback, private, link-local and local-only names (no DNS lookup)."""
+    name = (host or "").strip().lower().strip("[]")
+    if not name:
+        return False
+    if name == "localhost" or name.endswith(_PRIVATE_SUFFIXES):
+        return True
+    try:
+        ip = ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_unspecified
+
+
+def url_host(url: str) -> str:
+    return (urlparse(url).hostname or "") if url else ""
+
+
 def check_url(url: str) -> str:
-    """The URL to open, or BrowserError for anything that is not a web page."""
+    """The URL to open, or BrowserError for anything that is not a web page.
+
+    Without a scheme, ``example.com/x`` becomes https, while ``localhost:3000``
+    and private addresses become http, which is what local dev servers speak.
+    ``javascript:``, ``data:``, ``file:``, ``view-source:`` and the like are refused.
+    """
     raw = (url or "").strip()
     if not raw:
         raise BrowserError("browser_open needs a URL.")
     if raw == "about:blank":
         return raw
-    if "://" not in raw and not raw.split(":", 1)[0].isalpha():
-        raw = "https://" + raw
-    elif "://" not in raw and ":" in raw and not raw.split(":", 1)[0].replace(".", "").isalnum():
-        raise BrowserError(f"Only http and https pages can be opened, not {raw[:40]!r}.")
+    if not _SCHEME_RE.match(raw):
+        head = raw.split("/", 1)[0]
+        if not _HOST_PORT_RE.match(head):
+            raise BrowserError(f"Only http and https pages can be opened, not {raw[:40]!r}.")
+        host = head.rsplit(":", 1)[0] if not head.startswith("[") else head.split("]", 1)[0] + "]"
+        raw = ("http://" if is_private_host(host) else "https://") + raw
     parsed = urlparse(raw)
     if parsed.scheme not in ("http", "https"):
-        if "://" not in raw and parsed.scheme and not parsed.netloc and "." in parsed.scheme:
-            return check_url("https://" + raw)
-        raise BrowserError(f"Only http and https pages can be opened, not {parsed.scheme or raw[:40]}:.")
+        raise BrowserError(f"Only http and https pages can be opened, not {parsed.scheme}:.")
     if not parsed.netloc:
         raise BrowserError(f"{raw[:80]!r} has no host.")
     return raw
@@ -219,7 +249,10 @@ class CdpPipe:
         self._write_fd = write_fd
         self._read_fd = read_fd
         self._on_event = on_event
+        # _lock guards the reply table only; _write_lock serializes writes. They are
+        # separate so a write blocked on a full pipe never stops replies being delivered.
         self._lock = threading.Lock()
+        self._write_lock = threading.Lock()
         self._next_id = 0
         self._waiting: dict[int, list] = {}
         self._closed = False
@@ -235,16 +268,18 @@ class CdpPipe:
             self._next_id += 1
             msg_id = self._next_id
             self._waiting[msg_id] = slot
-            message = {"id": msg_id, "method": method, "params": params or {}}
-            if session_id:
-                message["sessionId"] = session_id
-            data = json.dumps(message).encode("utf-8") + b"\0"
-            try:
+        message = {"id": msg_id, "method": method, "params": params or {}}
+        if session_id:
+            message["sessionId"] = session_id
+        data = json.dumps(message).encode("utf-8") + b"\0"
+        try:
+            with self._write_lock:
                 while data:
                     data = data[os.write(self._write_fd, data):]
-            except OSError as exc:
+        except OSError as exc:
+            with self._lock:
                 self._waiting.pop(msg_id, None)
-                raise BrowserError(f"The browser connection failed: {exc}") from exc
+            raise BrowserError(f"The browser connection failed: {exc}") from exc
         if not done.wait(timeout):
             with self._lock:
                 self._waiting.pop(msg_id, None)
@@ -345,6 +380,24 @@ class Tab:
                                + str((result["exceptionDetails"].get("exception") or {}).get("description", ""))[:200])
         return (result.get("result") or {}).get("value")
 
+    def _guard_local_network(self, allowed: bool, href: str | None = None) -> None:
+        """Stop a page from steering the browser onto this computer or the local network.
+
+        Opening a local address is asked for explicitly (it never runs without a
+        prompt outside Bypass). A public page that redirects there, or a click
+        that lands there, is turned back to a blank page instead.
+        """
+        if allowed:
+            return
+        if href is None:
+            href = str(self._eval("location.href") or "")
+        if is_private_host(url_host(href)):
+            self._send("Page.navigate", {"url": "about:blank"})
+            self.refs = {}
+            raise BrowserError(
+                f"The page sent the browser to a local-network address ({url_host(href)}), so it was "
+                "stopped. Open that address yourself with browser_open if the user wants it; it will ask first.")
+
     def _backend(self, ref: str) -> int:
         key = (ref or "").strip().lstrip("@")
         if not (key.startswith("e") and key[1:].isdigit()):
@@ -379,16 +432,23 @@ class Tab:
                 raise BrowserError(f"Could not open {target}: {result['errorText']}")
             loaded = self._wait_for_load(before, timeout) if result.get("loaderId") else True
             title, href = self._eval("[document.title, location.href]") or ["", target]
+            self._guard_local_network(is_private_host(url_host(target)), str(href or ""))
             note = "" if loaded else " (still loading; use browser_wait before acting)"
             return f"Opened {href}{note}. Title: {title}"
 
     def snapshot(self, full: bool = False) -> str:
         with self.lock:
             self.last_used = time.time()
+            navigations = self._navigations
             nodes = self._send("Accessibility.getFullAXTree", {}, timeout=20.0).get("nodes") or []
             title, href = self._eval("[document.title, location.href]") or ["", ""]
             text, refs = render_snapshot(nodes, title=title, url=href, full=full)
-            self.refs = refs
+            with self._load_event:
+                if self._navigations != navigations:
+                    # The page navigated while the tree was read: its refs belong to the old page.
+                    self.refs = {}
+                    return text + "\n[The page changed while this snapshot was taken; its refs are void. Take another.]\n"
+                self.refs = refs
             return text
 
     def click(self, ref: str) -> str:
@@ -402,6 +462,7 @@ class Tab:
                 raise BrowserError(f"Cannot click {ref}: {exc}. Take a new browser_snapshot.") from exc
             if not quads:
                 raise BrowserError(f"{ref} is not visible on the page, so it cannot be clicked.")
+            was_local = is_private_host(url_host(str(self._eval("location.href") or "")))
             quad = quads[0]
             x = sum(quad[0::2]) / 4
             y = sum(quad[1::2]) / 4
@@ -414,6 +475,7 @@ class Tab:
             time.sleep(0.15)
             if self._navigations != navigations:
                 self._wait_for_load(loads, 10.0)
+                self._guard_local_network(was_local)
                 return f"Clicked {ref}; the page navigated, so take a new browser_snapshot."
             return f"Clicked {ref}."
 
@@ -444,11 +506,13 @@ class Tab:
         with self.lock:
             self.last_used = time.time()
             navigations, loads = self._navigations, self._loads
+            was_local = is_private_host(url_host(str(self._eval("location.href") or "")))
             self._send("Input.dispatchKeyEvent", down)
             self._send("Input.dispatchKeyEvent", up)
             time.sleep(0.1)
             if self._navigations != navigations:
                 self._wait_for_load(loads, 10.0)
+                self._guard_local_network(was_local)
                 return f"Pressed {key}; the page navigated, so take a new browser_snapshot."
             return f"Pressed {key}."
 
@@ -550,11 +614,19 @@ class ChromeBrowser:
     def _ensure(self) -> CdpPipe:
         if self._conn is not None and not self._conn._closed:
             return self._conn
+        if self._conn is not None:
+            # Chrome exited or crashed: forget its tabs (each chat gets a fresh one) and reap it.
+            self._conn.close()
+            self._conn = None
+            self.tabs = {}
+            self._reap(self.pid)
+            self.pid = None
         chrome = self.chrome_path or find_chrome()
         if not chrome:
             raise BrowserError("Chrome or Chromium is not installed, so the browser tools are unavailable.")
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(self.profile_dir, 0o700)
+        self._clear_orphan()
         # Our ends stay in this process; the child's ends are moved to fds 3 and 4.
         cmd_read, cmd_write = os.pipe()
         resp_read, resp_write = os.pipe()
@@ -583,6 +655,59 @@ class ChromeBrowser:
         LOG.info("agent browser started (pid %s, headless=%s)", self.pid, self.headless)
         return self._conn
 
+    @staticmethod
+    def _reap(pid: int | None) -> None:
+        if not pid:
+            return
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+
+    def _clear_orphan(self) -> None:
+        """Stop a Chrome left running on this private profile by an Arena that crashed.
+
+        Chrome hands a second launch on the same profile to the running one and
+        exits, so the orphan would block every later start. The profile belongs
+        to the agent alone, so a Chrome holding it is ours to stop.
+        """
+        lock = self.profile_dir / "SingletonLock"
+        try:
+            target = os.readlink(lock)
+        except OSError:
+            return
+        pid_text = target.rsplit("-", 1)[-1]
+        if not pid_text.isdigit():
+            return
+        pid = int(pid_text)
+        try:
+            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ")
+        except OSError:
+            cmdline = b""
+        if str(self.profile_dir).encode() in cmdline:
+            LOG.warning("stopping an orphaned agent Chrome (pid %s) left on the profile", pid)
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.killpg(os.getpgid(pid), sig)
+                except (ProcessLookupError, PermissionError):
+                    break
+                for _ in range(20):
+                    if not Path(f"/proc/{pid}").exists():
+                        break
+                    time.sleep(0.1)
+                else:
+                    continue
+                break
+        for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+            try:
+                (self.profile_dir / name).unlink()
+            except OSError:
+                pass
+
     def _dispatch(self, session_id: str | None, method: str, params: dict) -> None:
         for tab in list(self.tabs.values()):
             if tab.session_id == session_id:
@@ -592,7 +717,7 @@ class ChromeBrowser:
     def tab(self, key: str) -> Tab:
         with self._lock:
             existing = self.tabs.get(key)
-            if existing is not None and self._conn is not None and not self._conn._closed:
+            if existing is not None and existing.conn is self._conn and not self._conn._closed:
                 return existing
             conn = self._ensure()
             target_id = conn.send("Target.createTarget", {"url": "about:blank"})["targetId"]
