@@ -3,7 +3,8 @@
 Ported from Codify (https://github.com/GeneticxCln/Codify, ``engine/skills.py``,
 MIT License, Copyright (c) 2026 Codify). The built-ins in ``arena/builtin_skills/``
 are adapted from Codify's ``engine/builtin_skills/`` for Arena's tool names
-(engineering-principles and plain-prose are unchanged). A skill is a name, a one-line
+(engineering-principles and plain-prose are unchanged). reverse-engineer is adapted from
+leanrea (https://github.com/aicodeking/leanrea, MIT) for Linux and Arena's tools. A skill is a name, a one-line
 description and a body of instructions. The agent is shown the names and
 descriptions in its tool guide and fetches a body with the ``use_skill`` tool
 only when it wants one, so a long skill costs no context until it is used.

@@ -574,22 +574,34 @@ class ConnectorManager:
         return entry["client"].call_tool(entry["tool"], arguments or {}, timeout=90)
 
     @staticmethod
-    def guide(tool_map: Dict[str, Dict[str, Any]], limit: int = 14000) -> str:
+    def guide(tool_map: Dict[str, Dict[str, Any]], limit: int = 24000) -> str:
+        """The connector section of the tool guide: each tool by name and one line.
+
+        Input schemas are not inlined (they can run to megabytes across servers);
+        the model reads one with mcp_describe when it is about to call that tool.
+        Past ``limit`` the remaining tools are still named, never silently dropped.
+        """
         if not tool_map:
             return ""
         lines = [
-            "\nExternal MCP connector tools are also available. Call one exactly like this, with valid JSON inside <arguments>:",
-            "<tool name=\"mcp__server__tool\"><arguments>{\"argument\": \"value\"}</arguments></tool>",
+            "\nExternal MCP connector tools are also available. Before calling one for the first time, "
+            "read its inputs with:",
+            '<tool name="mcp_describe"><name>mcp__server__tool</name></tool>',
+            "Then call it with valid JSON inside <arguments>:",
+            '<tool name="mcp__server__tool"><arguments>{"argument": "value"}</arguments></tool>',
         ]
+        size = sum(len(x) + 1 for x in lines)
+        rest: list = []
         for alias, item in tool_map.items():
-            schema = json.dumps(item.get("input_schema") or {}, ensure_ascii=False, separators=(",", ":"))
-            if len(schema) > 900:
-                schema = schema[:900] + "…"
-            desc = " ".join(str(item.get("description") or "").split())[:500]
-            lines.append(f"- {alias}: {desc}\n  inputSchema: {schema}")
-            if sum(len(x) + 1 for x in lines) > limit:
-                lines.append("- … more MCP tools omitted from this prompt; use the tools listed above.")
-                break
+            if size > limit:
+                rest.append(alias)
+                continue
+            desc = " ".join(str(item.get("description") or "").split())
+            line = f"- {alias}: {desc[:200]}" if desc else f"- {alias}"
+            lines.append(line)
+            size += len(line) + 1
+        if rest:
+            lines.append("- More tools (descriptions via mcp_describe): " + ", ".join(rest))
         return "\n".join(lines) + "\n"
 
     def shutdown(self) -> None:
@@ -603,3 +615,20 @@ def open_config_file(path: Optional[Path] = None) -> Path:
     subprocess.Popen(["xdg-open", str(target)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      start_new_session=True)
     return target
+
+
+def describe_tool(tool_map: Dict[str, Dict[str, Any]], name: str, limit: int = 8000) -> str:
+    """One connector tool's description and full input schema, for the mcp_describe tool."""
+    alias = (name or "").strip()
+    item = (tool_map or {}).get(alias)
+    if item is None:
+        import difflib
+        close = difflib.get_close_matches(alias, list(tool_map or {}), n=5, cutoff=0.4)
+        hint = f" Did you mean: {', '.join(close)}?" if close else ""
+        return f"No MCP tool named {alias[:80]!r}.{hint}"
+    schema = json.dumps(item.get("input_schema") or {}, ensure_ascii=False, indent=1)
+    if len(schema) > limit:
+        schema = schema[:limit] + "\n... (schema cut)"
+    desc = " ".join(str(item.get("description") or "").split())
+    return (f"{alias} (server {item.get('server', '?')})\n{desc}\n"
+            f"Call it with <tool name=\"{alias}\"><arguments>{{...}}</arguments></tool> using this input schema:\n{schema}")

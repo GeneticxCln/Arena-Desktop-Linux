@@ -91,7 +91,7 @@ MODE_NOTES = {
 
 
 READ_ONLY_TOOLS = {"ls", "read_file", "read_files", "search", "ask_user", "propose_plan", "set_todos", "use_skill",
-                   "browser_snapshot", "browser_read", "browser_wait", "browser_screenshot"}
+                   "browser_snapshot", "browser_read", "browser_wait", "browser_screenshot", "mcp_describe"}
 BROWSER_TOOLS = ("browser_open", "browser_snapshot", "browser_click", "browser_fill", "browser_press",
                  "browser_select", "browser_wait", "browser_read", "browser_screenshot", "browser_back",
                  "browser_close")
@@ -605,6 +605,8 @@ class LocalTools:
         # browser tools are switched off. browser_key picks this chat's own tab.
         self.browser = browser
         self.browser_key = browser_key
+        # Connector tools for this turn (set once they are known); mcp_describe reads from it.
+        self.mcp_tools: dict = {}
 
     def _is_protected_write_path(self, target: Path) -> bool:
         """Protect sensitive repo/checkpoint metadata (.git/config, .git/hooks, checkpoints) from auto-writes."""
@@ -680,6 +682,10 @@ class LocalTools:
             label = name.removeprefix("browser_")
             summary = f"Browser: {label}" + (f" {' '.join(str(what).split())[:80]}" if what else "")
             return {"tool": name, "path": str(self.root), "rel": ".", "inside": True, "summary": summary}
+        if name == "mcp_describe":
+            wanted = " ".join(str(prm.get("name") or "").split())[:80]
+            return {"tool": name, "path": str(self.root), "rel": ".", "inside": True,
+                    "summary": f"MCP: describe {wanted or '?'}"}
         if name == "use_skill":
             wanted = " ".join(str(prm.get("name") or "").split())[:64]
             return {"tool": name, "path": str(self.root), "rel": ".", "inside": True,
@@ -788,6 +794,13 @@ class LocalTools:
         browser = self.browser() if self.browser is not None else None
         closed = bool(browser) and browser.close_tab(self.browser_key)
         return "Closed this chat's browser tab." if closed else "This chat had no browser tab open."
+
+    def _t_mcp_describe(self, prm) -> str:
+        from arena import connectors
+        out = connectors.describe_tool(self.mcp_tools, str(prm.get("name") or ""))
+        if out.startswith("No MCP tool named"):
+            raise LookupError(out)
+        return out
 
     def _t_use_skill(self, prm) -> str:
         """A skill's instructions: text for the model to follow, never anything that runs."""

@@ -34,6 +34,7 @@ KIND = {
     "delete": "delete",
     "run_cmd": "shell",
     "use_skill": "read",
+    "mcp_describe": "read",
     # Browser tools: looking is a read; acting on a page is its own kind.
     "browser_snapshot": "read",
     "browser_read": "read",

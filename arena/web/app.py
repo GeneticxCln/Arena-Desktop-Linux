@@ -8500,6 +8500,8 @@ def _agent_run(client: ArenaClient, message: str, conv: dict):
         mcp_tools = {}
         yield _sse({"type": "notice", "text": f"MCP connectors are unavailable for this turn: {e}"})
     mcp_guide = CONNECTORS.guide(mcp_tools)
+    for lane_tools in tools.values():
+        lane_tools.mcp_tools = mcp_tools
     # The skill menu has its own hash so each part is resent only when it changes,
     # and chats started before skills existed learn about them once.
     skills_section = agent.skills_guide(skill_set) + agent.browser_guide(browser is not None)
@@ -11202,6 +11204,7 @@ def _provider_track_stream(
             except Exception as exc:
                 mcp_tools = {}
                 yield _sse({"type": "notice", "text": f"MCP connectors unavailable: {exc}"})
+            local_tools.mcp_tools = mcp_tools
             mcp_guide = ((CONNECTORS.guide(mcp_tools) if mcp_tools else "") + agent.skills_guide(local_tools.skills)
                          + agent.browser_guide(local_tools.browser is not None))
 

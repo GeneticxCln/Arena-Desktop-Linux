@@ -20,6 +20,7 @@ has more than one plausible skill.
 | a wide but shallow audit (every file, route, key) | `wide-audit` |
 | a security review | `security-review` |
 | an explanation of how code works | `explain-code` |
+| how shipped software (an app, binary, APK, bundle) works | `reverse-engineer` |
 | a design or debugging decision | `engineering-principles` |
 | prose, docs or comments that sound generated | `plain-prose` |
 
