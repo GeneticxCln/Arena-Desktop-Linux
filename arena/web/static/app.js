@@ -11871,6 +11871,31 @@ You can start with a more structured option: one script, short captions, and a c
           el('span', { text: 'Bypass is on: the Local Agent can change files and run commands in your folder without asking.' })));
       }
 
+      wrap.appendChild(el('h3', { class: 'modal-section-title', text: 'Browser tools' }));
+      wrap.appendChild(el('p', { class: 'modal-copy', text: 'Lets the Local Agent and the provider tabs open web pages in a private Chrome (its own profile, never yours; one tab per chat), read them, click and fill forms. Opening and clicking follow the permission mode above: Default asks, Accept edits and Auto allow, Plan blocks.' }));
+      const browserCfg = state.appSettings || {};
+      const browserSwitch = (label, key, checked, onSave) => {
+        const input = el('input', { type: 'checkbox', class: 'switch-input', checked, 'aria-label': label, disabled: controlsDisabled });
+        input.addEventListener('change', async () => {
+          input.disabled = true;
+          try {
+            await API.saveSettings({ [key]: onSave(input.checked) });
+            state.appSettings = { ...(state.appSettings || {}), [key]: onSave(input.checked) };
+          } catch (error) {
+            input.checked = !input.checked;
+            toast(errorMessage(error), 'error', 'Browser tools');
+          }
+          input.disabled = false;
+        });
+        return el('label', { class: 'setting-toggle-row' }, el('span', { text: label }),
+          el('span', { class: 'switch' }, input, el('span', { class: 'switch-track', 'aria-hidden': 'true' })));
+      };
+      wrap.appendChild(browserSwitch('Browser tools for agents', 'browser_tools_enabled',
+        browserCfg.browser_tools_enabled !== false, (on) => on));
+      // Stored as browser_headless, shown the way people think about it.
+      wrap.appendChild(browserSwitch('Show the agent\u2019s browser window', 'browser_headless',
+        browserCfg.browser_headless === false, (on) => !on));
+
       wrap.appendChild(el('h3', { class: 'modal-section-title', text: 'Agent for new chats' }));
       wrap.appendChild(el('p', { class: 'modal-copy', text: 'Which agent new Agent Mode chats use. A started chat keeps its own agent.' }));
       const agentCards = el('div', { class: 'radio-cards' });
@@ -13132,7 +13157,8 @@ You can start with a more structured option: one script, short captions, and a c
       hydrated[cacheKey] = true;
       if (state.serverError || state.networkOffline) return;
       if (tab === 'permissions') {
-        Promise.allSettled([loadPermissionModeFromServer({ quiet: true }), loadPermissions({ quiet: true })])
+        Promise.allSettled([loadPermissionModeFromServer({ quiet: true }), loadPermissions({ quiet: true }),
+          API.getSettings().then((data) => { state.appSettings = data; })])
           .then(() => { if (state.settingsTab === 'permissions') refreshPanel(); });
       } else if (tab === 'connection' && state.settingsTrack === 'google') {
         loadGoogleStatus({ silent: true }).then(() => { if (state.settingsTab === 'connection') refreshPanel(); });

@@ -61,7 +61,6 @@ from arena.config import (
     atomic_write_text,
     ensure_config_dir,
     load_config,
-    restrict_permissions,
     save_config,
 )
 from arena.deep_links import parse_deep_link
@@ -282,6 +281,7 @@ def _find_preview_url(val):
 
 from arena import (
     agent,
+    browser_agent,
     components,
     connectors,
     contracts,
@@ -2278,6 +2278,7 @@ _TRACKED_SETTING_KEYS = frozenset({
     "persona", "show_reasoning", "auto_copy", "auto_continue", "elo_enabled",
     "cheap_subagents", "multi_session_subagents", "account_failover", "pacing",
     "pacing_preset", "browser", "agent_kind", "skills_disabled",
+    "browser_tools_enabled", "browser_headless",
 })
 
 
@@ -4814,6 +4815,23 @@ def _sse_wrap(gen, chat_id=None, *, already_reserved: bool = False):
 def _workspace_dir() -> Path:
     raw = _settings_value("workspace_dir")
     return Path(raw).expanduser() if raw else workspace.PROJECTS_DIR / "workspace"
+
+
+def _browser_tools_on() -> bool:
+    return _settings_value("browser_tools_enabled") is not False
+
+
+def _agent_browser():
+    """The callable LocalTools uses to reach the agent's Chrome, or None when switched off."""
+    if not _browser_tools_on():
+        return None
+    headless = _settings_value("browser_headless") is not False
+
+    def get():
+        browser = browser_agent.get_browser(headless=headless)
+        browser.close_idle()
+        return browser
+    return get
 
 
 def _skill_set(root) -> "skills.SkillSet":
@@ -8468,7 +8486,10 @@ def _agent_run(client: ArenaClient, message: str, conv: dict):
     lanes = ("a", "b") if conv["mode"] in ("battle", "side-by-side") else ("a",)
     dual = len(lanes) == 2
     skill_set = _skill_set(root)
-    tools = {l: agent.LocalTools(root, root / agent.LANE_DIRS[l] if dual else None, skills=skill_set)
+    browser = _agent_browser()
+    chat_key = str(conv.get("chat_id") or "default")
+    tools = {l: agent.LocalTools(root, root / agent.LANE_DIRS[l] if dual else None, skills=skill_set,
+                                 browser=browser, browser_key=f"{chat_key}:{l}" if dual else chat_key)
              for l in lanes}
     mode = _perm_mode()
     total = {"a": "", "b": ""}
@@ -8481,7 +8502,7 @@ def _agent_run(client: ArenaClient, message: str, conv: dict):
     mcp_guide = CONNECTORS.guide(mcp_tools)
     # The skill menu has its own hash so each part is resent only when it changes,
     # and chats started before skills existed learn about them once.
-    skills_section = agent.skills_guide(skill_set)
+    skills_section = agent.skills_guide(skill_set) + agent.browser_guide(browser is not None)
     skills_hash = hashlib.sha1(skills_section.encode("utf-8")).hexdigest()[:12] if skills_section else None
     if mcp_tools:
         yield _sse({"type": "agent", "stage": f"MCP tools available: {len(mcp_tools)}",
@@ -11167,7 +11188,8 @@ def _provider_track_stream(
         error_msg = ""
         stop_evt = getattr(_tl, "stop_event", None)
         perm_mode = _perm_mode()
-        local_tools = (agent.LocalTools(ws_root, skills=_skill_set(ws_root))
+        local_tools = (agent.LocalTools(ws_root, skills=_skill_set(ws_root), browser=_agent_browser(),
+                                        browser_key=str(chat_id))
                        if use_local_tools and ws_root is not None else None)
         mcp_tools: dict = {}
         mcp_guide = ""
@@ -11180,7 +11202,8 @@ def _provider_track_stream(
             except Exception as exc:
                 mcp_tools = {}
                 yield _sse({"type": "notice", "text": f"MCP connectors unavailable: {exc}"})
-            mcp_guide = (CONNECTORS.guide(mcp_tools) if mcp_tools else "") + agent.skills_guide(local_tools.skills)
+            mcp_guide = ((CONNECTORS.guide(mcp_tools) if mcp_tools else "") + agent.skills_guide(local_tools.skills)
+                         + agent.browser_guide(local_tools.browser is not None))
 
         turn_prompt = message
         turn_memory = memory_prefix
@@ -13487,6 +13510,7 @@ def shutdown_runtime() -> dict:
         LOG.exception("shutdown: connectors shutdown failed")
     try:
         providers.shutdown_all()
+        browser_agent.shutdown()
         report["providers_shutdown"] = True
     except Exception:
         LOG.exception("shutdown: providers shutdown failed")

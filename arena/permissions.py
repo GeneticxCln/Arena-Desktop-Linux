@@ -23,18 +23,43 @@ MODES: dict[str, str] = {
     "bypassPermissions": "Bypass permissions",
 }
 
-KIND = {"read_file": "read", "ls": "read", "search": "read",
-        "write_file": "edit", "edit_file": "edit", "mkdir": "edit", "write_project": "edit",
-        "delete": "delete", "run_cmd": "shell", "use_skill": "read"}
+KIND = {
+    "read_file": "read",
+    "ls": "read",
+    "search": "read",
+    "write_file": "edit",
+    "edit_file": "edit",
+    "mkdir": "edit",
+    "write_project": "edit",
+    "delete": "delete",
+    "run_cmd": "shell",
+    "use_skill": "read",
+    # Browser tools: looking is a read; acting on a page is its own kind.
+    "browser_snapshot": "read",
+    "browser_read": "read",
+    "browser_wait": "read",
+    "browser_screenshot": "read",
+    "browser_open": "browser",
+    "browser_click": "browser",
+    "browser_fill": "browser",
+    "browser_press": "browser",
+    "browser_select": "browser",
+    "browser_back": "browser",
+    "browser_close": "browser",
+}
 
 SAFE_CMD = re.compile(
     r"^\s*(dir|ls|pwd|echo|type|cat|where|which|tree|git\s+(status|log|diff|show|branch)|"
     r"(python|py)(\s+-m)?\s+(pytest|unittest|--version)|node\s+(--version|-v)|"
-    r"npm\s+(test|ls|-v|--version)|npm\s+run\s+(test|build|lint))\b", re.IGNORECASE)
+    r"npm\s+(test|ls|-v|--version)|npm\s+run\s+(test|build|lint))\b",
+    re.IGNORECASE,
+)
 # Block newlines, NULs, shell metacharacters, dangerous flags/paths on otherwise-read commands
 SHELL_META = re.compile(
     r"[\r\n\x00;&|<>`$]|\b(del|erase|rm|rmdir|rd|format|curl|wget|iwr|invoke-webrequest|"
-    r"powershell|pwsh|reg|shutdown|move|mv)\b", re.IGNORECASE)
+    r"powershell|pwsh|reg|shutdown|move|mv)\b",
+    re.IGNORECASE,
+)
 _UNSAFE_SAFE_CMD_ARGS = re.compile(
     r"(--output\b|--ext-diff\b|--textconv\b|--no-index\b|"
     r"\bgit\s+branch\b.*\s(?:-[a-zA-Z]*[dDmMcCf]\b|--delete\b|--move\b|--copy\b|--force\b)|"
@@ -46,7 +71,9 @@ CATASTROPHIC = re.compile(
     r"(?:--no-preserve-root\s+)?(?:/\*?|~/?|\*|\$HOME\b|\$\{HOME\}|[a-z]:[\\/]?)(?:\s|$)|"
     r"\bformat\s+[a-z]:|"
     r"\b(rd|rmdir)\s+/s\s+(/q\s+)?[a-z]:[\\/]?\s*$|\bdel\s+(/[a-z]\s+)*[a-z]:[\\/]\*|\bmkfs\b|"
-    r"\bshutdown\b|:\(\)\s*\{|\bdiskpart\b|\bbcdedit\b|\bvssadmin\s+delete\b|\bcipher\s+/w)", re.IGNORECASE)
+    r"\bshutdown\b|:\(\)\s*\{|\bdiskpart\b|\bbcdedit\b|\bvssadmin\s+delete\b|\bcipher\s+/w)",
+    re.IGNORECASE,
+)
 
 
 def normalize(mode: str | None) -> str:
@@ -97,6 +124,8 @@ def decide(mode: str, tool: str, inside: bool = True, command: str = "") -> str:
         return "ask"
     if kind == "edit":
         return "allow" if mode in ("acceptEdits", "auto") else "ask"
+    if kind == "browser":
+        return "allow" if mode in ("acceptEdits", "auto") else "ask"
     if kind == "delete":
         return "allow" if mode == "auto" else "ask"
     if mode == "auto" and _is_safe_auto_cmd(command or ""):
@@ -135,8 +164,11 @@ class PermissionBroker:
     def ask(self, info: dict) -> str:
         pid = uuid.uuid4().hex[:12]
         with self._lock:
-            self._pending[pid] = {"event": threading.Event(), "decision": None,
-                                  "info": dict(info, id=pid, created=time.time())}
+            self._pending[pid] = {
+                "event": threading.Event(),
+                "decision": None,
+                "info": dict(info, id=pid, created=time.time()),
+            }
         return pid
 
     def resolve(self, pid: str, decision: str) -> bool:
