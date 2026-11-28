@@ -206,7 +206,26 @@ def test_video_render_portrait_out_mp4_and_seek_exception(tmp_path, monkeypatch)
         def close_tab(self, key):
             self.closed.append(key)
 
+    class _FakeProc:
+        def __init__(self, *args, **kwargs):
+            import io
+            self.stdin = io.BytesIO()
+            self.stderr = io.BytesIO()
+            self._rc = None
+
+        def poll(self):
+            return self._rc
+
+        def kill(self):
+            self._rc = -9
+
+        def wait(self, timeout=None):
+            if self._rc is None:
+                self._rc = 0
+            return self._rc
+
     monkeypatch.setattr(video_render.shutil, "which", lambda name: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(video_render.subprocess, "Popen", _FakeProc)
     with pytest.raises(video_render.RenderError, match="boom"):
         video_render.render(_FakeBrowser(), spec, key="k1")
 
